@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
 import { killTree, runPowerShellJson } from '../lib/ps.mjs';
+import { describePowerShellFailure } from '../tests/windows/clixml.mjs';
 import { launchServer, recordServerAndEngine, isNodeServer, launchSpec } from './server-under-test.mjs';
 import { verifyEngineProcess } from '../tests/windows/launch.mjs';
 import { localHttps } from './tun-test-https.mjs';
@@ -36,17 +37,33 @@ let httpsResponder, localTarget;
 
 const dataDir = await mkdtemp(path.join(tmpdir(), 'net-switch-e2e-'));
 await recordServerAndEngine();
+// A cold Windows PowerShell 5.1 writes its "Preparing modules for first use"
+// progress record to stderr. That is not a failure, but it fills the captured
+// stderr and buries the real error, so every call silences progress.
+const QUIET = `$ProgressPreference = 'SilentlyContinue'
+$InformationPreference = 'SilentlyContinue'
+`;
+
+async function powershellJson(script) {
+  try {
+    return await runPowerShellJson(`${QUIET}${script}`);
+  } catch (error) {
+    throw new Error(describePowerShellFailure(error), { cause: error });
+  }
+}
 let staleSystemPID = null;
 if (process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted') {
   // Get-Process reads the running token's owner directly. A CIM service scan
   // can spend the whole deadline loading WMI on a cold ARM64 runner, and a
   // configured service account is weaker evidence than the live identity.
-  staleSystemPID = await runPowerShellJson(`$ProgressPreference = 'SilentlyContinue'
-$system = (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18').Translate([Security.Principal.NTAccount]).Value
-$process = Get-Process -Name svchost -IncludeUserName -ErrorAction Stop | Where-Object { $_.UserName -eq $system } | Select-Object -First 1
-if (-not $process) { throw 'No running SYSTEM svchost available for stale PID proof' }
+  // winlogon runs as SYSTEM for the life of the session. An arbitrary svchost
+  // can exit on its own during the test (jobs 120949316352 and 120614380814),
+  // which the final liveness check cannot tell apart from a stop.
+  staleSystemPID = await powershellJson(`$system = (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18').Translate([Security.Principal.NTAccount]).Value
+$process = Get-Process -Name winlogon -IncludeUserName -ErrorAction Stop | Where-Object { $_.UserName -eq $system } | Select-Object -First 1
+if (-not $process) { throw 'No running SYSTEM winlogon available for stale PID proof' }
 [int]$process.Id | ConvertTo-Json -Compress`);
-  console.log(`SYSTEM svchost PID for stale-PID proof: ${staleSystemPID}`);
+  console.log(`SYSTEM winlogon PID for stale-PID proof: ${staleSystemPID}`);
   await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
 }
 const server = launchServer(dataDir);
@@ -215,7 +232,7 @@ try {
   session = await until('the server starting', async () => JSON.parse(await readFile(path.join(dataDir, 'server.json'), 'utf8')), 60);
   let state = await routingOn();
   await verifyEngineProcess(launchSpec, dataDir);
-  if (staleSystemPID) check(Number(await readFile(path.join(dataDir, 'engine.pid'), 'utf8')) !== staleSystemPID, 'start replaced a stale SYSTEM svchost PID');
+  if (staleSystemPID) check(Number(await readFile(path.join(dataDir, 'engine.pid'), 'utf8')) !== staleSystemPID, 'start replaced a stale SYSTEM process PID');
   if (staleSystemPID && !isNodeServer) {
     const { stdout, stderr } = await promisify(execFile)('go', ['test', '-v', '-count=1', '-timeout=90s', '-run=^TestReadWorkerCannotWriteControlHKLMOrTCP$', './internal/platform/worker'], {
       cwd: ROOT, windowsHide: true, timeout: 120_000, maxBuffer: 2 * 1024 * 1024,
@@ -240,7 +257,7 @@ try {
   const second = state.lines[1];
   const proxyPort = state.routing.proxyPort;
 
-  const address = await runPowerShellJson(`(Get-NetIPAddress -InterfaceAlias '${main.alias.replaceAll("'", "''")}' -AddressFamily IPv4 | Where-Object AddressState -eq 'Preferred' | Select-Object -First 1).IPAddress | ConvertTo-Json -Compress`);
+  const address = await powershellJson(`(Get-NetIPAddress -InterfaceAlias '${main.alias.replaceAll("'", "''")}' -AddressFamily IPv4 | Where-Object AddressState -eq 'Preferred' | Select-Object -First 1).IPAddress | ConvertTo-Json -Compress`);
   httpsResponder = await localHttps(address);
   localTarget = { ...httpsResponder.target, host: address, port: httpsResponder.port };
   // Exactly one public request: a local peer cannot prove real internet egress.
@@ -288,16 +305,16 @@ try {
     await api('routing', { on: false });
     await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
     await api('routing', { on: false });
-    check(await readFile(path.join(dataDir, 'engine.pid')).then(() => false, (error) => error.code === 'ENOENT'), 'Turn off removed a stale SYSTEM svchost PID');
+    check(await readFile(path.join(dataDir, 'engine.pid')).then(() => false, (error) => error.code === 'ENOENT'), 'Turn off removed a stale SYSTEM process PID');
     await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
   }
   await api('quit', {});
   await until('the server ending', async () => server.exitCode !== null, 30);
   check(server.exitCode === 0, 'quitting stops routing and ends the server');
   if (staleSystemPID) {
-    check(await readFile(path.join(dataDir, 'engine.pid')).then(() => false, (error) => error.code === 'ENOENT'), 'Quit removed a stale SYSTEM svchost PID');
-    const name = await runPowerShellJson(`(Get-Process -Id ${staleSystemPID} -ErrorAction Stop).ProcessName | ConvertTo-Json -Compress`);
-    check(name === 'svchost', 'the SYSTEM process was never stopped');
+    check(await readFile(path.join(dataDir, 'engine.pid')).then(() => false, (error) => error.code === 'ENOENT'), 'Quit removed a stale SYSTEM process PID');
+    const name = await powershellJson(`(Get-Process -Id ${staleSystemPID} -ErrorAction Stop).ProcessName | ConvertTo-Json -Compress`);
+    check(name === 'winlogon', 'the SYSTEM process was never stopped');
   }
   console.log('routing end-to-end test passed');
 } catch (error) {
