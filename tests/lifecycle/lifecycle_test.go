@@ -383,15 +383,18 @@ func TestRealServices(t *testing.T) {
 	if err := lifecycle.Save(filepath.Join(data, "service-config.json"), config); err != nil {
 		t.Fatal(err)
 	}
-	fixture := prepareTUN(t, dir, data)
+	// The runner's uplink is read before the fixture reroutes the runner: once
+	// TestISP carries the preferred default route, the egress interface is the
+	// fixture itself, which is already line a1 and cannot be added again.
 	nic, _ := primaryInterface(t)
+	fixture := prepareTUN(t, dir, data)
 	if err := lifecycle.Save(filepath.Join(data, "settings.json"), map[string]any{"lines": []lines.Line{{ID: "a1", Alias: fixture.line, Label: "Test line", Weight: 1}}, "ipv6": "off", "checkForUpdates": false}); err != nil {
 		t.Fatal(err)
 	}
 	if err := service.Install(service.Config{Directory: dir, Data: data, Native: true}); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 38*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
 	defer cancel()
 	t.Cleanup(func() {
 		cleanup, stop := context.WithTimeout(context.Background(), 45*time.Second)
@@ -664,7 +667,7 @@ func TestRealServices(t *testing.T) {
 		stream := routedStream(t, ctx, fixture)
 		defer stream.Close()
 		fixture.exchange(t, stream)
-		assertTUNCaptured(t, session.URL, session.Token, fixture)
+		assertTUNCaptured(t, stream, fixture)
 	})
 	t.Run("owner-sees-another-users-app", func(t *testing.T) {
 		path := filepath.Join(dir, binary("lifecycle-other-app"))
@@ -1101,6 +1104,7 @@ func TestRealServices(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		controlDied := time.Now()
 		kill(t, control.PID)
 		fixture.exchange(t, stream)
 		select {
@@ -1109,6 +1113,13 @@ func TestRealServices(t *testing.T) {
 			t.Fatal("interrupted apply did not release HTTP")
 		}
 		wait(t, "lease stops a blocked engine command", 50*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
+		// The same fail-open bound as a lapse with no command in flight: the
+		// 30 s lease, one tick, the 5 s stall wait, then the host's cleanup.
+		stoppedAfter := time.Since(controlDied)
+		if stoppedAfter > 42*time.Second {
+			t.Fatal("blocked command outlived the fail-open bound from Control's death", stoppedAfter)
+		}
+		t.Logf("BLOCKED_APPLY engine_stopped_after=%s bound=42s", stoppedAfter)
 		expectClosed(t, stream)
 		directTraffic(t, ctx, fixture)
 		restore()

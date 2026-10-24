@@ -48,17 +48,22 @@ type Server struct {
 	expires                     time.Time
 	attached, stopping, stopped bool
 	leaseExpired                bool
-	runtime                     Runtime
-	table                       *flows.Table
-	prober                      platform.Prober
-	operations                  map[string]*operation
-	order                       []string
-	clients                     map[*connection]struct{}
-	controller                  *connection
-	terminal                    *terminalDelivery
-	EventsDropped               atomic.Uint64
-	done                        chan struct{}
-	doneOnce                    sync.Once
+	// stopInFlight is set when a controller's stop is running its cleanup.
+	// The lease loop then waits for that cleanup however long it takes (the
+	// host bounds the process); only a lapse with no stop in flight may take
+	// the stall exit below.
+	stopInFlight  bool
+	runtime       Runtime
+	table         *flows.Table
+	prober        platform.Prober
+	operations    map[string]*operation
+	order         []string
+	clients       map[*connection]struct{}
+	controller    *connection
+	terminal      *terminalDelivery
+	EventsDropped atomic.Uint64
+	done          chan struct{}
+	doneOnce      sync.Once
 	// TestFault is nil in production. Acceptance binaries install it explicitly.
 	TestFault        func(context.Context, json.RawMessage) (any, error)
 	OnCleanupFailure func(error)
@@ -220,6 +225,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		return true, nil
 	}
 	if r.Method == "stop" && s.stopping && r.Instance == s.Instance && r.Epoch == s.epoch {
+		s.stopInFlight = true
 		s.mu.Unlock()
 		err := s.explicitStop(ctx)
 		s.mu.Lock()
@@ -308,7 +314,7 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		defer s.mu.Lock()
 		return s.runtime.Apply(ctx, *r.Revision)
 	case "stop":
-		s.stopping = true
+		s.stopping, s.stopInFlight = true, true
 		s.mu.Unlock()
 		err := s.explicitStop(ctx)
 		s.mu.Lock()
@@ -458,13 +464,22 @@ func (s *Server) CheckLease(ctx context.Context) error {
 		s.leaseExpired = true
 	}
 	s.stopping = true
+	lapsed := s.leaseExpired && !s.stopInFlight
 	s.mu.Unlock()
-	// A command that never returns (a start or apply stuck in a durable
-	// write) must not keep capture installed past the lease: fail open by
-	// reporting the stall, so the hosting service exits and its recovery
-	// removes the journaled objects (spec §2, "if it lapses").
-	if !lockWithin(&s.mutation, leaseStallBound) {
-		return ErrLeaseStalled
+	if lapsed {
+		// The lease lapsed with no stop in flight. A command that never
+		// returns (a start or apply stuck in a durable write) must not keep
+		// capture installed past the lease: fail open by reporting the stall,
+		// so the hosting service exits and its recovery removes the journaled
+		// objects (spec §2, "if it lapses").
+		if !lockWithin(&s.mutation, leaseStallBound) {
+			return ErrLeaseStalled
+		}
+	} else {
+		// A controller's stop is running its cleanup under the mutation lock.
+		// That cleanup is legitimate work of any length (the host bounds the
+		// process), so the lease waits for it instead of ending the process.
+		s.mutation.Lock()
 	}
 	defer s.mutation.Unlock()
 	s.mu.Lock()
@@ -492,32 +507,41 @@ var leaseStallBound = 5 * time.Second
 // command still holds the engine. The host treats it like any cleanup failure.
 var ErrLeaseStalled = errors.New("control lease expired while a command still holds the engine; exiting to fail open")
 
-// lockWithin acquires mu unless the bound passes first. The waiting goroutine
-// releases the lock again if it wins after the caller gave up.
+// lockWithin acquires mu unless the bound passes first.
 func lockWithin(mu *sync.Mutex, bound time.Duration) bool {
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	return lockBefore(mu, timer.C)
+}
+
+// lockBefore acquires mu unless giveUp fires first. The helper goroutine that
+// eventually takes the lock and the caller decide who owns it with one atomic
+// transition: the helper hands the lock over only if the caller has not given
+// up, otherwise it releases it. The lock can never be left held by nobody
+// (the helper won after the caller stopped listening) or owned twice.
+func lockBefore(mu *sync.Mutex, giveUp <-chan time.Time) bool {
+	const undecided, handedOver, gaveUp = 0, 1, 2
+	var state atomic.Int32
 	acquired := make(chan struct{})
-	gaveUp := make(chan struct{})
 	go func() {
 		mu.Lock()
-		select {
-		case <-gaveUp:
-			mu.Unlock()
-		default:
+		if state.CompareAndSwap(undecided, handedOver) {
 			close(acquired)
+			return
 		}
+		mu.Unlock()
 	}()
 	select {
 	case <-acquired:
 		return true
-	case <-time.After(bound):
-		close(gaveUp)
-		select {
-		case <-acquired:
-			return true
-		default:
-			return false
-		}
+	case <-giveUp:
 	}
+	if state.CompareAndSwap(undecided, gaveUp) {
+		return false
+	}
+	// The helper won the transition first: the lock is the caller's.
+	<-acquired
+	return true
 }
 
 func (s *Server) RunLease(ctx context.Context) {

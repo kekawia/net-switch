@@ -40,13 +40,30 @@ func (a *linuxActor) id() string { return a.uid }
 var actorNamespace string
 
 func (a *linuxActor) command(exe string, args ...string) *exec.Cmd {
+	return a.commandWithGroups(a.group, nil, exe, args...)
+}
+
+// commandWithGroups runs exe as this actor's UID with the given primary and
+// supplementary groups (nil keeps the account's own groups). Inside the
+// fixture namespace the identity drop is setpriv's; outside it is Go's.
+func (a *linuxActor) commandWithGroups(gid uint32, groups []uint32, exe string, args ...string) *exec.Cmd {
 	var cmd *exec.Cmd
 	if actorNamespace != "" {
-		full := append([]string{"netns", "exec", actorNamespace, "setpriv", "--reuid=" + strconv.FormatUint(uint64(a.number), 10), "--regid=" + strconv.FormatUint(uint64(a.group), 10), "--init-groups", exe}, args...)
+		full := []string{"netns", "exec", actorNamespace, "setpriv", "--reuid=" + strconv.FormatUint(uint64(a.number), 10), "--regid=" + strconv.FormatUint(uint64(gid), 10)}
+		if groups == nil {
+			full = append(full, "--init-groups")
+		} else {
+			list := make([]string, len(groups))
+			for i, g := range groups {
+				list[i] = strconv.FormatUint(uint64(g), 10)
+			}
+			full = append(full, "--groups="+strings.Join(list, ","))
+		}
+		full = append(append(full, exe), args...)
 		cmd = exec.Command("ip", full...)
 	} else {
 		cmd = exec.Command(exe, args...)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: a.number, Gid: a.group, NoSetGroups: false}}
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: a.number, Gid: gid, Groups: groups, NoSetGroups: false}}
 	}
 	cmd.Env = append(os.Environ(), "HOME="+a.home, "USER="+a.name)
 	return cmd
@@ -182,11 +199,9 @@ func verifyPermissions(t *testing.T, owner, other actor) {
 			t.Fatal(err, string(b))
 		}
 	}
-	probe := other.command(exe, "client", "desktop-denied")
 	// GID zero alone is not root authority. The private socket must grant
 	// the named owner UID, not every process that happens to share its group.
-	probe.SysProcAttr.Credential.Gid = 0
-	probe.SysProcAttr.Credential.Groups = []uint32{0}
+	probe := other.(*linuxActor).commandWithGroups(0, []uint32{0}, exe, "client", "desktop-denied")
 	if b, err := probe.CombinedOutput(); err != nil {
 		t.Fatal("private owner socket ACL", err, string(b))
 	}

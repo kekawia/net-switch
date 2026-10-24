@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,6 +99,9 @@ func prepareTUN(t *testing.T, dir, data string) tunFixture {
 	var tunIndex uint32
 	return tunFixture{
 		line: "TestISP", target: "198.19.128.2:" + port, dial: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, exchange: checkEcho,
+		origin: func(_ *testing.T, c net.Conn) (uint32, netip.AddrPort) {
+			return uint32(os.Getpid()), netip.MustParseAddrPort(c.LocalAddr().String())
+		},
 		probe: func(t *testing.T, data string) nativeProbeFixture {
 			proof := windowsNativeProbe(t, data, address)
 			_, probePort, _ := net.SplitHostPort(proof.target)

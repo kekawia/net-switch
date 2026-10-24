@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,29 @@ func TestDefaultRootIsExecutableFolderEvenFromAnotherDirectory(t *testing.T) {
 	root, err = applicationRoot("override", exe)
 	if err != nil || root != filepath.Join(cwd, "override") {
 		t.Fatalf("override root %s: %v", root, err)
+	}
+}
+
+// The product netswitch started by hand explains itself and starts nothing:
+// Control runs only as the installed service. The sing-box launcher lives in
+// the control_compat build alone, so this build has no path to an engine.
+func TestProductBuildHasNoDesktopLauncher(t *testing.T) {
+	if compatibilityLauncher {
+		t.Skip("control_compat build carries the parity launcher")
+	}
+	defer func(args []string) { os.Args = args }(os.Args)
+	os.Args = []string{"netswitch"}
+	err := run()
+	if err == nil || !strings.Contains(err.Error(), "netswitch service") || !strings.Contains(err.Error(), "installed Net Switch service") {
+		t.Fatal("bare start did not explain the service", err)
+	}
+	os.Args = []string{"netswitch", "--dev-proxy", "--engine-executable", "sing-box.exe"}
+	if err := run(); err == nil || !strings.Contains(err.Error(), "netswitch service") {
+		t.Fatal("launcher flags were accepted by the product build", err)
+	}
+	os.Args = []string{"netswitch", "-version"}
+	if err := run(); err != nil {
+		t.Fatal(err)
 	}
 }
 

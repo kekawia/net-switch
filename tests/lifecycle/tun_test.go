@@ -2,17 +2,19 @@ package lifecycle_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
 
@@ -21,10 +23,14 @@ type tunFixture struct {
 	churnLine, seen, churnSeen string // Linux's independent second physical path
 	dial                       func(context.Context, string, string) (net.Conn, error)
 	exchange                   func(*testing.T, net.Conn)
-	installed                  func(*testing.T)
-	clean                      func(*testing.T)
-	audit                      func(*testing.T) // additional untimed OS inventory
-	probe                      func(*testing.T, string) nativeProbeFixture
+	// origin is the process and source socket the engine attributes one of
+	// dial's streams to: this process and the stream's own socket on Windows,
+	// the namespace relay and the socket it opened on Linux.
+	origin    func(*testing.T, net.Conn) (pid uint32, source netip.AddrPort)
+	installed func(*testing.T)
+	clean     func(*testing.T)
+	audit     func(*testing.T) // additional untimed OS inventory
+	probe     func(*testing.T, string) nativeProbeFixture
 }
 
 func tunServices(t *testing.T, config lifecycle.Config, owner actor, fixture tunFixture) {
@@ -64,7 +70,7 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor, fixture tun
 			}
 			defer conn.Close()
 			fixture.exchange(t, conn)
-			assertTUNCaptured(t, session.URL, session.Token, fixture)
+			assertTUNCaptured(t, conn, fixture)
 			fixture.installed(t)
 			engine, err := service.Query(service.Engine)
 			if err != nil {
@@ -125,7 +131,7 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor, fixture tun
 				t.Fatal(err)
 			}
 			fixture.exchange(t, live)
-			assertTUNCaptured(t, session.URL, session.Token, fixture)
+			assertTUNCaptured(t, live, fixture)
 			fixture.installed(t)
 			// The forwarding process is the host's verified child; suspending
 			// it stalls forwarding while the host's own health checks keep
@@ -202,39 +208,62 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor, fixture tun
 	})
 }
 
-// assertTUNCaptured proves the stream went through the native engine: Control's
-// own state lists this process's executable with a connection on the fixture
-// line, which only the engine's paged flow listing can have told it.
-func assertTUNCaptured(t *testing.T, url, token string, fixture tunFixture) {
+// assertTUNCaptured proves the stream went through the native engine: the
+// engine's own paged flow listing holds exactly this stream, by the tuple the
+// engine attributes (owning process and executable, protocol, source socket,
+// destination) and the line it chose for it. Reads need the live epoch, which
+// hello publishes; a second reader never disturbs Control's lease.
+func assertTUNCaptured(t *testing.T, conn net.Conn, fixture tunFixture) {
 	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	connection, err := localipc.DialNativeEngine(ctx, localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine})
+	if err != nil {
+		t.Fatal("native engine dial", err)
+	}
+	rpc := lifecycle.NewRPC(connection)
+	defer rpc.Close()
+	var hello struct {
+		Instance string `json:"engineInstanceId"`
+		Epoch    uint64 `json:"epoch"`
+	}
+	if err := rpc.Call(ctx, map[string]any{"method": "hello"}, &hello); err != nil {
+		t.Fatal(err)
+	}
+	pid, source := fixture.origin(t, conn)
+	destination := netip.MustParseAddrPort(fixture.target)
 	exe := hostedTestExecutable()
-	var observed []string
-	wait(t, "stream observed inside the native engine", 15*time.Second, func() bool {
-		status, b := api(t, url, token, "GET", "/api/state", "")
-		if status != 200 {
-			return false
-		}
-		var state struct {
-			Apps []struct {
-				Path        string         `json:"path"`
-				Connections map[string]int `json:"connections"`
-			} `json:"apps"`
-		}
-		if json.Unmarshal(b, &state) != nil {
-			return false
-		}
-		observed = observed[:0]
-		for _, app := range state.Apps {
-			observed = append(observed, fmt.Sprintf("%s:%v", app.Path, app.Connections))
-			if strings.EqualFold(app.Path, exe) && app.Connections["a1"] > 0 {
-				t.Logf("engine observed %s on line a1 toward %s", exe, fixture.target)
-				return true
+	same := func(a, b netip.AddrPort) bool { return a.Addr().Unmap() == b.Addr().Unmap() && a.Port() == b.Port() }
+	want := fmt.Sprintf("pid=%d path=%s tcp %s->%s line=a1", pid, exe, source, destination)
+	deadline := time.Now().Add(5 * time.Second) // owner resolution finishes within the handshake
+	for {
+		var listed []string
+		cursor := ""
+		for {
+			var page flows.Page
+			fields := map[string]any{"method": "flows", "engineInstanceId": hello.Instance, "epoch": hello.Epoch}
+			if cursor != "" {
+				fields["cursor"] = cursor
 			}
+			if err := rpc.Call(ctx, fields, &page); err != nil {
+				t.Fatal(err)
+			}
+			for _, f := range page.Flows {
+				listed = append(listed, fmt.Sprintf("pid=%d path=%s %s %s->%s line=%s", f.Owner.PID, f.Owner.Path, f.Protocol, f.Source, f.Destination, f.Line))
+				if f.Owner.PID == pid && strings.EqualFold(f.Owner.Path, exe) && f.Protocol == "tcp" && same(f.Source, source) && same(f.Destination, destination) && f.Line == "a1" {
+					t.Logf("engine lists this stream: %s", listed[len(listed)-1])
+					return
+				}
+			}
+			if page.Cursor == "" || len(page.Flows) == 0 {
+				break
+			}
+			cursor = page.Cursor
 		}
-		return false
-	})
-	if t.Failed() {
-		t.Logf("apps observed: %q", observed)
+		if time.Now().After(deadline) {
+			t.Fatalf("native engine never listed the stream %s; listed: %q", want, listed)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

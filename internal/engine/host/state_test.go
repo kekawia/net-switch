@@ -156,6 +156,91 @@ func TestCommittedHistoryCannotGoBackwardsAfterLostCommitAcknowledgement(t *test
 	}
 }
 
+// Spec §3.3: a restarted engine has no loaded revision, and its persisted
+// appliedRevision is history only. A fresh instance therefore accepts whatever
+// revision Control sends first, including one numbered below the previous
+// instance's history (Control's journal can be recovered from defaults, which
+// restarts its numbering), and guards only the history it commits itself. On
+// main the guard spanned instances, so a Control whose numbering restarted was
+// refused on every start: the Windows lifecycle run logged 44 refused starts
+// of one instance ("history cannot go backwards") and routing never came on.
+func TestFreshInstanceAcceptsAnyFirstRevisionThenGuardsItsOwnHistory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	failAfterWrite := false
+	save := func(r Record) error {
+		b, _ := json.Marshal(r)
+		if err := os.WriteFile(path, b, 0600); err != nil {
+			return err
+		}
+		if failAfterWrite {
+			return errors.New("directory sync failed after rename")
+		}
+		return nil
+	}
+	previous, err := Open(path, "first", save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := previous.SaveApplied(policy.Applied{N: 25, Hash: "twenty-five"}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := Open(path, "second", save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := ReadRecord(path); err != nil || r.Instance != "second" || r.N != 25 || r.Hash != "twenty-five" {
+		t.Fatal("history was not carried into the new instance's record", r, err)
+	}
+	if err := next.SaveApplied(policy.Applied{N: 1, Hash: "one"}); err != nil {
+		t.Fatal("fresh instance refused Control's first revision below the inherited history:", err)
+	}
+	if r, err := ReadRecord(path); err != nil || r.N != 1 || r.Hash != "one" {
+		t.Fatal("first revision not committed", r, err)
+	}
+	if err := next.SaveApplied(policy.Applied{N: 1, Hash: "other"}); err == nil {
+		t.Fatal("same committed revision changed its hash")
+	}
+	if err := next.SaveApplied(policy.Applied{N: 0, Hash: "zero"}); err == nil {
+		t.Fatal("committed history went backwards")
+	}
+	if err := next.SaveApplied(policy.Applied{N: 2, Hash: "two"}); err != nil {
+		t.Fatal(err)
+	}
+	// An interrupted first commit: the file still holds the inherited history
+	// when the write failed before it, so the retry is still a first commit;
+	// once the write reached the disk, that revision is this instance's own.
+	third, err := Open(path, "third", save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema":1,"engineInstanceId":"third","epoch":0,"n":2,"hash":"two"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	third.save = func(Record) error { return errors.New("write failed before replacement") }
+	if err := third.SaveApplied(policy.Applied{N: 1, Hash: "again"}); err == nil {
+		t.Fatal("failed write acknowledged")
+	}
+	third.save = save
+	if err := third.SaveApplied(policy.Applied{N: 1, Hash: "again"}); err != nil {
+		t.Fatal("retry after a write that never reached the disk was refused:", err)
+	}
+	fourth, err := Open(path, "fourth", save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failAfterWrite = true
+	if err := fourth.SaveApplied(policy.Applied{N: 7, Hash: "seven"}); err == nil {
+		t.Fatal("failed sync acknowledged")
+	}
+	failAfterWrite = false
+	if err := fourth.SaveApplied(policy.Applied{N: 7, Hash: "seven"}); err != nil {
+		t.Fatal("retry of the revision that reached the disk was refused:", err)
+	}
+	if err := fourth.SaveApplied(policy.Applied{N: 6, Hash: "six"}); err == nil {
+		t.Fatal("a revision that reached the disk was overwritten by a lower one")
+	}
+}
+
 func TestEpochRetryAfterReplacementWithoutAcknowledgement(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	failAfterWrite := false

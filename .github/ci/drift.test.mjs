@@ -79,8 +79,9 @@ test('the go commands the oracle checks come from the workflows', () => {
   // loses one would shrink what the oracle compares.
   const settings = new Set(current.go.map(command => [command.os, command.runner, command.dir || '.', command.tags.join(','), command.race ? 'race' : ''].filter(Boolean).join(' ')));
   const has = pattern => [...settings].some(setting => pattern.test(setting));
-  assert.ok(has(/^Windows windows-latest \. control_test_https$/), 'Control builds ./cmd/netswitch with -tags control_test_https');
-  assert.ok(has(/^Windows windows-11-arm \. control_test_https$/));
+  assert.ok(has(/^Windows windows-latest \. control_compat,control_test_https$/), 'Control builds ./cmd/netswitch with -tags control_compat,control_test_https');
+  assert.ok(has(/^Windows windows-11-arm \. control_compat,control_test_https$/));
+  assert.ok(has(/^Windows windows-latest \. control_compat$/), 'the parity launcher is a control_compat build');
   assert.ok(has(/^Linux ubuntu-24\.04-arm \.$/), 'go1-linux on ARM64');
   assert.ok(has(/^Windows windows-latest \. race$/), 'race builds on Windows x64');
   assert.ok(!has(/^Windows windows-11-arm \. race$/), 'not on Windows ARM64');

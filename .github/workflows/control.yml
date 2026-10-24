@@ -102,7 +102,7 @@ jobs:
           $elapsed = ((Get-Date) - $started).TotalSeconds
           "Windows PowerShell 5.1 started in $([math]::Round($elapsed, 1)) s"
       - name: Build Go control with commit identity
-        run: go build -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o bin/netswitch.exe ./cmd/netswitch
+        run: go build -tags control_compat -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o bin/netswitch.exe ./cmd/netswitch
       - name: Native Win32 parity
         id: parity
         if: matrix.control == 'go'
@@ -125,7 +125,7 @@ jobs:
       - name: TUN against the selected control executable
         run: |
           if ('${{ matrix.control }}' -eq 'go') {
-            go build -tags control_test_https -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-https-fixture" -o bin/netswitch-tun.exe ./cmd/netswitch
+            go build -tags control_compat,control_test_https -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-https-fixture" -o bin/netswitch-tun.exe ./cmd/netswitch
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
           $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch-tun.exe).Path } else { (Get-Command node).Source }

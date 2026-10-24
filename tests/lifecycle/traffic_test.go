@@ -75,7 +75,7 @@ func routedStream(t *testing.T, ctx context.Context, fixture tunFixture) net.Con
 	if err != nil {
 		t.Fatal("routed stream", err)
 	}
-	conn.SetDeadline(time.Now().Add(20 * time.Second))
+	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	return conn
 }
 

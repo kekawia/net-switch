@@ -13,20 +13,52 @@ Control's client and the legacy CI are PR 4.
   `netswitchctl install` refuses `--adapter` and any mode but `tun`. The
   native-service-contracts workflow builds without `m4_native`. The stand-in's
   code stays compiled only until PR 4 deletes it; no product path reaches it.
-- **Stand-in folders are refused, not migrated.** A data folder with an
-  `engine-state.json` lacking the native schema, or `adapter-service-scope` /
-  `adapter-linux-rule` journal records, is refused by the installer and by the
-  host with "this data folder belonged to a pre-release stand-in build (sing-box
+  The 0.3.x compatibility launcher in `cmd/netswitch` (an elevated desktop
+  Control that starts sing-box) now builds only with `-tags control_compat`,
+  which the control workflow's parity and TUN steps pass; a product `netswitch`
+  started as neither `service` nor `worker` prints its usage and starts nothing
+  (`TestProductBuildHasNoDesktopLauncher`).
+- **Stand-in folders are refused, not migrated.** A data folder whose
+  `service-config.json` (or its backup) names an adapter or proxy mode, whose
+  `engine-state.json` (or, when that is all that is left, its backup) lacks the
+  native schema, or whose journal holds `adapter-service-scope` /
+  `adapter-linux-rule` records, is refused by the installer and by the host
+  with "this data folder belonged to a pre-release stand-in build (sing-box
   adapter); run that build's uninstall or remove the folder, then install
-  again". Linux 1.0 never shipped and 0.3.x is Windows-only, so no field data
-  exists.
-- **A lapsed lease never waits on a stuck command.** The protocol's expiry
-  used to take the mutation lock; a start or apply stuck in a durable write
-  held it, so capture stayed installed with Control gone. The expiry now waits
-  at most five seconds for that lock, then reports the stall (`ErrLeaseStalled`)
-  on its own hook; the host's child ends its process there, and the host
-  recovers the journal under the released lifetime lock (spec §2, "if it
-  lapses"). A graceful stop would have waited on the same lock.
+  again". The inspection only reads: the journal's own reader opens the file
+  for writing and truncates a torn tail, which only the lifetime-lock owner may
+  do, so the refusal decodes the frames itself and skips a torn tail
+  (`TestStandInInspectionLeavesTheJournalUntouched`). Linux 1.0 never shipped
+  and 0.3.x is Windows-only, so no field data exists.
+- **A fresh engine instance accepts whatever revision Control sends first.**
+  Found by the ported suite on Windows: the engine's durable record kept the
+  previous instance's revision number as a floor, so a Control whose numbering
+  had restarted (the fixture rewrites the control journal without a revision,
+  exactly what the product does when it recovers a damaged journal from
+  defaults) was refused on every `start` with "native revision history cannot
+  go backwards or change its hash", 44 times in one instance, and routing
+  never came on. Spec §3.3 says a restarted engine has no loaded revision and
+  its persisted `appliedRevision` is history only, so `host.Durable` now guards
+  only the history the running instance commits itself: the first revision of
+  an instance is accepted whatever its number, and within the instance a lower
+  number or a changed hash is still refused
+  (`TestFreshInstanceAcceptsAnyFirstRevisionThenGuardsItsOwnHistory`). Within
+  an instance the flow table already rejects stale and conflicting revisions
+  before the durable write.
+- **A lapsed lease never waits on a stuck command; a controller's stop is
+  never cut short.** The protocol's expiry used to take the mutation lock; a
+  start or apply stuck in a durable write held it, so capture stayed installed
+  with Control gone. A lapse with no stop in flight now waits at most five
+  seconds for that lock, then reports the stall (`ErrLeaseStalled`) on its own
+  hook; the host's child ends its process there, and the host recovers the
+  journal under the released lifetime lock (spec §2, "if it lapses"). A
+  controller's explicit stop holds the same lock for as long as its cleanup
+  takes, legitimately, so the lease loop waits for it, whether the lease is
+  still valid or lapses meanwhile (`TestExplicitStopWithLongCleanupIsNotEndedByTheLease`;
+  the installed proof is `TestNativeEngineService/slow-start-and-clean-stop`,
+  whose 15 s cleanup the first push of this PR had ended at 5 s). The bounded
+  lock wait hands the lock over with one atomic transition, so it can never be
+  left held by nobody (`TestLockBeforeHandsOffAtomically`).
 - **The lifecycle suite runs the native engine.** `TestRealServices` installs
   the native services in TUN mode over the real fixture (TestISP on Windows,
   the namespace topology on Linux); every traffic check goes through that
@@ -47,12 +79,26 @@ Control's client and the legacy CI are PR 4.
     drives the cutoff from the engine's apply point;
   - the stand-in's retired `adapter-*` directories → the retired
     `engine-outcome-*` records;
-  - "stream observed inside the TUN" → Control's own state lists this process
-    on the fixture line, which only the engine's flow listing can have told it;
+  - "stream observed inside the TUN" → the engine's own paged flow listing
+    holds exactly the stream: owning process and executable, protocol, source
+    socket, destination and the line it chose (on Linux the namespace relay
+    reports the process and socket it opened for the suite);
+  - the stand-in's 16 `adapter-linux-rule` intents → the native engine's
+    `rule` ownership records, read from the journal without touching it and
+    compared field by field with the kernel's own `ip rule` listing: every
+    rule beyond the baseline is owned, every owned rule is live;
   - the fixture's target is a line server on Linux and a byte echo on Windows;
-    the other-user app and the traffic checks speak that line contract.
+    the other-user app checks that platform's complete reply, and the traffic
+    checks speak the same contract;
+  - the blocked-apply case holds the engine to the same 42 s fail-open bound
+    from Control's death as a plain lapse.
   No case is dropped or loosened; Windows-only and Linux-only cases keep their
-  existing skips.
+  existing skips. The suite's time bounds are the ones main had (job 25 min,
+  test process 22 min, suite context 20 min, Windows service wait 16 min):
+  main's last run finished `TestRealServices` in 523 s (Windows x64), 627 s
+  (Windows ARM64) and 690 s (Linux x64) inside 9 to 12.5 min build-and-run
+  steps, and the native port adds a registrar start per engine start, not
+  minutes.
 
 ## PR 2a: Control's native engine client
 
