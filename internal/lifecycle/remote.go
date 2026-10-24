@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -43,12 +41,6 @@ type Remote struct {
 	recovering, stopping bool
 	recovery             uint64
 	attempt              uint64
-	// pending is the start attempt in flight: the session it was sent on,
-	// the instance it addressed and its number. While it is set, an error the
-	// engine reports for that instance belongs to this attempt, whoever reads
-	// it (the stats poll, a reattach or Start itself), so the failure is
-	// published under the attempt's identity or not at all.
-	pending *pendingAttempt
 	// beforeLoad runs between fixing the attempt's session and sending the
 	// start; nil in production, a test hook for the reattach race.
 	beforeLoad     func()
@@ -118,36 +110,10 @@ func (r *Remote) Fail(err error) {
 }
 func (r *Remote) failLocked(err error) { r.failWithReasonLocked(err, "") }
 
-// attemptFailureID identifies a start attempt the engine refused while its
-// instance kept running. Control counts one failure per distinct identity.
-func attemptFailureID(instance string, attempt uint64) string {
-	return instance + "#" + strconv.FormatUint(attempt, 10)
-}
-
-// refusedAttempt reports whether id is an attempt identity of this instance.
-func refusedAttempt(id, instance string) bool {
-	return instance != "" && strings.HasPrefix(id, instance+"#")
-}
-
-type pendingAttempt struct {
-	rpc      *RPC
-	instance string
-	attempt  uint64
-}
-
-// attemptIdentityLocked gives an error status read for instance the identity
-// Control must count it under: the pending attempt's, if a start to that
-// instance is in flight; otherwise an attempt identity the snapshot already
-// carries for it; otherwise none (the caller uses the instance's).
-func (r *Remote) attemptIdentityLocked(instance string) string {
-	if p := r.pending; p != nil && p.instance == instance {
-		return attemptFailureID(instance, p.attempt)
-	}
-	if r.snapshot.Status == "error" && refusedAttempt(r.snapshot.FailureID, instance) {
-		return r.snapshot.FailureID
-	}
-	return ""
-}
+// failWithReasonLocked publishes an instance-ending outcome: an error with a
+// FailureID Control counts once. A start the engine refused while its instance
+// kept running is not published this way; it goes back to Control in Start's
+// result (ce.StartRefused), and the status shown meanwhile carries no FailureID.
 func (r *Remote) failWithReasonLocked(err error, reason string) {
 	message := err.Error()
 	if r.snapshot.Status != "error" || r.snapshot.FailureID == "" {
@@ -355,7 +321,6 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 		r.mu.Unlock()
 		return errors.New("engine stop in progress")
 	}
-	previous := r.snapshot
 	r.rpc = rpc
 	r.instance = hello.Instance
 	r.epoch = attach.Epoch
@@ -366,18 +331,8 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 		r.snapshot = r.nativeSnapshotLocked(hello.Status)
 	}
 	r.snapshot.Instance = hello.Instance
-	if r.snapshot.Status == "error" {
-		// A refused start of this same instance, pending or already
-		// published, keeps its attempt's identity; a reattach must not
-		// re-present it under the instance's identity as a second failure.
-		r.snapshot.FailureID = hello.Instance
-		if previous.Status == "error" && refusedAttempt(previous.FailureID, hello.Instance) {
-			r.snapshot.FailureID = previous.FailureID
-		}
-		if id := r.attemptIdentityLocked(hello.Instance); id != "" {
-			r.snapshot.FailureID = id
-		}
-	}
+	// An error status of a running instance (a start it refused) is shown,
+	// not counted: it carries no FailureID. Only instance-ending outcomes do.
 	if start && r.snapshot.Status != "on" {
 		r.snapshot.Status = "starting"
 		r.snapshot.Error = nil
@@ -537,22 +492,10 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	// The session, instance and attempt this request belongs to are fixed
 	// before it is sent, the request goes out on that very session, and its
 	// outcome is published only if that session is still the attached one.
-	// While the attempt is pending, any error status read for the instance
-	// is published under the attempt's identity (see attemptIdentityLocked).
 	r.mu.Lock()
 	revision, native, running := r.desired, r.native, r.snapshot.Status == "on"
 	rpc, instance, epoch := r.rpc, r.instance, r.epoch
-	if !running {
-		r.pending = &pendingAttempt{rpc: rpc, instance: instance, attempt: attempt}
-	}
 	r.mu.Unlock()
-	defer func() {
-		r.mu.Lock()
-		if p := r.pending; p != nil && p.attempt == attempt {
-			r.pending = nil
-		}
-		r.mu.Unlock()
-	}()
 	if revision == nil || !reflect.DeepEqual(revision.Policy, p) {
 		return errors.New("start requires a durable complete desired revision")
 	}
@@ -563,24 +506,25 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 		if _, err := r.nativeLoad(ctx, rpc, instance, epoch, *revision, running); err != nil {
 			if isRPCRejection(err) {
 				// The engine answered and stays attached, so this attempt
-				// failed while the instance lives on. Its failure identity is
-				// the attempt, not the instance: with the instance's identity
-				// every later refusal would look like the one Control already
-				// counted, and Control would retry it every poll with neither
-				// the 1/2/5/30 s backoff nor the five-failure latch (spec §2).
-				// The refusal and its identity are published in one step, so
-				// no concurrent poll can see the instance's identity first.
+				// failed while the instance lives on. That is a failed start
+				// (spec §2), and it is counted exactly once by Control from
+				// this call's own result; the status shown meanwhile carries no
+				// FailureID, so no poll, reattach or retry can count it again.
 				// A transport error takes the other branch; its outcome is
 				// published once by connection recovery, never here as well.
 				// A refused apply on an engine that was already on is not a
 				// failed start: forwarding continues on the loaded revision and
 				// Control resolves the conflict by raising its number (§3.3).
+				if running {
+					return err
+				}
 				r.mu.Lock()
-				if r.rpc == rpc && rpc != nil && r.instance == instance && !r.stopping && !running {
-					r.failLocked(err)
-					r.snapshot.FailureID = attemptFailureID(instance, attempt)
+				if r.rpc == rpc && rpc != nil && r.instance == instance && !r.stopping {
+					message := err.Error()
+					r.snapshot.Status, r.snapshot.Error, r.snapshot.Reason, r.snapshot.FailureID = "error", &message, "", ""
 				}
 				r.mu.Unlock()
+				return &ce.StartRefused{Instance: instance, Attempt: attempt, Err: err}
 			} else if rpc != nil {
 				r.disconnect(rpc, err)
 			}

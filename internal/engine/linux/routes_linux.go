@@ -50,6 +50,10 @@ type lineState struct {
 }
 type Platform struct {
 	testClose func()
+	// lastRetirement is the outcome of the most recent socket retirement
+	// (recovery's or a stop's), reported to the host so it can be logged as a
+	// timestamped event alongside the host's own.
+	lastRetirement retirement
 	// Only lifecycle writers take routeMu. Dials and probes read bindings;
 	// they never wait for netlink or a journal fsync.
 	routeMu              sync.Mutex
@@ -158,7 +162,7 @@ func newPlatform(ctx context.Context, dir string, ownership journal.Locker) (*Pl
 	// Recovery after a death: the connections the dead engine carried end
 	// first, from the record alone (the TUN is usually gone already), then
 	// the journaled objects.
-	retireRoutedSockets(ctx, s, boot, ns)
+	p.lastRetirement = retireRoutedSockets(ctx, s, boot, ns)
 	if err := s.Cleanup(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("recover engine journal: %w", err)
@@ -950,7 +954,7 @@ func (p *Platform) Cleanup(ctx context.Context) error {
 	p.bindings.Store(nil)
 	// A stop or a lapse: the engine's own TUN is closed by now, so the
 	// connections it carried are ended from the ownership record (spec §2).
-	retireRoutedSockets(ctx, p.journal, p.objects.boot, p.objects.netns)
+	p.lastRetirement = retireRoutedSockets(ctx, p.journal, p.objects.boot, p.objects.netns)
 	err := p.journal.Cleanup(ctx)
 	if err == nil {
 		p.owned = map[string]ownedObject{}

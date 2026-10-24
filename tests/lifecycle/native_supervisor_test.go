@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -575,11 +576,39 @@ func observeUntilNativeExit(t *testing.T, conn net.Conn, gone func() bool, obser
 		t.Fatal("watchdog did not terminate child inside bound", bound)
 	}
 	if terminalProblem != nil {
+		// The fail-open contract (spec §2): no data during the stall (checked
+		// above), and the stream's end comes at or after a proved termination,
+		// which is the host's own decision when the host is alive, or the
+		// recovery's socket retirement when the host itself was frozen and
+		// systemd's watchdog killed it, leaving no host record at all. Logs
+		// may arrive late; the events' own timestamps are compared.
 		decision := nativeSupervisorEvent(data, "NATIVE_TERMINATE", instance)
-		if !nativeTerminationPrecedes(decision, terminalAt) {
-			t.Error("held flow ended before proved termination", terminalProblem, decision)
+		if nativeTerminationPrecedes(decision, terminalAt) {
+			return
+		}
+		var retired string
+		wait(t, "recovery's socket retirement recorded", 10*time.Second, func() bool {
+			retired = nativeSupervisorEvent(data, "NATIVE_SOCKETS_RETIRED", instance)
+			return retired != ""
+		})
+		if !nativeTerminationPrecedes(retired, terminalAt) || !nativeRetirementEnded(retired) {
+			t.Error("held flow ended before proved termination", terminalProblem, decision, retired)
+			return
+		}
+		t.Logf("NATIVE_HELD_END_BY_RECOVERY host_record_absent=%t %s", decision == "", retired)
+	}
+}
+
+// nativeRetirementEnded reports whether a NATIVE_SOCKETS_RETIRED event ended
+// at least one connection.
+func nativeRetirementEnded(line string) bool {
+	for _, field := range strings.Fields(line) {
+		if strings.HasPrefix(field, "ended=") {
+			n, err := strconv.Atoi(strings.TrimPrefix(field, "ended="))
+			return err == nil && n > 0
 		}
 	}
+	return false
 }
 
 func nativeSupervisorEvent(data, event, instance string) string {

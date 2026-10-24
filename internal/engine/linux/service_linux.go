@@ -64,11 +64,33 @@ func Serve(parent context.Context, socket, dir string, hooks func(*Platform, *en
 	return ServeHosted(parent, socket, dir, host.Options{}, hooks)
 }
 
-func RecoverReported(ctx context.Context, dir string, begin func() (func(error) error, error)) error {
+// Retirement reports one socket retirement pass of a recovery (spec §2,
+// "failing open also ends connections the engine was carrying"): when the
+// destroys began, how many connections ended, how many matching sockets the
+// rule spared, and why the pass stopped early, if it did. At is zero when no
+// journaled TUN address existed, so there was nothing to retire.
+type Retirement struct {
+	At            time.Time
+	Ended, Spared int
+	Error         string
+}
+
+// RecoverReported runs journal recovery for a dead or stopped engine under the
+// lifetime lock. retired, when set, receives the socket retirement outcome
+// before the journaled objects are removed, so the host can record it as a
+// timestamped event next to its own.
+func RecoverReported(ctx context.Context, dir string, begin func() (func(error) error, error), retired func(Retirement)) error {
 	return host.Recover(ctx, fileLock{filepath.Join(dir, "engine.lock")}, func(lock journal.Locker) error {
 		p, err := newPlatform(ctx, dir, lock)
 		if err != nil {
 			return err
+		}
+		if retired != nil && !p.lastRetirement.at.IsZero() {
+			r := Retirement{At: p.lastRetirement.at, Ended: p.lastRetirement.ended, Spared: p.lastRetirement.spared}
+			if p.lastRetirement.err != nil {
+				r.Error = p.lastRetirement.err.Error()
+			}
+			retired(r)
 		}
 		return p.Close()
 	}, begin)

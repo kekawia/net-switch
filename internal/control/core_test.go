@@ -150,8 +150,9 @@ type fakeEngine struct {
 	// acknowledgement carries a growing apply point.
 	ackPoint uint64
 	// refuse, when set, makes every start fail the way the native client
-	// reports an engine that answered with an error and kept running: the
-	// snapshot is an error whose identity is the attempt's, not the instance's.
+	// reports an engine that answered with an error and kept running: Start
+	// returns engine.StartRefused and the snapshot shows the error with no
+	// FailureID, so only Start's result counts.
 	refuse   error
 	refusals int
 }
@@ -202,9 +203,8 @@ func (f *fakeEngine) Start(ctx context.Context, p engine.Policy) error {
 	if f.refuse != nil {
 		f.refusals++
 		message := f.refuse.Error()
-		f.s.Status, f.s.Error, f.s.Instance = "error", &message, "test-engine"
-		f.s.FailureID = fmt.Sprintf("test-engine#%d", f.refusals)
-		return f.refuse
+		f.s.Status, f.s.Error, f.s.Instance, f.s.FailureID = "error", &message, "test-engine", ""
+		return &engine.StartRefused{Instance: "test-engine", Attempt: uint64(f.refusals), Err: f.refuse}
 	}
 	f.s.Status = "on"
 	f.s.Instance = "test-engine"

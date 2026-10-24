@@ -65,6 +65,7 @@ var (
 )
 
 type retirement struct {
+	at            time.Time // when the destroys began; zero if nothing was to retire
 	ended, spared int
 	err           error
 }
@@ -89,11 +90,14 @@ func retireRoutedSockets(ctx context.Context, session *journal.Session, boot, ne
 		}
 	}
 	if share <= 0 {
-		return retirement{err: context.DeadlineExceeded}
+		return retirement{at: time.Now(), err: context.DeadlineExceeded}
 	}
 	bounded, cancel := context.WithTimeout(ctx, share)
 	defer cancel()
 	out := retireRoutedSocketsWithin(bounded, tun)
+	if out.at.IsZero() {
+		out.at = time.Now()
+	}
 	switch {
 	case out.err != nil:
 		log.Printf("engine cleanup: ended %d routed connections on %v (%d spared) before stopping: %v", out.ended, keys(tun), out.spared, out.err)
@@ -216,6 +220,9 @@ func retireRoutedSocketsWithin(ctx context.Context, tun map[netip.Addr]bool) ret
 	}
 	destroyer := os.NewFile(uintptr(fd), "sock_destroy")
 	defer destroyer.Close()
+	// Every connection ended below ends at or after this instant; a stream's
+	// observed end can be ordered against it.
+	out.at = time.Now()
 	for _, r := range matches {
 		if ctx.Err() != nil {
 			out.err = ctx.Err()
@@ -249,8 +256,11 @@ func hostAddressesWithin(ctx context.Context) ([]netlink.Addr, error) {
 		err   error
 	}
 	done := make(chan result, 1)
+	// The listing is captured before the goroutine starts: an abandoned
+	// listing (the share ran out first) must never read shared state later.
+	list := listHostAddresses
 	go func() {
-		addrs, err := listHostAddresses()
+		addrs, err := list()
 		done <- result{addrs, err}
 	}()
 	select {

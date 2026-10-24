@@ -152,10 +152,13 @@ func (r *Remote) nativeSnapshotLocked(status protocol.Status) ce.Snapshot {
 	if s.Status == "" {
 		s.Status = "off"
 	}
+	// The error of a running instance (a start it refused) is shown to the
+	// UI but never counted: no FailureID. Control counted the refusal once,
+	// from Start's own result; instance-ending outcomes get their identity
+	// from exit classification.
 	if s.Status == "error" && status.LastError != "" {
 		message := status.LastError
 		s.Error = &message
-		s.FailureID = status.Instance
 	}
 	if status.Applied != nil {
 		s.AppliedRevision, s.AppliedHash, s.AppliedPoint = status.Applied.N, status.Applied.Hash, status.Applied.Point
@@ -186,16 +189,6 @@ func (r *Remote) nativeRefresh(ctx context.Context) error {
 	if r.rpc == rpc && r.instance == instance && !r.stopping {
 		s := r.nativeSnapshotLocked(status)
 		s.Instance = instance
-		// The engine reports the error of a refused start for as long as the
-		// instance lives, and may do so while the start is still pending. That
-		// failure belongs to the attempt; a status read must publish it under
-		// the attempt's identity, never mint the instance's and count the same
-		// refusal a second time.
-		if s.Status == "error" {
-			if id := r.attemptIdentityLocked(instance); id != "" {
-				s.FailureID = id
-			}
-		}
 		r.snapshot = s
 	}
 	return nil

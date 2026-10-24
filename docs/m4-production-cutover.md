@@ -51,22 +51,29 @@ Control's client and the legacy CI are PR 4.
   instance with no committed history, since nothing was acknowledged; its next
   revision, lower or not, is its first (a design decision recorded in the
   review of this PR; `TestUnacknowledgedFirstCommitEqualToInheritedHistoryGuardsNothing`).
-- **A refused start is an ordinary failed attempt.** While the engine refused
-  those 44 starts, Control retried every poll (1.3 s) with neither the
-  1/2/5/30 s backoff nor the five-failure latch: every refusal carried the
-  instance's identity, so Control counted the first and took the rest for the
-  failure it had already seen. A start the engine answers with an error while
-  its instance keeps running now carries the attempt's identity
-  (`instance#attempt`). The attempt is registered as pending before the start
-  is sent, the start goes out on the very session that was fixed for it, and
-  while it is pending every error status read for that instance (the stats
-  poll, a reattach, Start itself) is published under the attempt's identity,
-  so there is no window in which the instance's identity can be counted
-  first; a refused apply on an engine that was already on stays a plain
-  conflict (spec §3.3).
-  Transport errors take the other path, where connection recovery publishes
-  the outcome once (`TestRefusedStartsAreDistinctFailuresCountedOnce`,
-  `TestRefusedStartsBackOffAndLatch`: 1, 2, 5, 30 s, latch at the fifth).
+- **A refused start is an ordinary failed attempt, counted once from Start's
+  own result.** While the engine refused those 44 starts, Control retried
+  every poll (1.3 s) with neither the 1/2/5/30 s backoff nor the five-failure
+  latch: every refusal carried the instance's identity, so Control counted the
+  first and took the rest for the failure it had already seen. The design
+  (a decision recorded in the review of this PR): a start the engine answers
+  with an error while its instance keeps running comes back to Control as
+  `ce.StartRefused` (instance, attempt number, cause), and Control counts that
+  result toward the backoff and the latch, synchronously, exactly once. Status
+  reads never produce a countable failure: the engine keeps showing the error
+  for the UI until the next start, but that status carries no `FailureID`, so a
+  poll before the retry, a reattach, or the retry's own read cannot count it
+  again, and a retry that succeeds leaves no failure behind. Countable
+  failures from status come only from instance-ending outcomes (exit
+  classification), as before. The start goes out on the very session fixed
+  for it (`sendOn`), and a refused apply on an engine that was already on stays
+  a plain conflict (spec §3.3). Transport errors take the other path, where
+  connection recovery publishes the outcome once
+  (`TestRefusedStartIsReturnedToControlNotPublishedAsAFailure`,
+  `TestPollAndReattachDuringRefusedStartMintNoFailure`,
+  `TestReattachBetweenCaptureAndSendIsNotMisattributed`,
+  `TestPolledRefusalErrorIsShownNotCounted`, `TestRefusedStartsBackOffAndLatch`:
+  1, 2, 5, 30 s, latch at the fifth, explicit routing-on clears it).
 - **Linux: the connections the engine was carrying are ended when it stops,
   lapses or dies** (spec §2, "failing open also ends connections the engine
   was carrying"). An app's stream through the TUN terminates inside the
@@ -91,7 +98,13 @@ Control's client and the legacy CI are PR 4.
   included; the dump is streamed and bounded, the first unsupported or refused
   answer ends the pass, and the mandatory cleanup always keeps its time.
   Requests name the socket as the dump reported it, bound device and cookie
-  included; the kernel applies its own inbound order for UDP.
+  included; the kernel applies its own inbound order for UDP. A recovery
+  records its pass in the engine's log as `NATIVE_SOCKETS_RETIRED` with a
+  timestamp taken before the first destroy, so when the host itself was frozen
+  and left no record (systemd's watchdog killed it; ExecStopPost recovered),
+  the supervisor proofs order a held stream's end against that event instead
+  (`control-absent-host-and-child`: no data during the stall, the end at or
+  after the retirement, a fresh flow within 28 s).
   Proofs: the rules on the pure decision code in `sockets_retire_rules_linux_test.go`
   (exact address only, foreign boot or namespace records ignored, unknown
   host addresses abort, removed TUN addresses stay local, listeners and

@@ -70,3 +70,52 @@ func TestRefusedStartsBackOffAndLatch(t *testing.T) {
 		t.Fatalf("fresh intent after the latch: starts=%d status=%s failures=%v", starts(), e.Snapshot().Status, c.failureTimes)
 	}
 }
+
+// A refusal is counted once, from Start's own result. The engine keeps
+// showing the error until the retry; polls that read it before the retry
+// runs count nothing, and a retry that succeeds leaves exactly the one
+// failure that happened. On the earlier design the poll minted the
+// instance's failure identity and counted the same refusal a second time.
+func TestPolledRefusalErrorIsShownNotCounted(t *testing.T) {
+	c, e, clock, _ := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	e.refuse = errors.New("native revision history cannot go backwards or change its hash")
+	ctx := context.Background()
+	_ = c.Routing(ctx, true)
+	if len(c.failureTimes) != 1 {
+		t.Fatal("refused start not counted once", c.failureTimes)
+	}
+	// Polls before the 1 s backoff: the engine still reports the error.
+	for poll := 0; poll < 4; poll++ {
+		clock.advance(200)
+		_ = c.Supervise(ctx)
+		c.mu.Lock()
+		c.statusLocked(e.Snapshot())
+		c.mu.Unlock()
+	}
+	if len(c.failureTimes) != 1 || e.refusals != 1 {
+		t.Fatalf("polling the shown error counted it again: failures=%v refusals=%d", c.failureTimes, e.refusals)
+	}
+	// The retry succeeds: no failure is added, and the status is on.
+	e.refuse = nil
+	clock.advance(300)
+	if err := c.Supervise(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if e.Snapshot().Status != "on" || len(c.failureTimes) != 1 {
+		t.Fatalf("successful retry after a shown refusal: status=%s failures=%v", e.Snapshot().Status, c.failureTimes)
+	}
+	// A refused retry counts exactly one more.
+	if err := c.Routing(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	e.refuse = errors.New("refused again")
+	_ = c.Routing(ctx, true)
+	c.mu.Lock()
+	c.statusLocked(e.Snapshot())
+	c.statusLocked(e.Snapshot())
+	c.mu.Unlock()
+	if len(c.failureTimes) != 1 {
+		t.Fatalf("a refused retry under a fresh intent did not count exactly once: %v", c.failureTimes)
+	}
+}

@@ -583,33 +583,44 @@ func (c *Core) statusLocked(s engine.Snapshot) {
 		c.retryAt = c.now()
 		c.log("adapter lost; restarting routing without counting a failure (%d of %d in ten minutes)", len(c.adapterLosses), adapterLossesFree)
 	} else if s.Status == "error" && c.wanted && !c.quitting && (!c.op.ServiceMode || freshFailure) {
-		d := []int64{5000, 15000, 30000, 60000}
 		if c.op.ServiceMode {
 			c.lastFailureID = s.FailureID
-			d = []int64{1000, 2000, 5000, 30000}
 			if s.Reason == engine.ReasonAdapterLost {
 				c.log("adapter lost again; this loss counts toward the five-failure budget")
 			}
-			recent := c.failureTimes[:0]
-			for _, at := range c.failureTimes {
-				if at > c.now()-10*60000 {
-					recent = append(recent, at)
-				}
-			}
-			c.failureTimes = append(recent, c.now())
-			c.failureDirty = true
-			if len(c.failureTimes) >= 5 {
-				c.op.Engine.Fail(fmt.Errorf("Routing stopped after five failures in ten minutes. Turn routing on to retry."))
-			}
 		}
-		c.retryAt = c.now() + d[min(c.retryAttempts, len(d)-1)]
-		c.retryAttempts++
+		c.recordFailureLocked()
 	}
 	msg := "routing " + s.Status
 	if s.Error != nil {
 		msg += ": " + *s.Error
 	}
 	c.log("%s", msg)
+}
+
+// recordFailureLocked counts one failed attempt: the restart backoff (spec §2:
+// 1, 2, 5, then 30 s in service mode) and, in service mode, the five-in-ten-
+// minutes latch. Callers decide what counts: an instance-ending outcome with a
+// fresh identity (statusLocked), or a start the engine refused, counted once
+// from Start's own result (Start).
+func (c *Core) recordFailureLocked() {
+	d := []int64{5000, 15000, 30000, 60000}
+	if c.op.ServiceMode {
+		d = []int64{1000, 2000, 5000, 30000}
+		recent := c.failureTimes[:0]
+		for _, at := range c.failureTimes {
+			if at > c.now()-10*60000 {
+				recent = append(recent, at)
+			}
+		}
+		c.failureTimes = append(recent, c.now())
+		c.failureDirty = true
+		if len(c.failureTimes) >= 5 {
+			c.op.Engine.Fail(fmt.Errorf("Routing stopped after five failures in ten minutes. Turn routing on to retry."))
+		}
+	}
+	c.retryAt = c.now() + d[min(c.retryAttempts, len(d)-1)]
+	c.retryAttempts++
 }
 func settledStatus(status string) bool { return status == "on" || status == "off" || status == "error" }
 
@@ -763,6 +774,17 @@ func (c *Core) Start(ctx context.Context) error {
 		if err := c.op.Engine.Start(ctx, p); err != nil {
 			c.mu.Lock()
 			c.startReturned = true
+			// A start the engine refused while its instance kept running is a
+			// failed attempt (spec §2), counted exactly once, here, from the
+			// result of this very call. The engine's status keeps showing the
+			// error for the UI, but status reads never count it: a poll before
+			// the retry, a reattach, or the retry's own read cannot count it
+			// again, and a retry that succeeds leaves no failure behind.
+			var refused *engine.StartRefused
+			if c.op.ServiceMode && errors.As(err, &refused) && c.wanted && !c.quitting {
+				c.log("routing start refused by the engine (attempt %d): %v", refused.Attempt, refused.Err)
+				c.recordFailureLocked()
+			}
 			c.statusLocked(c.op.Engine.Snapshot())
 			c.mu.Unlock()
 			if c.op.ServiceMode {

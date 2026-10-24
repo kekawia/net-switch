@@ -715,38 +715,42 @@ func TestNativeAdapterLossReachesTheSnapshotAfterTheServiceStops(t *testing.T) {
 	t.Fatal("snapshot never reported the stopped engine")
 }
 
-// Spec §2: every failed start counts toward the backoff and the latch. A start
-// the engine refuses while its instance keeps running must therefore be a
-// distinct failure each time. On main every refusal carried the instance's
-// identity, so Control counted the first and took the rest for the failure it
-// had already seen: the Windows lifecycle run retried a refused start every
-// 1.3 s for a minute with no backoff and no latch. Re-reading the engine's
-// status must not mint a new identity for the same refusal either.
-func TestRefusedStartsAreDistinctFailuresCountedOnce(t *testing.T) {
+// Spec §2: every failed start counts toward the backoff and the latch, exactly
+// once. A start the engine refuses while its instance keeps running comes back
+// to Control as ce.StartRefused, with the attempt's number, and Control counts
+// that result. The status shown meanwhile (the engine keeps reporting the
+// error until the next start) carries no FailureID, so no status read can
+// count it: on main every refusal carried the instance's identity, Control
+// counted the first and took the rest for the failure it had already seen, and
+// the Windows lifecycle run retried a refused start every 1.3 s for a minute.
+func TestRefusedStartIsReturnedToControlNotPublishedAsAFailure(t *testing.T) {
 	f := newNativeFixture(t, nativeProber{})
 	f.runtime.refuseStart.Store(refusal{errors.New("native revision history cannot go backwards or change its hash")})
 	ctx := context.Background()
 	rev := testRevision(1)
 	f.remote.Restore(&rev)
-	seen := map[string]bool{}
 	for attempt := 1; attempt <= 3; attempt++ {
-		if err := f.remote.Start(ctx, rev.Policy); err == nil {
-			t.Fatal("refused start reported success")
+		err := f.remote.Start(ctx, rev.Policy)
+		var refused *ce.StartRefused
+		if !errors.As(err, &refused) || refused.Instance != f.server.Instance || !strings.Contains(refused.Error(), "cannot go backwards") {
+			t.Fatalf("attempt %d: refusal not returned as a refused start: %v", attempt, err)
+		}
+		if refused.Attempt == 0 || (attempt > 1 && refused.Attempt <= uint64(attempt-1)) {
+			t.Fatalf("attempt %d: refusal does not carry a growing attempt number: %+v", attempt, refused)
 		}
 		s := f.remote.Snapshot()
 		if s.Status != "error" || s.Error == nil || !strings.Contains(*s.Error, "cannot go backwards") {
-			t.Fatalf("attempt %d: refusal not reported as the attempt's error: %+v", attempt, s)
+			t.Fatalf("attempt %d: refusal not shown as the engine's error: %+v", attempt, s)
 		}
-		if s.FailureID == "" || seen[s.FailureID] || s.FailureID == s.Instance {
-			t.Fatalf("attempt %d: failure identity %q is not distinct per attempt (seen %v)", attempt, s.FailureID, seen)
+		if s.FailureID != "" {
+			t.Fatalf("attempt %d: a refusal was published as a countable failure: %+v", attempt, s)
 		}
-		seen[s.FailureID] = true
 		for i := 0; i < 2; i++ {
 			if err := f.remote.refresh(ctx); err != nil {
 				t.Fatal(err)
 			}
-			if again := f.remote.Snapshot(); again.Status != "error" || again.FailureID != s.FailureID {
-				t.Fatalf("attempt %d: a status re-read changed the failure identity: %+v", attempt, again)
+			if again := f.remote.Snapshot(); again.FailureID != "" {
+				t.Fatalf("attempt %d: a status re-read minted a countable failure: %+v", attempt, again)
 			}
 		}
 	}
@@ -762,12 +766,12 @@ func TestRefusedStartsAreDistinctFailuresCountedOnce(t *testing.T) {
 	}
 }
 
-// The stats poll reads the engine's status every five seconds. While a start
-// is pending, the engine already reports the refusal as its status; a poll in
-// that window must publish it under the pending attempt's identity (or not as
-// an error at all), never under the instance's, or Control counts the same
-// refusal twice: once from the poll, once from Start.
-func TestPollDuringPendingRefusedStartCountsOnce(t *testing.T) {
+// The stats poll reads the engine's status every five seconds, and a Control
+// restart reattaches with hello. While a start is pending, the engine already
+// reports the refusal as its status; neither a poll nor a reattach in that
+// window may publish a countable failure (a FailureID): only Start's result
+// counts, once.
+func TestPollAndReattachDuringRefusedStartMintNoFailure(t *testing.T) {
 	f := newNativeFixture(t, nativeProber{})
 	f.runtime.refuseStart.Store(refusal{errors.New("native revision history cannot go backwards or change its hash")})
 	f.runtime.refusing, f.runtime.gate = make(chan struct{}), make(chan struct{})
@@ -782,26 +786,37 @@ func TestPollDuringPendingRefusedStartCountsOnce(t *testing.T) {
 	if err := f.remote.refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	polled := f.remote.Snapshot()
-	if polled.Status == "error" && !refusedAttempt(polled.FailureID, polled.Instance) {
-		t.Fatalf("poll during the pending start published the instance's identity: %+v", polled)
+	if polled := f.remote.Snapshot(); polled.FailureID != "" {
+		t.Fatalf("poll during the pending start published a countable failure: %+v", polled)
 	}
 	close(gate)
-	if err := <-started; err == nil {
-		t.Fatal("refused start reported success")
+	err := <-started
+	var refused *ce.StartRefused
+	if !errors.As(err, &refused) {
+		t.Fatal("refused start not returned as a refused start", err)
 	}
 	final := f.remote.Snapshot()
-	if final.Status != "error" || !refusedAttempt(final.FailureID, final.Instance) {
-		t.Fatalf("refusal not published under its attempt: %+v", final)
+	if final.Status != "error" || final.FailureID != "" {
+		t.Fatalf("refusal published as a countable failure: %+v", final)
 	}
-	if polled.Status == "error" && polled.FailureID != final.FailureID {
-		t.Fatalf("one refusal, two identities: poll %q, start %q", polled.FailureID, final.FailureID)
-	}
-	if err := f.remote.refresh(ctx); err != nil {
+	// What a restarted Control does: a fresh client attaching to the same
+	// instance while it still reports the refusal. (An attach cannot overtake
+	// a start in flight, by the protocol's mutation lock, so it lands here.)
+	reattached := NewRemote(ctx, func(string) {})
+	reattached.dial, reattached.queryService, reattached.outcome = f.remote.dial, f.remote.queryService, f.remote.outcome
+	reattached.Restore(&rev)
+	if err := reattached.Attach(ctx, false); err != nil {
 		t.Fatal(err)
 	}
-	if again := f.remote.Snapshot(); again.FailureID != final.FailureID {
-		t.Fatalf("a later poll changed the identity: %q then %q", final.FailureID, again.FailureID)
+	if s := reattached.Snapshot(); s.Status != "error" || s.FailureID != "" {
+		t.Fatalf("reattach after the refusal published a countable failure: %+v", s)
+	}
+	// The new controller holds the lease now; its later polls mint nothing.
+	if err := reattached.refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if again := reattached.Snapshot(); again.FailureID != "" {
+		t.Fatalf("a later poll minted a countable failure: %+v", again)
 	}
 }
 
@@ -825,8 +840,9 @@ func TestReattachBetweenCaptureAndSendIsNotMisattributed(t *testing.T) {
 		f.remote.mu.Unlock()
 	}
 	err := f.remote.Start(ctx, rev.Policy)
-	if err == nil || !isRPCRejection(err) {
-		t.Fatal("the start did not reach the fixed session", err)
+	var refused *ce.StartRefused
+	if !errors.As(err, &refused) || refused.Instance != f.server.Instance {
+		t.Fatal("the start did not reach the fixed session, or its refusal was not returned", err)
 	}
 	if captured == nil {
 		t.Fatal("no session was fixed before the send")
@@ -834,9 +850,6 @@ func TestReattachBetweenCaptureAndSendIsNotMisattributed(t *testing.T) {
 	s := f.remote.Snapshot()
 	if s.Status == "error" || s.FailureID != "" {
 		t.Fatalf("a refusal answered on the old session was published to the new attachment: %+v", s)
-	}
-	if f.remote.pending != nil {
-		t.Fatal("the attempt stayed pending after Start returned")
 	}
 	captured.Close()
 }
