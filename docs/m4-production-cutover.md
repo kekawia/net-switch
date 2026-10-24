@@ -57,23 +57,38 @@ Control's client and the legacy CI are PR 4.
   instance's identity, so Control counted the first and took the rest for the
   failure it had already seen. A start the engine answers with an error while
   its instance keeps running now carries the attempt's identity
-  (`instance#attempt`), re-reading the engine's status keeps it, and a refused
+  (`instance#attempt`), published together with the error in one step and only
+  to the session, instance and attempt the request was sent on; re-reading the
+  engine's status and reattaching to the same instance keep it, and a refused
   apply on an engine that was already on stays a plain conflict (spec §3.3).
   Transport errors take the other path, where connection recovery publishes
   the outcome once (`TestRefusedStartsAreDistinctFailuresCountedOnce`,
   `TestRefusedStartsBackOffAndLatch`: 1, 2, 5, 30 s, latch at the fifth).
-- **Linux: the apps' routed sockets are ended when the engine stops or dies.**
-  An app's stream through the TUN terminates inside the engine's network
-  stack, so nothing resets it when the engine goes; the ported suite sat on
-  every such stream until its read deadline in six cases, lease lapse
-  included. Windows aborts the sockets of a removed adapter by itself; Linux
-  does not. Cleanup of the TUN's addresses (the live engine's stop, a lapse,
-  and the host's or ExecStopPost's recovery after a death all go through it)
-  now ends every TCP and UDP socket bound in those prefixes with SOCK_DESTROY,
-  the way `ss -K` does: a sock_diag dump finds each socket, and the kernel
-  resets the peer and fails the app's calls (spec §2, "normal internet works
-  in between"). A kernel without CONFIG_INET_DIAG_DESTROY is reported, not a
-  cleanup failure (`TestDestroyBoundSocketsEndsAppStreams`, isolated namespace).
+- **Linux: the connections the engine was carrying are ended when it stops,
+  lapses or dies** (spec §2, "failing open also ends connections the engine
+  was carrying"). An app's stream through the TUN terminates inside the
+  engine's network stack, so nothing resets it when the engine goes; the
+  ported suite sat on every such stream until its read deadline in six cases,
+  lease lapse included. Windows aborts a removed adapter's sockets by itself;
+  Linux does not. The rule: a connected TCP or UDP socket whose local address
+  is a journaled TUN address and whose peer is not local to this host is ended
+  with SOCK_DESTROY, the way `ss -K` does; listeners, unconnected UDP sockets
+  and local-only connections are spared. It runs from the ownership record,
+  before journal cleanup, in both the engine's own cleanup (stop and lapse,
+  after the engine has closed its non-persistent TUN) and recovery after a
+  death (the host's, and `netswitchctl cleanup` from ExecStopPost), so it does
+  not depend on the TUN or its addresses still existing. It is best effort
+  inside its own share of the cleanup budget (a quarter of what remains, at
+  most 500 ms): the dump is streamed and bounded, the first unsupported or
+  refused answer ends the pass, and the mandatory cleanup always keeps its
+  time. Requests name the socket as the dump reported it, bound device and
+  cookie included; the kernel applies its own inbound order for UDP.
+  Proofs: `TestRoutedSocketRetirementFollowsTheSpecRule` (TCP handshake and
+  connected UDP in both families ended; listener, local-only connection,
+  unconnected UDP and loopback spared), `TestRoutedSocketRetirementIsBoundedAndStopsWhenRefused`,
+  both in CI's isolated namespace, and the lifecycle cases whose
+  `expectClosed` follows a kill, a crash barrier, a lease lapse and a stop,
+  all after the TUN has gone.
 - **A lapsed lease never waits on a stuck command; a controller's stop is
   never cut short.** The protocol's expiry used to take the mutation lock; a
   start or apply stuck in a durable write held it, so capture stayed installed

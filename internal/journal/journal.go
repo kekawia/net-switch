@@ -276,6 +276,19 @@ func (s *Session) Cleanup(ctx context.Context) (err error) {
 	return nil
 }
 
+// Live lists the objects this journal still owns: every intent or created
+// record without a removal. Cleanup consults it before touching the OS, for
+// work that must happen from the record alone, such as ending the connections
+// that rode on an address whether or not that address still exists.
+func (s *Session) Live() ([]Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, errors.New("journal session closed")
+	}
+	return s.j.live()
+}
+
 func (s *Session) Compact() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

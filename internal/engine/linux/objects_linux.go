@@ -7,10 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"maps"
 	"net"
-	"net/netip"
 	"strconv"
 	"strings"
 
@@ -285,16 +283,6 @@ func (d objectDriver) Remove(ctx context.Context, f journal.Fingerprint) error {
 		l, e := netlink.LinkByIndex(v.Index)
 		if e != nil {
 			return e
-		}
-		// Whether the engine stops, lapses or died, the apps' sockets on this
-		// address have nothing behind them any more. End them now so apps fail
-		// open at once instead of waiting out TCP (spec §2).
-		if p, parseErr := netip.ParsePrefix(v.CIDR); parseErr == nil {
-			if n, destroyErr := destroyBoundSockets(ctx, p); destroyErr != nil {
-				log.Printf("engine cleanup: app sockets on %s could not all be ended: %v (%d ended)", v.CIDR, destroyErr, n)
-			} else if n > 0 {
-				log.Printf("engine cleanup: ended %d app sockets bound to %s", n, v.CIDR)
-			}
 		}
 		err = netlink.AddrDel(l, &netlink.Addr{IPNet: prefix(v.CIDR)})
 	case "tun":

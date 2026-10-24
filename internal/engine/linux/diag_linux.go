@@ -23,8 +23,11 @@ import (
 
 type socketRow struct {
 	protocol       int
+	family         int
+	state          uint8 // the TCP state (TCP_LISTEN, TCP_ESTABLISHED, ...); UDP reports its own
 	v6only         bool
 	local, remote  netip.AddrPort
+	ifindex        uint32 // idiag_if: the device a bound socket is tied to, else 0
 	uid, inode     uint32
 	cookie, cgroup uint64
 }
@@ -47,8 +50,11 @@ func parseDiag(b []byte) (socketRow, error) {
 	default:
 		return r, errors.New("unknown inet_diag family")
 	}
+	r.family = int(b[0])
+	r.state = b[1]
 	r.local = netip.AddrPortFrom(a.Unmap(), binary.BigEndian.Uint16(b[4:6]))
 	r.remote = netip.AddrPortFrom(z.Unmap(), binary.BigEndian.Uint16(b[6:8]))
+	r.ifindex = binary.NativeEndian.Uint32(b[40:44])
 	r.cookie = uint64(binary.NativeEndian.Uint32(b[44:48])) | uint64(binary.NativeEndian.Uint32(b[48:52]))<<32
 	r.uid = binary.NativeEndian.Uint32(b[64:68])
 	r.inode = binary.NativeEndian.Uint32(b[68:72])

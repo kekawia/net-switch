@@ -326,6 +326,7 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 		r.mu.Unlock()
 		return errors.New("engine stop in progress")
 	}
+	previous := r.snapshot
 	r.rpc = rpc
 	r.instance = hello.Instance
 	r.epoch = attach.Epoch
@@ -337,7 +338,14 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	}
 	r.snapshot.Instance = hello.Instance
 	if r.snapshot.Status == "error" {
-		r.snapshot.FailureID = hello.Instance
+		// A refused start of this same instance already has its attempt's
+		// identity and has been counted; a reattach must not re-present it
+		// under the instance's identity as a second failure.
+		if !(previous.Status == "error" && refusedAttempt(previous.FailureID, hello.Instance)) {
+			r.snapshot.FailureID = hello.Instance
+		} else {
+			r.snapshot.FailureID = previous.FailureID
+		}
 	}
 	if start && r.snapshot.Status != "on" {
 		r.snapshot.Status = "starting"
@@ -487,34 +495,35 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 		}
 		return err
 	}
+	// The session, instance and attempt this request belongs to are fixed
+	// before it is sent; its outcome is published only to that same session.
 	r.mu.Lock()
 	revision, native, running := r.desired, r.native, r.snapshot.Status == "on"
+	rpc, instance := r.rpc, r.instance
 	r.mu.Unlock()
 	if revision == nil || !reflect.DeepEqual(revision.Policy, p) {
 		return errors.New("start requires a durable complete desired revision")
 	}
 	if native {
 		if _, err := r.nativeLoad(ctx, *revision, running); err != nil {
-			r.mu.Lock()
-			rpc := r.rpc
-			r.mu.Unlock()
-			if rpc != nil && isRPCRejection(err) {
+			if isRPCRejection(err) {
 				// The engine answered and stays attached, so this attempt
 				// failed while the instance lives on. Its failure identity is
 				// the attempt, not the instance: with the instance's identity
 				// every later refusal would look like the one Control already
 				// counted, and Control would retry it every poll with neither
 				// the 1/2/5/30 s backoff nor the five-failure latch (spec §2).
+				// The refusal and its identity are published in one step, so
+				// no concurrent poll can see the instance's identity first.
 				// A transport error takes the other branch; its outcome is
 				// published once by connection recovery, never here as well.
 				// A refused apply on an engine that was already on is not a
 				// failed start: forwarding continues on the loaded revision and
 				// Control resolves the conflict by raising its number (§3.3).
-				_ = r.refresh(ctx)
 				r.mu.Lock()
-				if r.rpc == rpc && !r.stopping && !running {
+				if r.rpc == rpc && rpc != nil && r.instance == instance && !r.stopping && !running {
 					r.failLocked(err)
-					r.snapshot.FailureID = attemptFailureID(r.instance, attempt)
+					r.snapshot.FailureID = attemptFailureID(instance, attempt)
 				}
 				r.mu.Unlock()
 			} else if rpc != nil {
