@@ -21,7 +21,7 @@ import { connect as tlsConnect } from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { randomBytes } from 'node:crypto';
-import { killTree, runPowerShellJson } from '../lib/ps.mjs';
+import { killTree, runFile, runPowerShellJson } from '../lib/ps.mjs';
 import { describePowerShellFailure } from '../tests/windows/clixml.mjs';
 import { launchServer, recordServerAndEngine, isNodeServer, launchSpec } from './server-under-test.mjs';
 import { verifyEngineProcess } from '../tests/windows/launch.mjs';
@@ -51,25 +51,61 @@ async function powershellJson(script) {
     throw new Error(describePowerShellFailure(error), { cause: error });
   }
 }
-let staleSystemPID = null;
-if (process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted') {
+// The stale-PID proof needs a process the app must never stop: killable, not
+// critical, and alive for the whole run. A temporary scheduled task running as
+// SYSTEM starts a PowerShell that records its own PID and sleeps. An arbitrary
+// svchost can exit on its own (jobs 120949316352 and 120614380814), and a
+// critical process such as winlogon would bugcheck the runner if a regression
+// ever stopped it.
+const CANARY_TASK = `net-switch-canary-${process.pid}`;
+let canary = null;
+
+async function systemProcessIdentity(pid) {
   // Get-Process reads the running token's owner directly. A CIM service scan
-  // can spend the whole deadline loading WMI on a cold ARM64 runner, and a
-  // configured service account is weaker evidence than the live identity.
-  // winlogon runs as SYSTEM for the life of the session. An arbitrary svchost
-  // can exit on its own during the test (jobs 120949316352 and 120614380814),
-  // which the final liveness check cannot tell apart from a stop.
-  staleSystemPID = await powershellJson(`$system = (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18').Translate([Security.Principal.NTAccount]).Value
-$process = Get-Process -Name winlogon -IncludeUserName -ErrorAction Stop | Where-Object { $_.UserName -eq $system } | Select-Object -First 1
-if (-not $process) { throw 'No running SYSTEM winlogon available for stale PID proof' }
-[int]$process.Id | ConvertTo-Json -Compress`);
-  console.log(`SYSTEM winlogon PID for stale-PID proof: ${staleSystemPID}`);
-  await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
+  // can spend the whole deadline loading WMI on a cold ARM64 runner.
+  return powershellJson(`$system = (New-Object Security.Principal.SecurityIdentifier 'S-1-5-18').Translate([Security.Principal.NTAccount]).Value
+$process = Get-Process -Id ${Number(pid)} -IncludeUserName -ErrorAction Stop
+if ($process.UserName -ne $system) { throw "PID ${Number(pid)} runs as $($process.UserName), not $system" }
+[pscustomobject]@{ Id = [int]$process.Id; Name = $process.ProcessName; Start = [string]$process.StartTime.ToFileTimeUtc() } | ConvertTo-Json -Compress`);
 }
-const server = launchServer(dataDir);
+
+async function stopSystemCanary(task, process) {
+  await runFile('schtasks.exe', ['/End', '/TN', task], { timeoutMs: 30_000 }).catch(() => {});
+  await runFile('schtasks.exe', ['/Delete', '/TN', task, '/F'], { timeoutMs: 30_000 }).catch(() => {});
+  if (!process) return;
+  // End already stops the task's process; this covers a task that lost track of it.
+  await powershellJson(`$process = Get-Process -Id ${Number(process.pid)} -ErrorAction SilentlyContinue
+if ($process -and $process.ProcessName -eq '${process.name.replaceAll("'", "''")}' -and [string]$process.StartTime.ToFileTimeUtc() -eq '${process.start}') { Stop-Process -Id $process.Id -Force }`).catch(() => {});
+}
+
+async function startSystemCanary() {
+  const script = path.join(dataDir, 'system-canary.ps1');
+  const pidFile = path.join(dataDir, 'system-canary.pid');
+  await writeFile(script, `$PID | Set-Content -LiteralPath '${pidFile.replaceAll("'", "''")}' -Encoding ASCII
+Start-Sleep -Seconds 3600
+`);
+  const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${script}"`;
+  await runFile('schtasks.exe', ['/Create', '/TN', CANARY_TASK, '/TR', command, '/SC', 'ONCE', '/ST', '00:00', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'], { timeoutMs: 30_000 });
+  try {
+    await runFile('schtasks.exe', ['/Run', '/TN', CANARY_TASK], { timeoutMs: 30_000 });
+    const pid = await until('the SYSTEM canary starting', async () => {
+      const text = await readFile(pidFile, 'utf8').catch(() => '');
+      const value = Number(text.trim());
+      return Number.isInteger(value) && value > 0 ? value : null;
+    }, 60);
+    const identity = await systemProcessIdentity(pid);
+    if (identity.Name !== 'powershell') throw new Error(`the SYSTEM canary is ${identity.Name}, not powershell`);
+    console.log(`SYSTEM canary PID for stale-PID proof: ${pid} (${identity.Name}, started ${identity.Start})`);
+    return { pid, name: identity.Name, start: identity.Start, task: CANARY_TASK };
+  } catch (error) {
+    await stopSystemCanary(CANARY_TASK, null).catch(() => {});
+    throw error;
+  }
+}
+
+const hosted = process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted';
+let server = null;
 let serverOutput = '';
-server.stdout.on('data', (chunk) => (serverOutput += chunk));
-server.stderr.on('data', (chunk) => (serverOutput += chunk));
 
 let session = null;
 const open = [];
@@ -229,11 +265,18 @@ function check(condition, message) {
 
 let failed = false;
 try {
+  if (hosted) {
+    canary = await startSystemCanary();
+    await writeFile(path.join(dataDir, 'engine.pid'), String(canary.pid));
+  }
+  server = launchServer(dataDir);
+  server.stdout.on('data', (chunk) => (serverOutput += chunk));
+  server.stderr.on('data', (chunk) => (serverOutput += chunk));
   session = await until('the server starting', async () => JSON.parse(await readFile(path.join(dataDir, 'server.json'), 'utf8')), 60);
   let state = await routingOn();
   await verifyEngineProcess(launchSpec, dataDir);
-  if (staleSystemPID) check(Number(await readFile(path.join(dataDir, 'engine.pid'), 'utf8')) !== staleSystemPID, 'start replaced a stale SYSTEM process PID');
-  if (staleSystemPID && !isNodeServer) {
+  if (canary) check(Number(await readFile(path.join(dataDir, 'engine.pid'), 'utf8')) !== canary.pid, 'start replaced a stale SYSTEM process PID');
+  if (canary && !isNodeServer) {
     const { stdout, stderr } = await promisify(execFile)('go', ['test', '-v', '-count=1', '-timeout=90s', '-run=^TestReadWorkerCannotWriteControlHKLMOrTCP$', './internal/platform/worker'], {
       cwd: ROOT, windowsHide: true, timeout: 120_000, maxBuffer: 2 * 1024 * 1024,
       env: { ...process.env, NETSWITCH_CONTROL_PID: String(server.pid), GOMAXPROCS: '2' },
@@ -301,20 +344,20 @@ try {
   check(counts[main.id] === 6, `an app pinned to the main line stays on it while combining (${JSON.stringify(counts)})`);
   await closeAll();
 
-  if (staleSystemPID) {
+  if (canary) {
     await api('routing', { on: false });
-    await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
+    await writeFile(path.join(dataDir, 'engine.pid'), String(canary.pid));
     await api('routing', { on: false });
     check(await readFile(path.join(dataDir, 'engine.pid')).then(() => false, (error) => error.code === 'ENOENT'), 'Turn off removed a stale SYSTEM process PID');
-    await writeFile(path.join(dataDir, 'engine.pid'), String(staleSystemPID));
+    await writeFile(path.join(dataDir, 'engine.pid'), String(canary.pid));
   }
   await api('quit', {});
   await until('the server ending', async () => server.exitCode !== null, 30);
   check(server.exitCode === 0, 'quitting stops routing and ends the server');
-  if (staleSystemPID) {
+  if (canary) {
     check(await readFile(path.join(dataDir, 'engine.pid')).then(() => false, (error) => error.code === 'ENOENT'), 'Quit removed a stale SYSTEM process PID');
-    const name = await powershellJson(`(Get-Process -Id ${staleSystemPID} -ErrorAction Stop).ProcessName | ConvertTo-Json -Compress`);
-    check(name === 'winlogon', 'the SYSTEM process was never stopped');
+    const still = await systemProcessIdentity(canary.pid).catch(() => null);
+    check(still?.Name === canary.name && still?.Start === canary.start, 'the SYSTEM canary was never stopped');
   }
   console.log('routing end-to-end test passed');
 } catch (error) {
@@ -327,11 +370,12 @@ try {
   console.error(log.split('\n').slice(-40).join('\n'));
 } finally {
   for (const socket of open.splice(0)) socket.destroy();
+  if (canary) await stopSystemCanary(canary.task, canary).catch(() => {});
   if (httpsResponder) await httpsResponder.close();
   // Quit the normal way, so the engine stops too; else end the whole tree.
-  if (server.exitCode === null && session) await api('quit', {}).catch(() => {});
+  if (server && server.exitCode === null && session) await api('quit', {}).catch(() => {});
   await delay(1000);
-  if (server.exitCode === null) await killTree(server.pid);
+  if (server && server.exitCode === null) await killTree(server.pid);
   await rm(dataDir, { recursive: true, force: true }).catch(() => {});
 }
 process.exit(failed ? 1 : 0);
