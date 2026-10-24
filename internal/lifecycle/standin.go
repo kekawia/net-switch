@@ -1,11 +1,8 @@
 package lifecycle
 
 import (
-	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -27,7 +24,7 @@ const standInRefusal = "this data folder belonged to a pre-release stand-in buil
 // Every read here is read-only. The callers do not own the engine's lifetime
 // lock at this point, and the journal's own reader (FileStore.Records) opens
 // the file for writing and truncates an incomplete tail, which only the owner
-// may do.
+// may do; journal.ReadOnly decodes the same frames and leaves the tail alone.
 func refuseStandInStore(data string) error {
 	for _, name := range []string{"service-config.json", "service-config.json.bak"} {
 		var c Config
@@ -57,74 +54,14 @@ func refuseStandInStore(data string) error {
 			return fmt.Errorf("%s: %s has no native schema", standInRefusal, name)
 		}
 	}
-	kinds, err := journalKinds(filepath.Join(data, "engine-journal.json"))
+	records, err := journal.ReadOnly(filepath.Join(data, "engine-journal.json"))
 	if err != nil {
-		return err
+		return fmt.Errorf("engine-journal.json: %w", err)
 	}
-	for _, kind := range []string{"adapter-service-scope", "adapter-linux-rule"} {
-		if kinds[kind] {
-			return fmt.Errorf("%s: engine-journal.json holds %q records", standInRefusal, kind)
+	for _, r := range records {
+		if r.Kind == "adapter-service-scope" || r.Kind == "adapter-linux-rule" {
+			return fmt.Errorf("%s: engine-journal.json holds %q records", standInRefusal, r.Kind)
 		}
 	}
 	return nil
-}
-
-// journalKinds lists the record kinds an engine journal holds, reading the
-// file only. It decodes the frames the way the owner does, except that an
-// incomplete or undecodable final line is skipped instead of truncated: that
-// is the torn write the owner recovers, and it holds no complete record to
-// judge. Corruption before another complete line is refused, as the owner
-// would refuse it.
-func journalKinds(path string) (map[string]bool, error) {
-	f, err := os.Open(path)
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	kinds := map[string]bool{}
-	r := bufio.NewReaderSize(f, 64<<10)
-	for {
-		line, err := r.ReadBytes('\n')
-		if err == io.EOF {
-			return kinds, nil
-		}
-		if err != nil {
-			return nil, err
-		}
-		var frame struct {
-			Record  json.RawMessage `json:"record"`
-			Records json.RawMessage `json:"records"`
-		}
-		var records []struct {
-			Kind string `json:"kind"`
-		}
-		decodeErr := json.Unmarshal(line, &frame)
-		if decodeErr == nil && len(line) <= journal.RecordLimit {
-			switch {
-			case frame.Records != nil:
-				decodeErr = json.Unmarshal(frame.Records, &records)
-			case frame.Record != nil:
-				records = append(records, struct {
-					Kind string `json:"kind"`
-				}{})
-				decodeErr = json.Unmarshal(frame.Record, &records[0])
-			default:
-				decodeErr = errors.New("journal frame needs one record or one record batch")
-			}
-		} else if decodeErr == nil {
-			decodeErr = errors.New("journal record exceeds limit")
-		}
-		if decodeErr != nil {
-			if _, peekErr := r.Peek(1); peekErr == io.EOF {
-				return kinds, nil
-			}
-			return nil, fmt.Errorf("engine-journal.json is corrupt before its final record: %w", decodeErr)
-		}
-		for _, record := range records {
-			kinds[record.Kind] = true
-		}
-	}
 }

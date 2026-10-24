@@ -1112,16 +1112,20 @@ func TestRealServices(t *testing.T) {
 		case <-time.After(40 * time.Second):
 			t.Fatal("interrupted apply did not release HTTP")
 		}
-		wait(t, "lease stops a blocked engine command", 50*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && !s.Running })
-		// The same fail-open bound as a lapse with no command in flight: the
-		// 30 s lease, one tick, the 5 s stall wait, then the host's cleanup.
+		// The same fail-open bound as a lapse with no command in flight (the
+		// 30 s lease, one tick, the 5 s stall wait, then the host's cleanup),
+		// measured from Control's death to completed fail-open: the service
+		// confirmed stopped, capture removed, direct traffic working.
+		wait(t, "lease stops a blocked engine command", 50*time.Second, func() bool { s, err := service.Query(service.Engine); return err == nil && s.Stopped })
 		stoppedAfter := time.Since(controlDied)
-		if stoppedAfter > 42*time.Second {
-			t.Fatal("blocked command outlived the fail-open bound from Control's death", stoppedAfter)
-		}
-		t.Logf("BLOCKED_APPLY engine_stopped_after=%s bound=42s", stoppedAfter)
-		expectClosed(t, stream)
+		fixture.clean(t)
 		directTraffic(t, ctx, fixture)
+		failedOpenAfter := time.Since(controlDied)
+		if failedOpenAfter > 42*time.Second {
+			t.Fatal("blocked command outlived the fail-open bound from Control's death", stoppedAfter, failedOpenAfter)
+		}
+		t.Logf("BLOCKED_APPLY engine_stopped_after=%s failed_open_after=%s bound=42s", stoppedAfter, failedOpenAfter)
+		expectClosed(t, stream)
 		restore()
 		if err := service.Start(ctx, service.Control); err != nil {
 			t.Fatal(err)

@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -62,8 +64,15 @@ func (d objectDriver) Replace(ctx context.Context, before, after journal.Fingerp
 }
 
 func (o *objects) fingerprint(v any) journal.Fingerprint {
+	return journal.Fingerprint{"boot": o.boot, "netns": o.netns, "object": ObjectJSON(v)}
+}
+
+// ObjectJSON is the "object" field of a Linux ownership record: the netlink
+// rule, route, address or TUN exactly as the engine journals it. The hosted
+// suite decodes live records with it to compare them with the kernel's state.
+func ObjectJSON(v any) string {
 	b, _ := json.Marshal(v)
-	return journal.Fingerprint{"boot": o.boot, "netns": o.netns, "object": string(b)}
+	return string(b)
 }
 func (d objectDriver) Validate(f journal.Fingerprint) error {
 	if len(f) != 3 || f["boot"] == "" || f["netns"] == "" || !json.Valid([]byte(f["object"])) {
@@ -276,6 +285,16 @@ func (d objectDriver) Remove(ctx context.Context, f journal.Fingerprint) error {
 		l, e := netlink.LinkByIndex(v.Index)
 		if e != nil {
 			return e
+		}
+		// Whether the engine stops, lapses or died, the apps' sockets on this
+		// address have nothing behind them any more. End them now so apps fail
+		// open at once instead of waiting out TCP (spec §2).
+		if p, parseErr := netip.ParsePrefix(v.CIDR); parseErr == nil {
+			if n, destroyErr := destroyBoundSockets(ctx, p); destroyErr != nil {
+				log.Printf("engine cleanup: app sockets on %s could not all be ended: %v (%d ended)", v.CIDR, destroyErr, n)
+			} else if n > 0 {
+				log.Printf("engine cleanup: ended %d app sockets bound to %s", n, v.CIDR)
+			}
 		}
 		err = netlink.AddrDel(l, &netlink.Addr{IPNet: prefix(v.CIDR)})
 	case "tun":

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -106,6 +108,17 @@ func (r *Remote) Fail(err error) {
 	r.failLocked(err)
 }
 func (r *Remote) failLocked(err error) { r.failWithReasonLocked(err, "") }
+
+// attemptFailureID identifies a start attempt the engine refused while its
+// instance kept running. Control counts one failure per distinct identity.
+func attemptFailureID(instance string, attempt uint64) string {
+	return instance + "#" + strconv.FormatUint(attempt, 10)
+}
+
+// refusedAttempt reports whether id is an attempt identity of this instance.
+func refusedAttempt(id, instance string) bool {
+	return instance != "" && strings.HasPrefix(id, instance+"#")
+}
 func (r *Remote) failWithReasonLocked(err error, reason string) {
 	message := err.Error()
 	if r.snapshot.Status != "error" || r.snapshot.FailureID == "" {
@@ -452,6 +465,7 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	r.mu.Lock()
 	r.stopping = false
 	r.attempt++
+	attempt := r.attempt
 	// Failures before an instance exists belong to this one start attempt.
 	if r.rpc == nil && !r.recovering {
 		r.instance = ""
@@ -485,9 +499,24 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 			rpc := r.rpc
 			r.mu.Unlock()
 			if rpc != nil && isRPCRejection(err) {
-				// The engine refused and stays attached; its status (error
-				// with lastError, or still off) is what Control classifies.
+				// The engine answered and stays attached, so this attempt
+				// failed while the instance lives on. Its failure identity is
+				// the attempt, not the instance: with the instance's identity
+				// every later refusal would look like the one Control already
+				// counted, and Control would retry it every poll with neither
+				// the 1/2/5/30 s backoff nor the five-failure latch (spec §2).
+				// A transport error takes the other branch; its outcome is
+				// published once by connection recovery, never here as well.
+				// A refused apply on an engine that was already on is not a
+				// failed start: forwarding continues on the loaded revision and
+				// Control resolves the conflict by raising its number (§3.3).
 				_ = r.refresh(ctx)
+				r.mu.Lock()
+				if r.rpc == rpc && !r.stopping && !running {
+					r.failLocked(err)
+					r.snapshot.FailureID = attemptFailureID(r.instance, attempt)
+				}
+				r.mu.Unlock()
 			} else if rpc != nil {
 				r.disconnect(rpc, err)
 			}

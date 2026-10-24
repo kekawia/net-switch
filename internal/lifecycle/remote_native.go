@@ -186,6 +186,13 @@ func (r *Remote) nativeRefresh(ctx context.Context) error {
 	if r.rpc == rpc && r.instance == instance && !r.stopping {
 		s := r.nativeSnapshotLocked(status)
 		s.Instance = instance
+		// The engine keeps reporting the error of a start it refused for as
+		// long as the instance lives. That failure already carries its
+		// attempt's identity; re-reading it must not mint the instance's
+		// identity and count the same refusal a second time.
+		if s.Status == "error" && r.snapshot.Status == "error" && refusedAttempt(r.snapshot.FailureID, instance) {
+			s.FailureID = r.snapshot.FailureID
+		}
 		r.snapshot = s
 	}
 	return nil

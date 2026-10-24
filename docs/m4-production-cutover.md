@@ -27,8 +27,10 @@ Control's client and the legacy CI are PR 4.
   adapter); run that build's uninstall or remove the folder, then install
   again". The inspection only reads: the journal's own reader opens the file
   for writing and truncates a torn tail, which only the lifetime-lock owner may
-  do, so the refusal decodes the frames itself and skips a torn tail
-  (`TestStandInInspectionLeavesTheJournalUntouched`). Linux 1.0 never shipped
+  do, so the refusal uses `journal.ReadOnly`, which shares the owner's bounded,
+  checksummed frame decoder and leaves a torn tail in place
+  (`TestStandInInspectionLeavesTheJournalUntouched`,
+  `TestReadOnlyDecodesLikeTheOwnerWithoutTouchingTheFile`). Linux 1.0 never shipped
   and 0.3.x is Windows-only, so no field data exists.
 - **A fresh engine instance accepts whatever revision Control sends first.**
   Found by the ported suite on Windows: the engine's durable record kept the
@@ -44,7 +46,34 @@ Control's client and the legacy CI are PR 4.
   number or a changed hash is still refused
   (`TestFreshInstanceAcceptsAnyFirstRevisionThenGuardsItsOwnHistory`). Within
   an instance the flow table already rejects stale and conflicting revisions
-  before the durable write.
+  before the durable write, and the protocol fences old instances and epochs.
+  A first commit equal to the inherited history whose sync fails leaves the
+  instance with no committed history, since nothing was acknowledged; its next
+  revision, lower or not, is its first (a design decision recorded in the
+  review of this PR; `TestUnacknowledgedFirstCommitEqualToInheritedHistoryGuardsNothing`).
+- **A refused start is an ordinary failed attempt.** While the engine refused
+  those 44 starts, Control retried every poll (1.3 s) with neither the
+  1/2/5/30 s backoff nor the five-failure latch: every refusal carried the
+  instance's identity, so Control counted the first and took the rest for the
+  failure it had already seen. A start the engine answers with an error while
+  its instance keeps running now carries the attempt's identity
+  (`instance#attempt`), re-reading the engine's status keeps it, and a refused
+  apply on an engine that was already on stays a plain conflict (spec §3.3).
+  Transport errors take the other path, where connection recovery publishes
+  the outcome once (`TestRefusedStartsAreDistinctFailuresCountedOnce`,
+  `TestRefusedStartsBackOffAndLatch`: 1, 2, 5, 30 s, latch at the fifth).
+- **Linux: the apps' routed sockets are ended when the engine stops or dies.**
+  An app's stream through the TUN terminates inside the engine's network
+  stack, so nothing resets it when the engine goes; the ported suite sat on
+  every such stream until its read deadline in six cases, lease lapse
+  included. Windows aborts the sockets of a removed adapter by itself; Linux
+  does not. Cleanup of the TUN's addresses (the live engine's stop, a lapse,
+  and the host's or ExecStopPost's recovery after a death all go through it)
+  now ends every TCP and UDP socket bound in those prefixes with SOCK_DESTROY,
+  the way `ss -K` does: a sock_diag dump finds each socket, and the kernel
+  resets the peer and fails the app's calls (spec §2, "normal internet works
+  in between"). A kernel without CONFIG_INET_DIAG_DESTROY is reported, not a
+  cleanup failure (`TestDestroyBoundSocketsEndsAppStreams`, isolated namespace).
 - **A lapsed lease never waits on a stuck command; a controller's stop is
   never cut short.** The protocol's expiry used to take the mutation lock; a
   start or apply stuck in a durable write held it, so capture stayed installed
@@ -84,14 +113,21 @@ Control's client and the legacy CI are PR 4.
     socket, destination and the line it chose (on Linux the namespace relay
     reports the process and socket it opened for the suite);
   - the stand-in's 16 `adapter-linux-rule` intents → the native engine's
-    `rule` ownership records, read from the journal without touching it and
-    compared field by field with the kernel's own `ip rule` listing: every
-    rule beyond the baseline is owned, every owned rule is live;
+    `rule` ownership records, decoded as the engine journals them
+    (`linux.ObjectJSON` of a netlink rule) and compared with the kernel's own
+    `ip rule` listing on every selector and the action, protocol and mark mask
+    included; a selector the comparison does not know is refused, not skipped.
+    The count is one source selector per address the kernel holds on the line
+    plus the fixed bypass, loopback-capture and mark selectors of each family;
+  - the stand-in's TUN named "NetSwitch" → the instance's TUN (`ns` plus the
+    first ten characters of the instance id, with the 198.18.0.1/30 address),
+    which is what the fixture's precondition now looks for;
   - the fixture's target is a line server on Linux and a byte echo on Windows;
     the other-user app checks that platform's complete reply, and the traffic
     checks speak the same contract;
   - the blocked-apply case holds the engine to the same 42 s fail-open bound
-    from Control's death as a plain lapse.
+    from Control's death as a plain lapse, measured to completed fail-open:
+    service confirmed stopped, capture removed, direct traffic working.
   No case is dropped or loosened; Windows-only and Linux-only cases keep their
   existing skips. The suite's time bounds are the ones main had (job 25 min,
   test process 22 min, suite context 20 min, Windows service wait 16 min):

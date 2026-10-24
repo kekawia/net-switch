@@ -31,6 +31,8 @@ type FileStore struct {
 	dirty      bool
 }
 
+// Records reads the journal as its owner: a torn final frame is truncated away
+// and the file synced, so the next append starts on a complete frame.
 func (f *FileStore) Records() ([]Record, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -43,12 +45,59 @@ func (f *FileStore) Records() ([]Record, error) {
 		return nil, err
 	}
 	defer file.Close()
+	frames, err := scanFrames(file)
+	if err != nil {
+		return nil, err
+	}
+	if frames.torn {
+		if err := file.Truncate(frames.complete); err != nil {
+			return nil, err
+		}
+		if err := file.Sync(); err != nil {
+			return nil, err
+		}
+	}
+	f.dirty = false
+	return frames.records, nil
+}
+
+// ReadOnly lists a journal's records without taking ownership of the file: it
+// opens the journal for reading only and leaves a torn final frame in place
+// for the owner to recover. Corruption before another complete frame is an
+// error, as it is for the owner. A missing journal has no records.
+func ReadOnly(path string) ([]Record, error) {
+	file, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	frames, err := scanFrames(file)
+	if err != nil {
+		return nil, err
+	}
+	return frames.records, nil
+}
+
+type scannedFrames struct {
+	records  []Record
+	complete int64 // bytes holding complete, valid frames
+	torn     bool  // an incomplete or invalid final frame follows them
+}
+
+// scanFrames decodes the newline-delimited checksummed frames of a journal,
+// bounding each line by RecordLimit before it is held whole. It is the one
+// reader of the on-disk format; the owner's recovery and read-only inspection
+// differ only in what they do about a torn tail.
+func scanFrames(file io.Reader) (scannedFrames, error) {
+	var out scannedFrames
 	r := bufio.NewReaderSize(file, 4096)
-	var records []Record
-	var offset int64
 	for {
 		var line []byte
 		oversize := false
+		var err error
 		for {
 			part, readErr := r.ReadSlice('\n')
 			if len(line)+len(part) > RecordLimit {
@@ -63,19 +112,11 @@ func (f *FileStore) Records() ([]Record, error) {
 			}
 		}
 		if err == io.EOF {
-			if len(line) > 0 || oversize {
-				if err := file.Truncate(offset); err != nil {
-					return nil, err
-				}
-				if err := file.Sync(); err != nil {
-					return nil, err
-				}
-			}
-			f.dirty = false
-			return records, nil
+			out.torn = len(line) > 0 || oversize
+			return out, nil
 		}
 		if err != nil {
-			return nil, err
+			return out, err
 		}
 		batch, decodeErr := decodeRecords(line)
 		if oversize {
@@ -83,21 +124,15 @@ func (f *FileStore) Records() ([]Record, error) {
 		}
 		if decodeErr != nil {
 			// A torn write may include its newline. Only the final invalid
-			// record is recoverable; corruption before another line is fatal.
+			// frame is recoverable; corruption before another line is fatal.
 			if _, peekErr := r.Peek(1); peekErr != io.EOF {
-				return nil, decodeErr
+				return out, decodeErr
 			}
-			if err := file.Truncate(offset); err != nil {
-				return nil, err
-			}
-			if err := file.Sync(); err != nil {
-				return nil, err
-			}
-			f.dirty = false
-			return records, nil
+			out.torn = true
+			return out, nil
 		}
-		records = append(records, batch...)
-		offset += int64(len(line))
+		out.records = append(out.records, batch...)
+		out.complete += int64(len(line))
 	}
 }
 

@@ -34,15 +34,33 @@ type nativeRuntime struct {
 	state   atomic.Value
 	started time.Time
 	starts  atomic.Int64
+	// refuseStart, when set, makes every start fail the way the engine's
+	// durable write or compile step can, with the instance staying alive and
+	// reporting the error as its status.
+	refuseStart atomic.Value
+	lastError   atomic.Value
 }
 
 func (r *nativeRuntime) Start(_ context.Context, v policy.Revision) (policy.Applied, error) {
 	r.starts.Add(1)
+	if refuse, _ := r.refuseStart.Load().(refusal); refuse.err != nil {
+		r.state.Store("error")
+		r.lastError.Store(refuse.err.Error())
+		return policy.Applied{}, refuse.err
+	}
 	a, err := r.table.Apply(v)
 	if err == nil {
 		r.state.Store("on")
+		r.lastError.Store("")
 	}
 	return a, err
+}
+
+type refusal struct{ err error }
+
+func (r *nativeRuntime) LastError() string {
+	s, _ := r.lastError.Load().(string)
+	return s
 }
 func (r *nativeRuntime) Apply(_ context.Context, v policy.Revision) (policy.Applied, error) {
 	return r.table.Apply(v)
@@ -686,4 +704,51 @@ func TestNativeAdapterLossReachesTheSnapshotAfterTheServiceStops(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("snapshot never reported the stopped engine")
+}
+
+// Spec §2: every failed start counts toward the backoff and the latch. A start
+// the engine refuses while its instance keeps running must therefore be a
+// distinct failure each time. On main every refusal carried the instance's
+// identity, so Control counted the first and took the rest for the failure it
+// had already seen: the Windows lifecycle run retried a refused start every
+// 1.3 s for a minute with no backoff and no latch. Re-reading the engine's
+// status must not mint a new identity for the same refusal either.
+func TestRefusedStartsAreDistinctFailuresCountedOnce(t *testing.T) {
+	f := newNativeFixture(t, nativeProber{})
+	f.runtime.refuseStart.Store(refusal{errors.New("native revision history cannot go backwards or change its hash")})
+	ctx := context.Background()
+	rev := testRevision(1)
+	f.remote.Restore(&rev)
+	seen := map[string]bool{}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if err := f.remote.Start(ctx, rev.Policy); err == nil {
+			t.Fatal("refused start reported success")
+		}
+		s := f.remote.Snapshot()
+		if s.Status != "error" || s.Error == nil || !strings.Contains(*s.Error, "cannot go backwards") {
+			t.Fatalf("attempt %d: refusal not reported as the attempt's error: %+v", attempt, s)
+		}
+		if s.FailureID == "" || seen[s.FailureID] || s.FailureID == s.Instance {
+			t.Fatalf("attempt %d: failure identity %q is not distinct per attempt (seen %v)", attempt, s.FailureID, seen)
+		}
+		seen[s.FailureID] = true
+		for i := 0; i < 2; i++ {
+			if err := f.remote.refresh(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if again := f.remote.Snapshot(); again.Status != "error" || again.FailureID != s.FailureID {
+				t.Fatalf("attempt %d: a status re-read changed the failure identity: %+v", attempt, again)
+			}
+		}
+	}
+	if f.runtime.starts.Load() != 3 {
+		t.Fatal("engine saw", f.runtime.starts.Load(), "starts")
+	}
+	f.runtime.refuseStart.Store(refusal{})
+	if err := f.remote.Start(ctx, rev.Policy); err != nil {
+		t.Fatal("accepted start failed", err)
+	}
+	if s := f.remote.Snapshot(); s.Status != "on" || s.FailureID != "" {
+		t.Fatalf("accepted start left a failure behind: %+v", s)
+	}
 }

@@ -139,7 +139,11 @@ func (d *Durable) reloadCommitted() {
 		// This instance has no history of its own yet. If the interrupted
 		// first commit reached the disk, that revision is the one to continue
 		// from; if the file still holds the inherited history, nothing is
-		// committed yet.
+		// committed yet. That includes a first commit equal to the inherited
+		// {N, hash} whose sync failed: it was never acknowledged, so per spec
+		// §3.3 this instance still has no history to guard and its next
+		// revision, lower or not, is its first (a design decision recorded in
+		// the review of this change).
 		if r.N != d.record.N || r.Hash != d.record.Hash {
 			d.record.N, d.record.Hash = r.N, r.Hash
 			d.committed = true

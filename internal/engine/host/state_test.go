@@ -241,6 +241,60 @@ func TestFreshInstanceAcceptsAnyFirstRevisionThenGuardsItsOwnHistory(t *testing.
 	}
 }
 
+// A fresh instance whose first revision happens to equal the inherited history
+// {N, hash}: the replacement writes the same values, and then the directory
+// sync fails. Nothing was acknowledged to Control, so by spec §3.3 (the
+// persisted appliedRevision is history only; an instance's history starts with
+// its first acknowledged commit) the instance still has no committed history
+// to guard, and a later lower revision is accepted. Review of 4e1e836e raised
+// this path; it is correct by design and documented here.
+func TestUnacknowledgedFirstCommitEqualToInheritedHistoryGuardsNothing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	failAfterWrite := false
+	acknowledged := 0
+	save := func(r Record) error {
+		b, _ := json.Marshal(r)
+		if err := os.WriteFile(path, b, 0600); err != nil {
+			return err
+		}
+		if failAfterWrite {
+			return errors.New("directory sync failed after rename")
+		}
+		return nil
+	}
+	previous, err := Open(path, "first", save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := previous.SaveApplied(policy.Applied{N: 9, Hash: "nine"}); err != nil {
+		t.Fatal(err)
+	}
+	next, err := Open(path, "second", save)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failAfterWrite = true
+	if err := next.SaveApplied(policy.Applied{N: 9, Hash: "nine"}); err == nil {
+		acknowledged++
+	}
+	failAfterWrite = false
+	if acknowledged != 0 {
+		t.Fatal("a commit whose sync failed was acknowledged")
+	}
+	if next.committed {
+		t.Fatal("an unacknowledged first commit became committed history")
+	}
+	if err := next.SaveApplied(policy.Applied{N: 3, Hash: "three"}); err != nil {
+		t.Fatal("instance with no acknowledged history refused a lower first revision:", err)
+	}
+	if r, err := ReadRecord(path); err != nil || r.N != 3 || r.Hash != "three" || r.Instance != "second" {
+		t.Fatal("first acknowledged revision not committed", r, err)
+	}
+	if err := next.SaveApplied(policy.Applied{N: 2, Hash: "two"}); err == nil {
+		t.Fatal("history committed by this instance went backwards")
+	}
+}
+
 func TestEpochRetryAfterReplacementWithoutAcknowledgement(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	failAfterWrite := false

@@ -19,6 +19,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/service"
 	"github.com/AyoubAchour/net-switch/tests/linux/topo"
+	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
 
@@ -169,19 +170,25 @@ func prepareTUN(t *testing.T, _, data string) tunFixture {
 				t.Fatal(err)
 			}
 			diff := now.Diff(before)
-			if len(diff) == 0 || !strings.Contains(strings.Join(diff, "\n"), "NetSwitch") {
-				t.Fatal("no real TUN objects", diff)
+			// The native engine names its TUN after its instance ("ns" plus
+			// the first ten characters, alias "netswitch:<instance>"), not
+			// "NetSwitch" like the stand-in, and gives it the 198.18.0.1/30
+			// address the capture routes point at.
+			state, err := host.ReadRecord(filepath.Join(data, "engine-state.json"))
+			if err != nil {
+				t.Fatal(err)
 			}
-			t.Logf("TUN installed %d adapter/address/route/rule changes", len(diff))
+			tunName := "ns" + state.Instance[:10]
+			changes := strings.Join(diff, "\n")
+			if len(diff) == 0 || !strings.Contains(changes, tunName+" inet 198.18.0.1/30") {
+				t.Fatalf("no real TUN objects for instance %s (device %s): %v", state.Instance, tunName, diff)
+			}
+			t.Logf("TUN %s installed %d adapter/address/route/rule changes", tunName, len(diff))
 			// Ownership: every policy rule the kernel now holds beyond the
 			// baseline is one the native engine journaled before creating it
 			// (an intent or created "rule" record of the live instance), read
 			// from the journal file without touching it, and compared with
 			// the kernel's own `ip rule` listing field by field.
-			state, err := host.ReadRecord(filepath.Join(data, "engine-state.json"))
-			if err != nil {
-				t.Fatal(err)
-			}
 			owned := map[string]string{}
 			for _, record := range nativeLiveRecords(t, data, state.Instance) {
 				if record.Kind != "rule" {
@@ -255,37 +262,53 @@ func prepareTUN(t *testing.T, _, data string) tunFixture {
 // The namespace stays in this disposable subprocess. Entering it on a Go
 // thread of the harness can make ip netns pids identify the harness itself,
 // which would invalidate the cleanup test by killing its own observer.
-// ruleKey is the comparable shape of one policy rule: the fields the native
-// engine's rules carry (family, preference, table, source, destination,
-// incoming interface and firewall mark), formatted the same way from the
-// engine's journaled netlink rule and from the kernel's `ip rule` text.
-func ruleKey(family, pref, table int, src, dst, iif string, mark uint32) string {
-	return fmt.Sprintf("family=%d pref=%d table=%d from=%s to=%s iif=%s fwmark=%#x", family, pref, table, src, dst, iif, mark)
+// policyRule is the comparable shape of one policy rule: every selector and
+// the action the native engine's rules can carry. The journaled netlink rule
+// and the kernel's `ip rule` text both normalize to it, and a rule with any
+// other selector set is refused rather than compared on a subset.
+type policyRule struct {
+	Family, Pref, Table int
+	Src, Dst, Iif, Oif  string
+	Mark, Mask          uint32
+	Tos                 uint
+	Invert              bool
+	Protocol            uint8
+	Type                uint8 // the fib rule action (RTN_UNICAST is "lookup")
 }
 
-// nativeRuleKey reads the netlink rule the engine journaled (the "object" of a
-// "rule" ownership record) and normalizes it.
+func (r policyRule) key() string { return fmt.Sprintf("%+v", r) }
+
+// nativeRuleKey decodes the netlink rule the engine journaled (the "object" of
+// a "rule" ownership record, written by linux.ObjectJSON) and normalizes it.
 func nativeRuleKey(object string) (string, error) {
-	var r struct {
-		Family, Priority, Table int
-		Mark                    uint32
-		Src, Dst                *struct{ IP, Mask []byte }
-		IifName                 string
-	}
+	var r netlink.Rule
 	if err := json.Unmarshal([]byte(object), &r); err != nil {
 		return "", fmt.Errorf("native rule record %q: %w", object, err)
 	}
-	cidr := func(n *struct{ IP, Mask []byte }) string {
+	// netlink.NewRule's defaults are the unset values of these selectors.
+	if r.TunID != 0 || r.Goto != -1 || r.Flow != -1 || r.SuppressIfgroup != -1 || r.SuppressPrefixlen != -1 || r.Dport != nil || r.Sport != nil || r.IPProto != 0 || r.UIDRange != nil {
+		return "", fmt.Errorf("native rule record carries a selector this comparison does not support: %s", object)
+	}
+	cidr := func(n *net.IPNet) string {
 		if n == nil {
 			return ""
 		}
-		return (&net.IPNet{IP: n.IP, Mask: n.Mask}).String()
+		return n.String()
 	}
-	return ruleKey(r.Family, r.Priority, r.Table, cidr(r.Src), cidr(r.Dst), r.IifName, r.Mark), nil
+	p := policyRule{Family: r.Family, Pref: r.Priority, Table: r.Table, Src: cidr(r.Src), Dst: cidr(r.Dst), Iif: r.IifName, Oif: r.OifName, Mark: r.Mark, Mask: ^uint32(0), Tos: r.Tos, Invert: r.Invert, Protocol: r.Protocol, Type: r.Type}
+	if r.Mask != nil {
+		p.Mask = *r.Mask
+	}
+	if r.Mark == 0 {
+		p.Mask = 0
+	}
+	return p.key(), nil
 }
 
 // liveRuleKey normalizes one line of `ip -N <family> rule show`, such as
-// "11001: from 192.168.1.2 lookup 2110 proto 135".
+// "11001: from 192.168.1.2 lookup 2110 proto 186". Every token must be one the
+// comparison understands; an unknown selector or action is an error, never
+// silently skipped.
 func liveRuleKey(family int, line string) (string, error) {
 	fields := strings.Fields(line)
 	if len(fields) == 0 || !strings.HasSuffix(fields[0], ":") {
@@ -306,33 +329,62 @@ func liveRuleKey(family int, line string) (string, error) {
 		}
 		return netip.PrefixFrom(a, a.BitLen()).String(), nil
 	}
-	var src, dst, iif string
-	var table int
-	var mark uint32
-	for i := 1; i+1 < len(fields); i += 2 {
-		value := fields[i+1]
-		switch fields[i] {
+	r := policyRule{Family: family, Pref: pref}
+	number := func(value string, bits int) (uint64, error) {
+		return strconv.ParseUint(strings.TrimPrefix(value, "0x"), 16, bits)
+	}
+	for i := 1; i < len(fields); i++ {
+		token := fields[i]
+		value := ""
+		if i+1 < len(fields) {
+			value = fields[i+1]
+		}
+		switch token {
+		case "not":
+			r.Invert = true
+			continue
+		case "prohibit", "unreachable", "blackhole":
+			r.Type = map[string]uint8{"prohibit": unix.RTN_PROHIBIT, "unreachable": unix.RTN_UNREACHABLE, "blackhole": unix.RTN_BLACKHOLE}[token]
+			continue
 		case "from":
 			if value != "all" {
-				src, err = cidr(value)
+				r.Src, err = cidr(value)
 			}
 		case "to":
-			dst, err = cidr(value)
+			r.Dst, err = cidr(value)
 		case "iif":
-			iif = value
-		case "lookup":
-			table, err = tableNumber(value)
-		case "fwmark":
-			text, _, _ := strings.Cut(value, "/")
+			r.Iif = value
+		case "oif":
+			r.Oif = value
+		case "tos", "dsfield":
 			var v uint64
-			v, err = strconv.ParseUint(strings.TrimPrefix(text, "0x"), 16, 32)
-			mark = uint32(v)
+			v, err = number(value, 8)
+			r.Tos = uint(v)
+		case "fwmark":
+			mark, mask, masked := strings.Cut(value, "/")
+			var v uint64
+			v, err = number(mark, 32)
+			r.Mark, r.Mask = uint32(v), ^uint32(0)
+			if err == nil && masked {
+				v, err = number(mask, 32)
+				r.Mask = uint32(v)
+			}
+		case "lookup", "table":
+			r.Table, err = tableNumber(value)
+			r.Type = unix.RTN_UNICAST
+		case "proto", "protocol":
+			var v int
+			v, err = protocolNumber(value)
+			r.Protocol = uint8(v)
+		default:
+			return "", fmt.Errorf("rule line %q: selector or action %q is not one this comparison supports", line, token)
 		}
 		if err != nil {
 			return "", fmt.Errorf("rule line %q: %w", line, err)
 		}
+		i++
 	}
-	return ruleKey(family, pref, table, src, dst, iif, mark), nil
+	return r.key(), nil
 }
 
 func tableNumber(value string) (int, error) {
@@ -343,6 +395,20 @@ func tableNumber(value string) (int, error) {
 		return unix.RT_TABLE_MAIN, nil
 	case "default":
 		return unix.RT_TABLE_DEFAULT, nil
+	}
+	return strconv.Atoi(value)
+}
+
+func protocolNumber(value string) (int, error) {
+	switch value {
+	case "kernel":
+		return unix.RTPROT_KERNEL, nil
+	case "boot":
+		return unix.RTPROT_BOOT, nil
+	case "static":
+		return unix.RTPROT_STATIC, nil
+	case "bgp":
+		return unix.RTPROT_BGP, nil
 	}
 	return strconv.Atoi(value)
 }
