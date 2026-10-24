@@ -23,7 +23,7 @@ import (
 // This runs only in CI's isolated namespace, where the addresses it uses
 // belong to nobody else.
 func TestRoutedSocketRetirementFollowsTheSpecRule(t *testing.T) {
-	ctx, local := isolatedTunLike(t)
+	ctx, tun := isolatedTunLike(t)
 	// Connected sockets with non-local peers: a TCP handshake in flight to a
 	// peer that never answers, and connected UDP in both families.
 	dialed := make(chan error, 1)
@@ -43,7 +43,9 @@ func TestRoutedSocketRetirementFollowsTheSpecRule(t *testing.T) {
 	}
 	defer udp6.Close()
 	// Spared: a listener on the TUN address, a local-only connection to it
-	// from this host's other address, an unconnected UDP socket, and loopback.
+	// from this host's other address, a connection bound to that other
+	// address (in the TUN's subnet, not the journaled address), an
+	// unconnected UDP socket, and loopback.
 	listener, err := net.Listen("tcp4", "198.18.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +61,11 @@ func TestRoutedSocketRetirementFollowsTheSpecRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer accepted.Close()
+	neighbour, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("198.18.0.2")}, &net.UDPAddr{IP: net.ParseIP("192.0.2.9"), Port: 53})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer neighbour.Close()
 	unconnected, err := net.ListenPacket("udp4", "198.18.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -69,7 +76,7 @@ func TestRoutedSocketRetirementFollowsTheSpecRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer loopback.Close()
-	out := retireRoutedSocketsWithin(ctx, []netip.Prefix{netip.MustParsePrefix("198.18.0.0/30"), netip.MustParsePrefix("fdfe:dcba:9876::/126")}, local)
+	out := retireRoutedSocketsWithin(ctx, tun)
 	if out.err != nil {
 		t.Fatal(out.err)
 	}
@@ -94,9 +101,11 @@ func TestRoutedSocketRetirementFollowsTheSpecRule(t *testing.T) {
 	if _, err := net.Dial("tcp4", listener.Addr().String()); err != nil {
 		t.Fatal("listener on the TUN address was destroyed", err)
 	}
-	localConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-	if _, err := localConn.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
-		t.Fatal("local-only connection was destroyed", err)
+	for name, conn := range map[string]net.Conn{"local-only connection": localConn, "connection on the neighbouring address": neighbour} {
+		conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		if _, err := conn.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+			t.Fatalf("%s was destroyed: %v", name, err)
+		}
 	}
 	unconnected.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
 	if _, _, err := unconnected.ReadFrom(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
@@ -111,8 +120,7 @@ func TestRoutedSocketRetirementFollowsTheSpecRule(t *testing.T) {
 // pass after one request, and a table larger than the bound ends the dump
 // without hanging; both leave the mandatory cleanup its time.
 func TestRoutedSocketRetirementIsBoundedAndStopsWhenRefused(t *testing.T) {
-	ctx, local := isolatedTunLike(t)
-	prefixes := []netip.Prefix{netip.MustParsePrefix("198.18.0.0/30")}
+	ctx, tun := isolatedTunLike(t)
 	var sockets []*net.UDPConn
 	for i := 0; i < 5; i++ {
 		c, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("198.18.0.1")}, &net.UDPAddr{IP: net.ParseIP("192.0.2.9"), Port: 100 + i})
@@ -126,7 +134,7 @@ func TestRoutedSocketRetirementIsBoundedAndStopsWhenRefused(t *testing.T) {
 	sockDestroyRequest = func(context.Context, *os.File, int, socketRow) error { attempts++; return unix.EOPNOTSUPP }
 	t.Cleanup(func() { sockDestroyRequest = sockDestroy })
 	began := time.Now()
-	out := retireRoutedSocketsWithin(ctx, prefixes, local)
+	out := retireRoutedSocketsWithin(ctx, tun)
 	if attempts != 1 || out.ended != 0 || out.err == nil || !errors.Is(out.err, unix.EOPNOTSUPP) {
 		t.Fatalf("unsupported destruction did not stop after one request: attempts=%d %+v", attempts, out)
 	}
@@ -137,7 +145,7 @@ func TestRoutedSocketRetirementIsBoundedAndStopsWhenRefused(t *testing.T) {
 	old := socketDumpMaxMatches
 	socketDumpMaxMatches = 2
 	t.Cleanup(func() { socketDumpMaxMatches = old })
-	out = retireRoutedSocketsWithin(ctx, prefixes, local)
+	out = retireRoutedSocketsWithin(ctx, tun)
 	if !errors.Is(out.err, errSocketDumpBounded) || out.ended != 2 {
 		t.Fatalf("bounded dump: %+v", out)
 	}
@@ -145,7 +153,7 @@ func TestRoutedSocketRetirementIsBoundedAndStopsWhenRefused(t *testing.T) {
 	// A deadline already spent leaves nothing for retirement, and says so.
 	spent, cancel := context.WithDeadline(ctx, time.Now())
 	defer cancel()
-	if out := retireRoutedSocketsWithin(spent, prefixes, local); out.err == nil {
+	if out := retireRoutedSocketsWithin(spent, tun); out.err == nil {
 		t.Fatal("retirement ran past an exhausted deadline", out)
 	}
 }
@@ -153,8 +161,9 @@ func TestRoutedSocketRetirementIsBoundedAndStopsWhenRefused(t *testing.T) {
 // isolatedTunLike gives the isolated namespace a dummy device shaped like the
 // engine's TUN (198.18.0.1/30 plus a second host address, fdfe:dcba:9876::1)
 // and device routes for the test peers, so handshakes and datagrams leave
-// with the TUN source and are never answered.
-func isolatedTunLike(t *testing.T) (context.Context, func(netip.Addr) bool) {
+// with the TUN source and are never answered. It returns the journaled TUN
+// addresses as retirement would read them.
+func isolatedTunLike(t *testing.T) (context.Context, map[netip.Addr]bool) {
 	t.Helper()
 	if os.Getenv("NETSWITCH_ISOLATED_NETNS") != "1" {
 		t.Skip("requires CI's isolated network namespace")
@@ -189,7 +198,7 @@ func isolatedTunLike(t *testing.T) (context.Context, func(netip.Addr) bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
-	return ctx, hostLocal()
+	return ctx, map[netip.Addr]bool{netip.MustParseAddr("198.18.0.1"): true, netip.MustParseAddr("fdfe:dcba:9876::1"): true}
 }
 
 func waitForState(t *testing.T, family, protocol int, local netip.Addr, state uint8) {

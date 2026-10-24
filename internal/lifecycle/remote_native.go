@@ -186,12 +186,15 @@ func (r *Remote) nativeRefresh(ctx context.Context) error {
 	if r.rpc == rpc && r.instance == instance && !r.stopping {
 		s := r.nativeSnapshotLocked(status)
 		s.Instance = instance
-		// The engine keeps reporting the error of a start it refused for as
-		// long as the instance lives. That failure already carries its
-		// attempt's identity; re-reading it must not mint the instance's
-		// identity and count the same refusal a second time.
-		if s.Status == "error" && r.snapshot.Status == "error" && refusedAttempt(r.snapshot.FailureID, instance) {
-			s.FailureID = r.snapshot.FailureID
+		// The engine reports the error of a refused start for as long as the
+		// instance lives, and may do so while the start is still pending. That
+		// failure belongs to the attempt; a status read must publish it under
+		// the attempt's identity, never mint the instance's and count the same
+		// refusal a second time.
+		if s.Status == "error" {
+			if id := r.attemptIdentityLocked(instance); id != "" {
+				s.FailureID = id
+			}
 		}
 		r.snapshot = s
 	}
@@ -200,7 +203,7 @@ func (r *Remote) nativeRefresh(ctx context.Context) error {
 
 // nativeLoad sends start or apply. An engine that is already on receives apply,
 // which the table answers idempotently; start is only for a fresh instance.
-func (r *Remote) nativeLoad(ctx context.Context, revision ce.Revision, running bool) (ce.Acknowledgement, error) {
+func (r *Remote) nativeLoad(ctx context.Context, rpc *RPC, instance string, epoch uint64, revision ce.Revision, running bool) (ce.Acknowledgement, error) {
 	native, err := nativeRevision(revision)
 	if err != nil {
 		return ce.Acknowledgement{}, err
@@ -210,15 +213,12 @@ func (r *Remote) nativeLoad(ctx context.Context, revision ce.Revision, running b
 		method = "apply"
 	}
 	var applied policy.Applied
-	if err := r.call(ctx, method, map[string]any{"revision": native}, "", &applied); err != nil {
+	if err := r.sendOn(ctx, rpc, instance, epoch, method, map[string]any{"revision": native}, "", "", &applied); err != nil {
 		return ce.Acknowledgement{}, err
 	}
 	if applied.N != native.N || applied.Hash != native.Hash {
 		return ce.Acknowledgement{}, errors.New("engine acknowledged a different revision")
 	}
-	r.mu.Lock()
-	instance := r.instance
-	r.mu.Unlock()
 	return ce.Acknowledgement{Number: revision.Number, Hash: revision.Hash, Instance: instance, Point: applied.Point}, nil
 }
 

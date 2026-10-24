@@ -39,6 +39,10 @@ type nativeRuntime struct {
 	// reporting the error as its status.
 	refuseStart atomic.Value
 	lastError   atomic.Value
+	// refusing, when set, is closed once a refused start has recorded its
+	// error and before the refusal is answered; gate then holds the answer.
+	refusing chan struct{}
+	gate     chan struct{}
 }
 
 func (r *nativeRuntime) Start(_ context.Context, v policy.Revision) (policy.Applied, error) {
@@ -46,6 +50,11 @@ func (r *nativeRuntime) Start(_ context.Context, v policy.Revision) (policy.Appl
 	if refuse, _ := r.refuseStart.Load().(refusal); refuse.err != nil {
 		r.state.Store("error")
 		r.lastError.Store(refuse.err.Error())
+		if r.refusing != nil {
+			close(r.refusing)
+			r.refusing = nil
+			<-r.gate
+		}
 		return policy.Applied{}, refuse.err
 	}
 	a, err := r.table.Apply(v)
@@ -751,4 +760,83 @@ func TestRefusedStartsAreDistinctFailuresCountedOnce(t *testing.T) {
 	if s := f.remote.Snapshot(); s.Status != "on" || s.FailureID != "" {
 		t.Fatalf("accepted start left a failure behind: %+v", s)
 	}
+}
+
+// The stats poll reads the engine's status every five seconds. While a start
+// is pending, the engine already reports the refusal as its status; a poll in
+// that window must publish it under the pending attempt's identity (or not as
+// an error at all), never under the instance's, or Control counts the same
+// refusal twice: once from the poll, once from Start.
+func TestPollDuringPendingRefusedStartCountsOnce(t *testing.T) {
+	f := newNativeFixture(t, nativeProber{})
+	f.runtime.refuseStart.Store(refusal{errors.New("native revision history cannot go backwards or change its hash")})
+	f.runtime.refusing, f.runtime.gate = make(chan struct{}), make(chan struct{})
+	refusing, gate := f.runtime.refusing, f.runtime.gate
+	ctx := context.Background()
+	rev := testRevision(1)
+	f.remote.Restore(&rev)
+	started := make(chan error, 1)
+	go func() { started <- f.remote.Start(ctx, rev.Policy) }()
+	<-refusing
+	// What pollStats does, while the start is still pending.
+	if err := f.remote.refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	polled := f.remote.Snapshot()
+	if polled.Status == "error" && !refusedAttempt(polled.FailureID, polled.Instance) {
+		t.Fatalf("poll during the pending start published the instance's identity: %+v", polled)
+	}
+	close(gate)
+	if err := <-started; err == nil {
+		t.Fatal("refused start reported success")
+	}
+	final := f.remote.Snapshot()
+	if final.Status != "error" || !refusedAttempt(final.FailureID, final.Instance) {
+		t.Fatalf("refusal not published under its attempt: %+v", final)
+	}
+	if polled.Status == "error" && polled.FailureID != final.FailureID {
+		t.Fatalf("one refusal, two identities: poll %q, start %q", polled.FailureID, final.FailureID)
+	}
+	if err := f.remote.refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if again := f.remote.Snapshot(); again.FailureID != final.FailureID {
+		t.Fatalf("a later poll changed the identity: %q then %q", final.FailureID, again.FailureID)
+	}
+}
+
+// Between fixing the attempt's session and sending the start, the session may
+// go away. The request still goes out on the session it was fixed to, and its
+// answer is published only if that session is still the attached one; nothing
+// is attributed to whatever attached in between.
+func TestReattachBetweenCaptureAndSendIsNotMisattributed(t *testing.T) {
+	f := newNativeFixture(t, nativeProber{})
+	f.runtime.refuseStart.Store(refusal{errors.New("native revision history cannot go backwards or change its hash")})
+	ctx := context.Background()
+	rev := testRevision(1)
+	f.remote.Restore(&rev)
+	var captured *RPC
+	f.remote.beforeLoad = func() {
+		f.remote.mu.Lock()
+		captured = f.remote.rpc
+		// The attached session is replaced by another instance's before the
+		// start goes out.
+		f.remote.rpc, f.remote.instance = nil, "another-instance"
+		f.remote.mu.Unlock()
+	}
+	err := f.remote.Start(ctx, rev.Policy)
+	if err == nil || !isRPCRejection(err) {
+		t.Fatal("the start did not reach the fixed session", err)
+	}
+	if captured == nil {
+		t.Fatal("no session was fixed before the send")
+	}
+	s := f.remote.Snapshot()
+	if s.Status == "error" || s.FailureID != "" {
+		t.Fatalf("a refusal answered on the old session was published to the new attachment: %+v", s)
+	}
+	if f.remote.pending != nil {
+		t.Fatal("the attempt stayed pending after Start returned")
+	}
+	captured.Close()
 }

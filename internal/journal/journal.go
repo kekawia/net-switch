@@ -280,11 +280,16 @@ func (s *Session) Cleanup(ctx context.Context) (err error) {
 // record without a removal. Cleanup consults it before touching the OS, for
 // work that must happen from the record alone, such as ending the connections
 // that rode on an address whether or not that address still exists.
+//
+// It is the owner's read, not a read-only one: it goes through the store's
+// Records, which repairs a torn tail. That is allowed only while this session
+// holds the ownership lock, which an open session does from Open until Close;
+// a closed session refuses the call rather than touch a file it no longer owns.
 func (s *Session) Live() ([]Record, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
-		return nil, errors.New("journal session closed")
+	if s.closed || s.release == nil {
+		return nil, errors.New("journal session does not hold the ownership lock")
 	}
 	return s.j.live()
 }

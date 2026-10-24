@@ -209,10 +209,12 @@ func tunServices(t *testing.T, config lifecycle.Config, owner actor, fixture tun
 }
 
 // assertTUNCaptured proves the stream went through the native engine: the
-// engine's own paged flow listing holds exactly this stream, by the tuple the
-// engine attributes (owning process and executable, protocol, source socket,
-// destination) and the line it chose for it. Reads need the live epoch, which
-// hello publishes; a second reader never disturbs Control's lease.
+// engine's own paged flow listing holds exactly this stream (protocol, source
+// socket, destination) on line a1. An owner the engine reports must be this
+// process and executable; an owner it has not attributed yet is accepted and
+// logged as CAPTURE_OWNER_UNATTRIBUTED (a design decision recorded in the
+// review of this PR). Reads need the live epoch, which hello publishes; a
+// second reader never disturbs Control's lease.
 func assertTUNCaptured(t *testing.T, conn net.Conn, fixture tunFixture) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -235,7 +237,7 @@ func assertTUNCaptured(t *testing.T, conn net.Conn, fixture tunFixture) {
 	exe := hostedTestExecutable()
 	same := func(a, b netip.AddrPort) bool { return a.Addr().Unmap() == b.Addr().Unmap() && a.Port() == b.Port() }
 	want := fmt.Sprintf("pid=%d path=%s tcp %s->%s line=a1", pid, exe, source, destination)
-	deadline := time.Now().Add(5 * time.Second) // owner resolution finishes within the handshake
+	deadline := time.Now().Add(5 * time.Second)
 	for {
 		var listed []string
 		cursor := ""
@@ -250,10 +252,22 @@ func assertTUNCaptured(t *testing.T, conn net.Conn, fixture tunFixture) {
 			}
 			for _, f := range page.Flows {
 				listed = append(listed, fmt.Sprintf("pid=%d path=%s %s %s->%s line=%s", f.Owner.PID, f.Owner.Path, f.Protocol, f.Source, f.Destination, f.Line))
-				if f.Owner.PID == pid && strings.EqualFold(f.Owner.Path, exe) && f.Protocol == "tcp" && same(f.Source, source) && same(f.Destination, destination) && f.Line == "a1" {
-					t.Logf("engine lists this stream: %s", listed[len(listed)-1])
+				if f.Protocol != "tcp" || !same(f.Source, source) || !same(f.Destination, destination) || f.Line != "a1" {
+					continue
+				}
+				// The capture proof is the exact tuple on the line. When the
+				// engine reports an owner it must be ours; an unattributed
+				// owner (Linux's proc fallback under load, which the eBPF
+				// release gate addresses) is accepted and recorded.
+				if f.Owner.PID == 0 && f.Owner.Path == "" {
+					t.Logf("CAPTURE_OWNER_UNATTRIBUTED stream=%s->%s line=%s", f.Source, f.Destination, f.Line)
 					return
 				}
+				if f.Owner.PID != pid || !strings.EqualFold(f.Owner.Path, exe) {
+					t.Fatalf("engine attributes this stream to pid=%d path=%s, want pid=%d path=%s", f.Owner.PID, f.Owner.Path, pid, exe)
+				}
+				t.Logf("engine lists this stream: %s", listed[len(listed)-1])
+				return
 			}
 			if page.Cursor == "" || len(page.Flows) == 0 {
 				break

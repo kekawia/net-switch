@@ -57,10 +57,13 @@ Control's client and the legacy CI are PR 4.
   instance's identity, so Control counted the first and took the rest for the
   failure it had already seen. A start the engine answers with an error while
   its instance keeps running now carries the attempt's identity
-  (`instance#attempt`), published together with the error in one step and only
-  to the session, instance and attempt the request was sent on; re-reading the
-  engine's status and reattaching to the same instance keep it, and a refused
-  apply on an engine that was already on stays a plain conflict (spec §3.3).
+  (`instance#attempt`). The attempt is registered as pending before the start
+  is sent, the start goes out on the very session that was fixed for it, and
+  while it is pending every error status read for that instance (the stats
+  poll, a reattach, Start itself) is published under the attempt's identity,
+  so there is no window in which the instance's identity can be counted
+  first; a refused apply on an engine that was already on stays a plain
+  conflict (spec §3.3).
   Transport errors take the other path, where connection recovery publishes
   the outcome once (`TestRefusedStartsAreDistinctFailuresCountedOnce`,
   `TestRefusedStartsBackOffAndLatch`: 1, 2, 5, 30 s, latch at the fifth).
@@ -71,24 +74,34 @@ Control's client and the legacy CI are PR 4.
   ported suite sat on every such stream until its read deadline in six cases,
   lease lapse included. Windows aborts a removed adapter's sockets by itself;
   Linux does not. The rule: a connected TCP or UDP socket whose local address
-  is a journaled TUN address and whose peer is not local to this host is ended
-  with SOCK_DESTROY, the way `ss -K` does; listeners, unconnected UDP sockets
-  and local-only connections are spared. It runs from the ownership record,
-  before journal cleanup, in both the engine's own cleanup (stop and lapse,
-  after the engine has closed its non-persistent TUN) and recovery after a
-  death (the host's, and `netswitchctl cleanup` from ExecStopPost), so it does
-  not depend on the TUN or its addresses still existing. It is best effort
-  inside its own share of the cleanup budget (a quarter of what remains, at
-  most 500 ms): the dump is streamed and bounded, the first unsupported or
-  refused answer ends the pass, and the mandatory cleanup always keeps its
-  time. Requests name the socket as the dump reported it, bound device and
-  cookie included; the kernel applies its own inbound order for UDP.
-  Proofs: `TestRoutedSocketRetirementFollowsTheSpecRule` (TCP handshake and
-  connected UDP in both families ended; listener, local-only connection,
-  unconnected UDP and loopback spared), `TestRoutedSocketRetirementIsBoundedAndStopsWhenRefused`,
-  both in CI's isolated namespace, and the lifecycle cases whose
-  `expectClosed` follows a kill, a crash barrier, a lease lapse and a stop,
-  all after the TUN has gone.
+  equals a journaled TUN address (exactly, normalised; never a prefix) and
+  whose peer is not local to this host is ended with SOCK_DESTROY, the way
+  `ss -K` does; listeners, unconnected UDP sockets, local-only connections
+  (including to a TUN address teardown already removed) and link-local peers
+  (whose scope the dump does not settle) are spared. It reads only address
+  records that pass the same ownership checks as the rest of cleanup (this
+  boot, this network namespace, a valid fingerprint), from the ownership
+  record before journal cleanup, in both the engine's own cleanup (stop and
+  lapse, after the engine has closed its non-persistent TUN) and recovery
+  after a death (the host's, and `netswitchctl cleanup` from ExecStopPost), so
+  it does not depend on the TUN or its addresses still existing. Unknown means
+  do nothing: a failed or late host-address listing, or a failed dump, aborts
+  the pass with nothing destroyed. Everything runs inside its own share of the
+  cleanup budget (a quarter of what remains, at most 500 ms), the host listing
+  included; the dump is streamed and bounded, the first unsupported or refused
+  answer ends the pass, and the mandatory cleanup always keeps its time.
+  Requests name the socket as the dump reported it, bound device and cookie
+  included; the kernel applies its own inbound order for UDP.
+  Proofs: the rules on the pure decision code in `sockets_retire_rules_linux_test.go`
+  (exact address only, foreign boot or namespace records ignored, unknown
+  host addresses abort, removed TUN addresses stay local, listeners and
+  link-local peers spared, slow listing bounded); `TestRoutedSocketRetirementFollowsTheSpecRule`
+  (TCP handshake and connected UDP in both families ended; listener,
+  local-only connection, a neighbouring address in the same subnet,
+  unconnected UDP and loopback spared) and `TestRoutedSocketRetirementIsBoundedAndStopsWhenRefused`
+  in CI's isolated namespace; and the lifecycle cases whose `expectClosed`
+  follows a kill, a crash barrier, a lease lapse and a stop, all after the TUN
+  has gone.
 - **A lapsed lease never waits on a stuck command; a controller's stop is
   never cut short.** The protocol's expiry used to take the mutation lock; a
   start or apply stuck in a durable write held it, so capture stayed installed
@@ -124,9 +137,12 @@ Control's client and the legacy CI are PR 4.
   - the stand-in's retired `adapter-*` directories → the retired
     `engine-outcome-*` records;
   - "stream observed inside the TUN" → the engine's own paged flow listing
-    holds exactly the stream: owning process and executable, protocol, source
-    socket, destination and the line it chose (on Linux the namespace relay
-    reports the process and socket it opened for the suite);
+    holds exactly the stream (protocol, source socket, destination) on the
+    line it chose; an owner the engine reports must be the suite's process and
+    executable (on Linux the namespace relay reports the process and socket it
+    opened), and an owner not yet attributed, Linux's proc fallback under load,
+    is accepted and logged as `CAPTURE_OWNER_UNATTRIBUTED` (a design decision
+    recorded in the review of this PR);
   - the stand-in's 16 `adapter-linux-rule` intents → the native engine's
     `rule` ownership records, decoded as the engine journals them
     (`linux.ObjectJSON` of a netlink rule) and compared with the kernel's own

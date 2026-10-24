@@ -43,9 +43,18 @@ type Remote struct {
 	recovering, stopping bool
 	recovery             uint64
 	attempt              uint64
-	forgotten            map[string]uint64
-	forgetSequence       uint64
-	dial                 func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
+	// pending is the start attempt in flight: the session it was sent on,
+	// the instance it addressed and its number. While it is set, an error the
+	// engine reports for that instance belongs to this attempt, whoever reads
+	// it (the stats poll, a reattach or Start itself), so the failure is
+	// published under the attempt's identity or not at all.
+	pending *pendingAttempt
+	// beforeLoad runs between fixing the attempt's session and sending the
+	// start; nil in production, a test hook for the reattach race.
+	beforeLoad     func()
+	forgotten      map[string]uint64
+	forgetSequence uint64
+	dial           func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
 	// dialAdapter writes the M2 primer; dialNative does not. nativeInstalled
 	// reads the installation to choose between them (see dialInstalled).
 	dialAdapter, dialNative func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
@@ -118,6 +127,26 @@ func attemptFailureID(instance string, attempt uint64) string {
 // refusedAttempt reports whether id is an attempt identity of this instance.
 func refusedAttempt(id, instance string) bool {
 	return instance != "" && strings.HasPrefix(id, instance+"#")
+}
+
+type pendingAttempt struct {
+	rpc      *RPC
+	instance string
+	attempt  uint64
+}
+
+// attemptIdentityLocked gives an error status read for instance the identity
+// Control must count it under: the pending attempt's, if a start to that
+// instance is in flight; otherwise an attempt identity the snapshot already
+// carries for it; otherwise none (the caller uses the instance's).
+func (r *Remote) attemptIdentityLocked(instance string) string {
+	if p := r.pending; p != nil && p.instance == instance {
+		return attemptFailureID(instance, p.attempt)
+	}
+	if r.snapshot.Status == "error" && refusedAttempt(r.snapshot.FailureID, instance) {
+		return r.snapshot.FailureID
+	}
+	return ""
 }
 func (r *Remote) failWithReasonLocked(err error, reason string) {
 	message := err.Error()
@@ -338,13 +367,15 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	}
 	r.snapshot.Instance = hello.Instance
 	if r.snapshot.Status == "error" {
-		// A refused start of this same instance already has its attempt's
-		// identity and has been counted; a reattach must not re-present it
-		// under the instance's identity as a second failure.
-		if !(previous.Status == "error" && refusedAttempt(previous.FailureID, hello.Instance)) {
-			r.snapshot.FailureID = hello.Instance
-		} else {
+		// A refused start of this same instance, pending or already
+		// published, keeps its attempt's identity; a reattach must not
+		// re-present it under the instance's identity as a second failure.
+		r.snapshot.FailureID = hello.Instance
+		if previous.Status == "error" && refusedAttempt(previous.FailureID, hello.Instance) {
 			r.snapshot.FailureID = previous.FailureID
+		}
+		if id := r.attemptIdentityLocked(hello.Instance); id != "" {
+			r.snapshot.FailureID = id
 		}
 	}
 	if start && r.snapshot.Status != "on" {
@@ -413,16 +444,24 @@ func (r *Remote) request(ctx context.Context, method string, payload any, opID, 
 // instance, and the request itself carries that instance and epoch, so a
 // replacement attached in between is rejected by the engine, never by luck.
 func (r *Remote) fencedRequest(ctx context.Context, fence, method string, payload any, opID, cursor string, out any) error {
-	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
-	defer cancel()
 	r.mu.Lock()
 	rpc, instance, epoch := r.rpc, r.instance, r.epoch
 	r.mu.Unlock()
-	if rpc == nil {
-		return errors.New("engine service is not attached")
-	}
 	if fence != "" && fence != instance {
 		return fmt.Errorf("%s belongs to engine instance %s; the attached instance is %s", method, fence, instance)
+	}
+	return r.sendOn(ctx, rpc, instance, epoch, method, payload, opID, cursor, out)
+}
+
+// sendOn sends one request on a session fixed by the caller, addressed to the
+// instance and epoch that session attached, so a reattach between the
+// caller's capture and the send can neither redirect the request nor let its
+// answer be taken for another session's.
+func (r *Remote) sendOn(ctx context.Context, rpc *RPC, instance string, epoch uint64, method string, payload any, opID, cursor string, out any) error {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	if rpc == nil {
+		return errors.New("engine service is not attached")
 	}
 	request := map[string]any{"method": method, "engineInstanceId": instance, "epoch": epoch}
 	switch fields := payload.(type) {
@@ -496,16 +535,32 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 		return err
 	}
 	// The session, instance and attempt this request belongs to are fixed
-	// before it is sent; its outcome is published only to that same session.
+	// before it is sent, the request goes out on that very session, and its
+	// outcome is published only if that session is still the attached one.
+	// While the attempt is pending, any error status read for the instance
+	// is published under the attempt's identity (see attemptIdentityLocked).
 	r.mu.Lock()
 	revision, native, running := r.desired, r.native, r.snapshot.Status == "on"
-	rpc, instance := r.rpc, r.instance
+	rpc, instance, epoch := r.rpc, r.instance, r.epoch
+	if !running {
+		r.pending = &pendingAttempt{rpc: rpc, instance: instance, attempt: attempt}
+	}
 	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		if p := r.pending; p != nil && p.attempt == attempt {
+			r.pending = nil
+		}
+		r.mu.Unlock()
+	}()
 	if revision == nil || !reflect.DeepEqual(revision.Policy, p) {
 		return errors.New("start requires a durable complete desired revision")
 	}
+	if r.beforeLoad != nil {
+		r.beforeLoad()
+	}
 	if native {
-		if _, err := r.nativeLoad(ctx, *revision, running); err != nil {
+		if _, err := r.nativeLoad(ctx, rpc, instance, epoch, *revision, running); err != nil {
 			if isRPCRejection(err) {
 				// The engine answered and stays attached, so this attempt
 				// failed while the instance lives on. Its failure identity is
@@ -554,7 +609,7 @@ func (r *Remote) Restore(revision *ce.Revision) { r.mu.Lock(); r.desired = revis
 func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledgement, error) {
 	r.Restore(&revision)
 	r.mu.Lock()
-	rpc, native := r.rpc, r.native
+	rpc, native, instance, epoch := r.rpc, r.native, r.instance, r.epoch
 	s := r.snapshot
 	r.mu.Unlock()
 	if rpc == nil || s.Status != "on" {
@@ -563,7 +618,7 @@ func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledg
 		return ce.Acknowledgement{Number: revision.Number, Hash: revision.Hash, Instance: s.Instance}, nil
 	}
 	if native {
-		ack, err := r.nativeLoad(ctx, revision, true)
+		ack, err := r.nativeLoad(ctx, rpc, instance, epoch, revision, true)
 		if err == nil {
 			err = r.refresh(ctx)
 		}
