@@ -766,6 +766,99 @@ func TestRefusedStartIsReturnedToControlNotPublishedAsAFailure(t *testing.T) {
 	}
 }
 
+// Core counts the fifth refusal and shows the latch through Engine.Fail. That
+// display must not mint a FailureID, or the next status read counts a sixth
+// failure that never happened (the fake engine's Fail never minted one, which
+// hid this). Five refusals through the real client: five countable results,
+// then a shown latch with no identity.
+func TestLatchDisplayAfterFiveRefusalsMintsNoSixthFailure(t *testing.T) {
+	f := newNativeFixture(t, nativeProber{})
+	f.runtime.refuseStart.Store(refusal{errors.New("native revision history cannot go backwards or change its hash")})
+	ctx := context.Background()
+	rev := testRevision(1)
+	f.remote.Restore(&rev)
+	counted := 0
+	for attempt := 1; attempt <= 5; attempt++ {
+		var refused *ce.StartRefused
+		if err := f.remote.Start(ctx, rev.Policy); errors.As(err, &refused) {
+			counted++ // what Core does with Start's result
+		}
+		if s := f.remote.Snapshot(); s.FailureID != "" {
+			t.Fatalf("attempt %d published a countable failure: %+v", attempt, s)
+		}
+	}
+	if counted != 5 {
+		t.Fatal("refusals counted", counted)
+	}
+	f.remote.Fail(errors.New("Routing stopped after five failures in ten minutes. Turn routing on to retry."))
+	s := f.remote.Snapshot()
+	if s.Status != "error" || s.Error == nil || !strings.Contains(*s.Error, "five failures") {
+		t.Fatalf("latch not shown: %+v", s)
+	}
+	if s.FailureID != "" {
+		t.Fatalf("the latch display minted a countable failure (a sixth): %+v", s)
+	}
+	// The next poll shows the engine's own error again; still no identity.
+	if err := f.remote.refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if again := f.remote.Snapshot(); again.Status != "error" || again.FailureID != "" {
+		t.Fatalf("a poll after the latch minted a countable failure: %+v", again)
+	}
+}
+
+// After a refusal the shown error is restartable once its backoff passes. If
+// the instance then dies, Core must not be able to start a replacement before
+// recovery has classified the death, or the death is never reported: the
+// snapshot leaves the restartable states until the outcome is published, and
+// that outcome is counted exactly once.
+func TestDeathAfterRefusalIsClassifiedBeforeAnyRestart(t *testing.T) {
+	f := newNativeFixture(t, nativeProber{})
+	f.runtime.refuseStart.Store(refusal{errors.New("native revision history cannot go backwards or change its hash")})
+	ctx := context.Background()
+	rev := testRevision(1)
+	f.remote.Restore(&rev)
+	var refused *ce.StartRefused
+	if err := f.remote.Start(ctx, rev.Policy); !errors.As(err, &refused) {
+		t.Fatal("start was not refused", err)
+	}
+	instance := f.server.Instance
+	// The instance dies; its service result is not published yet.
+	f.status = service.Status{Stopped: true, Cleanup: "pending"}
+	f.outcome = host.Outcome{Instance: instance, State: "pending"}
+	f.remote.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
+		return nil, errors.New("service stopped")
+	}
+	f.remote.mu.Lock()
+	rpc := f.remote.rpc
+	f.remote.mu.Unlock()
+	f.remote.disconnect(rpc, errors.New("engine connection closed"))
+	// The retry is due, but nothing is restartable until the death is classified.
+	for i := 0; i < 10; i++ {
+		if s := f.remote.Snapshot(); s.Status == "off" || s.Status == "error" {
+			t.Fatalf("restartable state while the death was unclassified: %+v", s)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 1}
+	f.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "failure"}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if s := f.remote.Snapshot(); s.Status == "error" {
+			if s.FailureID != instance || s.Reason != "" {
+				t.Fatalf("death classified wrongly: %+v", s)
+			}
+			// One identity, stable across reads: counted once by Core.
+			if again := f.remote.Snapshot(); again.FailureID != instance {
+				t.Fatalf("identity changed between reads: %+v", again)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the death after the refusal was never reported")
+}
+
 // The stats poll reads the engine's status every five seconds, and a Control
 // restart reattaches with hello. While a start is pending, the engine already
 // reports the refusal as its status; neither a poll nor a reattach in that

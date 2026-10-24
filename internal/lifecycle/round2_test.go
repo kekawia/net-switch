@@ -201,7 +201,7 @@ func TestOneFailureIdentityPerEngineInstance(t *testing.T) {
 	if err := r.Attach(r.ctx, false); err != nil {
 		t.Fatal(err)
 	}
-	r.Fail(errors.New("start failed"))
+	r.failInstance(errors.New("start failed"))
 	id := r.Snapshot().FailureID
 	r.mu.Lock()
 	rpc := r.rpc

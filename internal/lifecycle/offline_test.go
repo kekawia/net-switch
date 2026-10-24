@@ -89,7 +89,7 @@ func TestDurableStorePrimaryAndBackup(t *testing.T) {
 }
 func TestRemoteSnapshotRetainsFailureBeforeFirstAttachment(t *testing.T) {
 	remote := NewRemote(context.Background(), func(string) {})
-	remote.Fail(errors.New("service could not start"))
+	remote.failInstance(errors.New("service could not start"))
 	state := remote.Snapshot()
 	if state.FailureID == "" || state.Status != "error" || state.Error == nil {
 		t.Fatal("failed-start identity was lost", state)

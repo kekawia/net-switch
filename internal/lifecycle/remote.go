@@ -103,7 +103,22 @@ func (r *Remote) Snapshot() ce.Snapshot {
 	}
 	return s
 }
+
+// Fail shows an error Control itself decided (the five-failure latch, missing
+// administrator rights). Nothing ended, so it mints no FailureID: an existing
+// instance-ending identity stays, and a shown refusal stays uncountable.
+// Minting one here made the fifth refusal's latch display count as a sixth
+// failure on the next status read.
 func (r *Remote) Fail(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	message := err.Error()
+	r.snapshot.Status = "error"
+	r.snapshot.Error = &message
+}
+
+// failInstance publishes an instance-ending outcome Remote itself observed.
+func (r *Remote) failInstance(err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.failLocked(err)
@@ -133,7 +148,12 @@ func (r *Remote) disconnect(rpc *RPC, err error) {
 		return
 	}
 	r.rpc = nil
-	if r.snapshot.Status != "error" {
+	// Until recovery has classified this instance's outcome, Control must not
+	// be able to restart: a shown refusal (an error with no FailureID) would
+	// otherwise count as restartable once its backoff passed, a replacement
+	// could attach first, and the death would never be reported. An
+	// instance-ending error already classified keeps its status and identity.
+	if r.snapshot.Status != "error" || r.snapshot.FailureID == "" {
 		r.snapshot.Status = "starting"
 	}
 	already := r.recovering
@@ -481,7 +501,7 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	if err := r.Attach(ctx, true); err != nil {
 		status, queryErr := r.queryService(service.Engine)
 		if queryErr == nil && status.Stopped {
-			r.Fail(err)
+			r.failInstance(err)
 		} else {
 			// SCM may still be bringing up the instance after our wait timed
 			// out. Keep following it; do not leave a permanent "starting".

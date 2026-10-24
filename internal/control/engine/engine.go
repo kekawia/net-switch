@@ -161,6 +161,8 @@ type Accounting interface {
 type Engine interface {
 	Snapshot() Snapshot
 	// Fail reports a control-side prerequisite failure without starting the engine.
+	// Fail shows an error Control decided (the latch, missing rights). It is
+	// display only: no instance ended, so it must never produce a FailureID.
 	Fail(error)
 	Start(context.Context, Policy) error
 	Stop(context.Context) error
