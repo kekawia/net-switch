@@ -85,8 +85,8 @@ async function startSystemCanary() {
 Start-Sleep -Seconds 3600
 `);
   const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${script}"`;
-  await runFile('schtasks.exe', ['/Create', '/TN', CANARY_TASK, '/TR', command, '/SC', 'ONCE', '/ST', '00:00', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'], { timeoutMs: 30_000 });
   try {
+    await runFile('schtasks.exe', ['/Create', '/TN', CANARY_TASK, '/TR', command, '/SC', 'ONCE', '/ST', '00:00', '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'], { timeoutMs: 30_000 });
     await runFile('schtasks.exe', ['/Run', '/TN', CANARY_TASK], { timeoutMs: 30_000 });
     const pid = await until('the SYSTEM canary starting', async () => {
       const text = await readFile(pidFile, 'utf8').catch(() => '');
