@@ -309,7 +309,7 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 	if note != "" {
 		c.log("%s", note)
 	}
-	if action != "/api/lines/update" && c.op.Engine.Snapshot().Status != "off" {
+	if !c.op.ServiceMode && action != "/api/lines/update" && c.op.Engine.Snapshot().Status != "off" {
 		return c.restart(ctx)
 	}
 	return nil

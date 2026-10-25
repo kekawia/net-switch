@@ -1064,7 +1064,9 @@ func (c *Core) Supervise(ctx context.Context) error {
 			} else if now-*c.ipv6Since >= 30000 {
 				restart = true
 				settledIPv6 = true
-				c.ipv6Since = nil
+				if !c.op.ServiceMode {
+					c.ipv6Since = nil
+				}
 			}
 		}
 		c.mu.Unlock()
@@ -1079,6 +1081,35 @@ func (c *Core) Supervise(ctx context.Context) error {
 					needed = needed || (settledIPv6 && c.ipv6Locked() != fresh.StartedWith.IPv6)
 				}
 				needed = needed && c.wanted && !c.quitting && fresh.Status == "on"
+				if c.op.ServiceMode {
+					needed = needed && !c.powerSuspended
+					c.mu.Unlock()
+					if !needed {
+						return nil
+					}
+					// Native Apply preserves the instance and existing flows. Route
+					// reconciliation and IPv6-only closure belong to the engine;
+					// Stop would also destroy unrelated IPv4 connections (§5.7).
+					if err := c.ApplyPolicy(ctx); err != nil {
+						c.log("could not apply live network change: %v", err)
+						return err
+					}
+					applied := c.op.Engine.Snapshot().Policy
+					if rebound {
+						aliases := make([]string, 0, len(applied.Lines))
+						for _, line := range applied.Lines {
+							aliases = append(aliases, line.Alias)
+						}
+						c.log("routing updated to use %s without restarting", strings.Join(aliases, ", "))
+					} else if settledIPv6 {
+						if applied.IPv6 {
+							c.log("every line has IPv6 now: routing carries it without restarting")
+						} else {
+							c.log("a line lost IPv6: routing keeps apps on IPv4 without restarting")
+						}
+					}
+					return nil
+				}
 				if needed && hung {
 					c.log("the routing engine hasn't answered for %d polls; restarting it", c.monitorFailures)
 				} else if needed && rebound {
