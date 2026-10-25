@@ -87,6 +87,14 @@ responder's egress address. A read-only observer uses hello's epoch without
 attach, renew or apply. The faults proof wrapper requires this exact PASS line;
 a missing or skipped case fails the wrapper.
 
+The existing lifecycle case also expected a replacement instance after adding
+or removing a line. Hosted runs exposed that stale expectation. It now keeps
+one routed stream and the same instance across both actions, then exercises an
+explicit routing-off/on cycle: the old service is stopped before start, its
+outcome record is proven present while stopped, and the replacement must retire
+that record while carrying fresh traffic. The service-exit and outcome-cleanup
+guarantees remain covered by a path that actually restarts.
+
 Windows and Linux lifecycle test binaries cross-compile locally. The installed
 scenario has not run locally; its actual result, full/race checks and logic
 review remain parent-owned hosted work before merge. There is no installed

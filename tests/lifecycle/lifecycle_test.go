@@ -863,8 +863,21 @@ func TestRealServices(t *testing.T) {
 		c.must(t, "routing", map[string]any{"on": true}, nil)
 		wait(t, "restart after explicit stop", 30*time.Second, func() bool { return getStatus(t, c).Routing == "on" })
 	})
-	t.Run("binding-change-waits-for-old-service-exit", func(t *testing.T) {
+	t.Run("binding-changes-stay-live-and-explicit-restart-retires-old-service", func(t *testing.T) {
 		before := getStatus(t, c)
+		if before.Routing != "on" || before.Instance == "" {
+			t.Fatal("live engine starting condition", before)
+		}
+		stream := routedStream(t, ctx, fixture)
+		defer stream.Close()
+		fixture.exchange(t, stream)
+		stillLive := func() {
+			t.Helper()
+			fixture.exchange(t, stream)
+			if s := getStatus(t, c); s.Routing != "on" || s.Instance != before.Instance {
+				t.Fatal("binding update replaced the live engine", before, s)
+			}
+		}
 		second := fixture.churnLine // Linux's second physical path; Windows adds the runner's uplink
 		if second == "" {
 			second = nic
@@ -874,37 +887,58 @@ func TestRealServices(t *testing.T) {
 		if code != 200 {
 			t.Fatal("add fixture binding", code, string(b))
 		}
-		wait(t, "new service after binding addition", 40*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
+		stillLive()
 		var state struct {
 			Lines []lines.Line `json:"lines"`
 		}
 		if json.Unmarshal(b, &state) != nil || len(state.Lines) != 2 {
 			t.Fatal("two-line precondition", string(b))
 		}
-		before = getStatus(t, c)
 		body, _ = json.Marshal(map[string]string{"id": state.Lines[1].ID})
 		code, b = api(t, session.URL, session.Token, "POST", "/api/lines/remove", string(body))
 		if code != 200 {
 			t.Fatal("remove fixture binding", code, string(b))
 		}
-		wait(t, "new service after binding removal", 40*time.Second, func() bool { s := getStatus(t, c); return s.Routing == "on" && s.Instance != before.Instance })
-		stream := routedStream(t, ctx, fixture)
-		defer stream.Close()
-		fixture.exchange(t, stream)
-		// The new instance retires every earlier instance's outcome record,
-		// so only the live instance's result remains in the store.
-		entries, err := os.ReadDir(data)
-		if err != nil {
-			t.Fatal(err)
-		}
-		count := 0
-		for _, entry := range entries {
-			if strings.HasPrefix(entry.Name(), "engine-outcome-") {
-				count++
+		stillLive()
+		outcomes := func() []string {
+			t.Helper()
+			entries, err := os.ReadDir(data)
+			if err != nil {
+				t.Fatal(err)
 			}
+			var names []string
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "engine-outcome-") {
+					names = append(names, entry.Name())
+				}
+			}
+			return names
 		}
-		if count != 1 {
-			t.Fatal("retired engine instances still present", count)
+		old := outcomes()
+		if len(old) != 1 || old[0] != "engine-outcome-"+before.Instance+".json" {
+			t.Fatal("live outcome starting condition", before.Instance, old)
+		}
+		// Binding updates no longer restart. Keep the old service-exit and
+		// outcome-retirement proof on the explicit off/on path that still does.
+		c.must(t, "routing", map[string]any{"on": false}, nil)
+		wait(t, "old service exited before explicit start", 10*time.Second, func() bool {
+			s, err := service.Query(service.Engine)
+			return err == nil && s.Stopped && !s.Running
+		})
+		expectClosed(t, stream)
+		if stopped := outcomes(); len(stopped) != 1 || stopped[0] != old[0] {
+			t.Fatal("old outcome must remain before the replacement starts", old, stopped)
+		}
+		c.must(t, "routing", map[string]any{"on": true}, nil)
+		wait(t, "new instance after explicit restart", 30*time.Second, func() bool {
+			s := getStatus(t, c)
+			return s.Routing == "on" && s.Instance != before.Instance
+		})
+		fresh := routedStream(t, ctx, fixture)
+		defer fresh.Close()
+		fixture.exchange(t, fresh)
+		if current := outcomes(); len(current) != 1 || current[0] == old[0] {
+			t.Fatal("replacement did not retire the old outcome", old, current)
 		}
 	})
 	t.Run("enrollment-preserves-routing-and-same-owner-is-noop", func(t *testing.T) {
