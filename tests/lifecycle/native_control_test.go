@@ -270,6 +270,11 @@ func TestNativeControlCutover(t *testing.T) {
 	t.Run("engine-service-is-never-restarted-by-the-manager", func(t *testing.T) {
 		assertEngineHasNoManagerRestart(t)
 	})
+	if !t.Run("live-network-update-preserves-held-traffic", func(t *testing.T) {
+		nativeControlLiveUpdates(t, ctx, c, owner, fixture, data)
+	}) {
+		t.FailNow()
+	}
 	t.Run("exact-usage-survives-control-crashes-around-the-ack", func(t *testing.T) {
 		// One line of about 16 KiB: inside the Linux target's 64 KiB line limit.
 		const n = 16384

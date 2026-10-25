@@ -250,11 +250,39 @@ func (r *Routes) resolve(lines []platform.Line) (bindingTable, error) {
 	if err != nil {
 		return nil, err
 	}
+	return resolveBindings(lines, adapters, r.lines, r.bindings.Load()), nil
+}
+
+func resolveBindings(lines []platform.Line, adapters []Adapter, previousLines []platform.Line, previous *bindingTable) bindingTable {
 	b := make(bindingTable, len(lines))
 	for _, l := range lines {
 		identity := l.Interface
 		if identity == "" {
 			identity = l.ID
+		}
+		// The platform monitor may see an alias rename before Control does.
+		// An unchanged selector retains its discovered physical identity while
+		// that adapter still exists. Do not mistake its old name for removal,
+		// or let a different adapter reusing that name steal the live binding.
+		if previous != nil {
+			for _, prior := range previousLines {
+				if prior.ID != l.ID || prior.Interface != l.Interface {
+					continue
+				}
+				bound, ok := (*previous)[l.ID]
+				if ok && bound.ID != "" {
+					for _, a := range adapters {
+						if a.ID == bound.ID {
+							b[l.ID] = a
+							break
+						}
+					}
+				}
+				break
+			}
+		}
+		if _, retained := b[l.ID]; retained {
+			continue
 		}
 		for _, a := range adapters {
 			if identity == a.ID || identity == a.Alias {
@@ -263,7 +291,7 @@ func (r *Routes) resolve(lines []platform.Line) (bindingTable, error) {
 			}
 		}
 	}
-	return b, nil
+	return b
 }
 func (r *Routes) Prepare(ctx context.Context, lines []platform.Line) error {
 	defer r.timings.begin("lines.prepare")()
