@@ -61,7 +61,7 @@ index 62f42f4..b42da44 100644
  			extendTimeWait = true
  		}
 diff --git a/pkg/tcpip/transport/tcp/dispatcher.go b/pkg/tcpip/transport/tcp/dispatcher.go
-index d138e3b..fd89a21 100644
+index d138e3b..81940a9 100644
 --- a/pkg/tcpip/transport/tcp/dispatcher.go
 +++ b/pkg/tcpip/transport/tcp/dispatcher.go
 @@ -12,6 +12,8 @@
@@ -118,15 +118,18 @@ index d138e3b..fd89a21 100644
  	// Disable close timer as we are now entering real TIME_WAIT.
  	if ep.finWait2Timer != nil {
  		ep.finWait2Timer.Stop()
-@@ -501,6 +524,15 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
+@@ -501,6 +524,18 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
  		return
  	}
  
 +	// FIN_WAIT_1 ACKs can drive megabytes of download data. Leave those
 +	// on the TCP processor; FINs themselves always fence the state change.
++	// The processor can consume this segment immediately after enqueue.
++	// TIME_WAIT may still be inside cap-driven cleanup, before CLOSED is
++	// published. Keep the fence so its endpoint lock joins that transition.
 +	state := ep.EndpointState()
-+	closingACK := s.flags.Contains(header.TCPFlagAck) && (state == StateLastAck || state == StateClosing)
-+	canDrain := state.connecting() || (state.connected() && state != StateTimeWait)
++	closingACK := s.flags.Contains(header.TCPFlagAck) && (state == StateLastAck || state == StateClosing || state == StateTimeWait)
++	canDrain := state.connecting() || state.connected()
 +	if ep.protocol.localCloseEnabled.Load() && canDrain && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
 +		ep.protocol.localClose.Store(ep)
 +	}

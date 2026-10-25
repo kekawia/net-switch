@@ -184,6 +184,8 @@ func (t *closeTrace) dump(g flows.Gauges, first, second *tcp.Endpoint) string {
 	fmt.Fprintf(&b, "  endpoints: first=%p %s second=%p %s\n", first, tcp.EndpointState(first.State()), second, tcp.EndpointState(second.State()))
 	fmt.Fprintf(&b, "  (a ticket's TimeWait is the endpoint's TIME_WAIT enter callback: setEndpointState(StateTimeWait)\n")
 	fmt.Fprintf(&b, "   runs it, then startTimeWait closes the endpoint when it returns false.)\n")
+	fmt.Fprintf(&b, "  (states are unlocked snapshots; EndTimeWait precedes CLOSED publication.\n")
+	fmt.Fprintf(&b, "   Accounting at zero does not prove the close fence joined endpoint cleanup.)\n")
 	for _, line := range t.events {
 		fmt.Fprintf(&b, "  %s\n", line)
 	}

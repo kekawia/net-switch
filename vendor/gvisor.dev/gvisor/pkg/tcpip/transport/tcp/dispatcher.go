@@ -526,9 +526,12 @@ func (d *dispatcher) queuePacket(stackEP stack.TransportEndpoint, id stack.Trans
 
 	// FIN_WAIT_1 ACKs can drive megabytes of download data. Leave those
 	// on the TCP processor; FINs themselves always fence the state change.
+	// The processor can consume this segment immediately after enqueue.
+	// TIME_WAIT may still be inside cap-driven cleanup, before CLOSED is
+	// published. Keep the fence so its endpoint lock joins that transition.
 	state := ep.EndpointState()
-	closingACK := s.flags.Contains(header.TCPFlagAck) && (state == StateLastAck || state == StateClosing)
-	canDrain := state.connecting() || (state.connected() && state != StateTimeWait)
+	closingACK := s.flags.Contains(header.TCPFlagAck) && (state == StateLastAck || state == StateClosing || state == StateTimeWait)
+	canDrain := state.connecting() || state.connected()
 	if ep.protocol.localCloseEnabled.Load() && canDrain && (s.flags&(header.TCPFlagRst|header.TCPFlagFin) != 0 || closingACK) {
 		ep.protocol.localClose.Store(ep)
 	}
