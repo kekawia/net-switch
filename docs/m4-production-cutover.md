@@ -1,5 +1,8 @@
 # M4 PR 2: the production cutover
 
+For the subsequent policy evidence and the exact still-pending adapter removal
+boundary, see [M4 PR3: native policy evidence](m4-policy-evidence.md).
+
 2026-10-24. Two PRs. PR 2a teaches Control the native engine's contract (spec
 §5.10) and the restart, probe and accounting rules the earlier native PRs left
 "for the cutover". PR 2b makes every product build run the native engine and

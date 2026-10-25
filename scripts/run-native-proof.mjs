@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 
 const containment = ['TestWintunSupervisorContainment', ...['host-child-suspended','host-registrar-suspended','child-registrar-suspended','host-ready','child-ready'].map(name=>`TestWintunSupervisorContainment/${name}`)];
-const native = names => ['TestNativeEngineService', ...['installed-native-engine-denies-other-user','service-crash-cleanup','explicit-ctl-removes-real-leftovers',...names].map(name=>`TestNativeEngineService/${name}`)];
+const native = names => ['TestNativeEngineService', ...['installed-native-engine-denies-other-user','compiled-policy-main-exception-and-blocked-pin','service-crash-cleanup','explicit-ctl-removes-real-leftovers',...names].map(name=>`TestNativeEngineService/${name}`)];
 const retirementFailure = 'retirement-failure-exits-and-cleans-capture';
 // The installed Control proof needs the fault build (injected owner presence and
 // crash barriers), so its PASS lines are required in the faults variant only.

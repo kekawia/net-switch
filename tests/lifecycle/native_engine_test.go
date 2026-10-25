@@ -413,6 +413,7 @@ func TestNativeEngineService(t *testing.T) {
 	if totals.Lines["a1"].Up == 0 || totals.Lines["a1"].Down == 0 {
 		t.Fatal("closed-flow accounting missing", totals)
 	}
+	nativePolicyEvidence(t, c, fixture, &rev, newer)
 	nativeFollowup(t, c, fixture, probeFixture, faults, &rev, newer)
 	if !faults {
 		t.Run("product-build-ignores-forwarding-fault", func(t *testing.T) {
