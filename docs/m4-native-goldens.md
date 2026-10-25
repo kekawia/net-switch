@@ -91,7 +91,7 @@ saved entry wins, in either order.
 | Family (hashes) | What it encoded | Native counterpart | Evidence | Status |
 | --- | --- | --- | --- | --- |
 | `N-tun-ipv6-false` (N = 1, 2, 3) | TUN inbound (NetSwitch adapter, 198.18.0.1/30 and fdfe:dcba:9876::1/126, MTU 9000, gVisor), an `ip_version 6 → reject` rule, one direct outbound per line bound by interface alias, lane selectors defaulting to their own line (N > 1), final route to aa | `Config.IPv6 = false`: every public IPv6 flow, pinned or not, is refused with `ErrIPv6`; lines bind by `Interface` alias; lanes default to themselves | `TestLegacyIPv6Families`, the IPv6 column of `TestLegacyRuleFamiliesCompileToLiteralNativePolicy`, Control rows with the setting off | Decisions: covered. Real capture: Linux acceptance `ipv6.not-allowed-rejected-fast` (its own harness lines). **Windows TUN rejection with these three lines: pending hosted evidence.** |
-| `N-tun-ipv6-true` | same without the reject rule | `Config.IPv6 = true`: IPv6 flows decide exactly like IPv4 | `TestLegacyIPv6Families`; Control row "IPv6 allowed" (setting on and every adapter IPv6-capable) | Decisions: covered. Real capture: Linux acceptance `ipv6.routed-per-line`, `ipv6.disabled-default-with-capable-line`. **Windows: pending.** |
+| `N-tun-ipv6-true` | same without the reject rule | `Config.IPv6 = true`: IPv6 flows decide exactly like IPv4 | `TestLegacyIPv6Families`; Control row "IPv6 allowed" (Auto setting and every adapter IPv6-capable) | Decisions: covered. Real capture: Linux acceptance `ipv6.routed-per-line`, `ipv6.disabled-default-with-capable-line`. **Windows: pending.** |
 | `N-proxy-ipv6-false`, `N-proxy-ipv6-true` | a `mixed` inbound on 127.0.0.1:12346; the two IPv6 hashes are identical because IPv6 never reached the proxy config | None in the product. The native engine has no production proxy mode (§5.11); `testproxy.TestProductProxyCannotListen` proves a product build refuses to listen. The loopback test proxy shares the production policy and binding code: `TestProxyUsesPolicyAndAccountsCoalescedPayload`, `TestProxyRefusesBlockedPolicyBeforeDial`, `TestProxyBoundedBeforeHandshakeAndLoopbackOnly` (build tags `lifecycle_test`/`acceptance`, lines A/B) | Retired as a product behaviour; the test-proxy tests are existing evidence of policy sharing and are not re-run with aa/bb/cc. No production proxy stand-in is reintroduced. |
 | serialization only: `clash_api` 127.0.0.1:12345 and secret, rule-set tags and file paths, log level, DNS, key order, whitespace | — | No native equivalent: Control drives the engine over the authenticated local IPC protocol (`TestNativeEngineService`, `FuzzProtocol`, existing) | Retired with no replacement needed. |
 
@@ -107,6 +107,6 @@ not prove capture, OS attribution or packet-level rejection.
 - Hosted Windows TUN proof of IPv6 refusal and routing with these three lines.
 - Packet-level proof that a flow pinned to a blocked line is reset, with these
   inputs (prediction and decision only, here and in PR #99).
-- The native semantic replay of the 25 traces, and the retirement of
-  `TestFrozenWindowsGoldenHashes` and the fixture, which per the retirement plan
-  follow that replay and are not part of this change.
+- The native semantic replay of the 25 traces and retirement of the active
+  `TestFrozenWindowsGoldenHashes` comparison follow the retirement plan and are
+  not part of this change. The immutable fixture remains a frozen reference.

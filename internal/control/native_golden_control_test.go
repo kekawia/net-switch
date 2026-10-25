@@ -84,7 +84,7 @@ func TestLegacyGoldenInputsAsControlProducesThem(t *testing.T) {
 		{name: "3 lines pinned, all exhausted blocks bb and cc", count: 3, weights: [3]float64{5, 3, 2}, exhausted: []string{"aa", "bb", "cc"},
 			config:    policy.Config{Lines: native, AppLines: allPins, Shares: map[string]uint64{}, Lanes: map[string]string{"aa": "aa", "bb": "bb", "cc": "cc"}, Blocked: []string{"bb", "cc"}},
 			decisions: [5]string{"aa", "blocked", "blocked", "aa", "aa"}},
-		// IPv6 is allowed only when the setting is on and every line has it.
+		// Auto permits IPv6 only when every line has it.
 		{name: "3 lines combined, IPv6 allowed", count: 3, weights: [3]float64{5, 3, 2}, combine: true, ipv6: true,
 			config:    policy.Config{Lines: native, AppLines: allPins, Combine: true, Shares: map[string]uint64{"aa": 500_000, "bb": 300_000, "cc": 200_000}, Lanes: map[string]string{"aa": "aa", "bb": "bb", "cc": "cc"}, Blocked: []string{}, IPv6: true},
 			decisions: [5]string{"aa", "bb", "cc", "bb", "bb"}, sequence: "bb aa cc aa aa bb aa cc bb aa"},
@@ -106,7 +106,7 @@ func TestLegacyGoldenInputsAsControlProducesThem(t *testing.T) {
 			}
 			ipv6 := "off"
 			if tc.ipv6 {
-				ipv6 = "on"
+				ipv6 = "auto"
 			}
 			c, _, _, _ := testCore(t, map[string]any{"lines": items, "appLines": pins, "combine": tc.combine, "combineMode": "manual", "ipv6": ipv6})
 			if tc.nopins {
