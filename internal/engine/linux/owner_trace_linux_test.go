@@ -82,35 +82,65 @@ func TestDescriptorTraceDistinguishesQueueFromBlockedRead(t *testing.T) {
 // Round 6: stamping every descriptor read was 27% of the engine's allocation
 // at the TCP cap. Fast reads are now only counted; slow reads and the read
 // still running keep their stamps, so a stalled read stays visible.
+//
+// The clocked hot path runs on its own scan. AllocsPerRun pins the test to one
+// processor, and a preemption between a read's two clock reads makes a real
+// slow read: on Linux ARM64 CI (2026-10-24) one of these reads took 231 µs and
+// was stamped, as it should be. The threshold cases pass their finish times in.
 func TestDescriptorTraceStampsOnlySlowAndRunningReads(t *testing.T) {
-	job := &descriptorBatch{queued: time.Now(), deadline: time.Now().Add(time.Second)}
-	stage := job.trace.begin(-3)
-	job.trace.end(stage)
+	hot := &descriptorBatch{queued: time.Now(), deadline: time.Now().Add(time.Second)}
+	hot.trace.end(hot.trace.begin(-3))
 	if allocs := testing.AllocsPerRun(1000, func() {
 		started := time.Now()
-		job.trace.reading(7, started)
-		job.trace.read(7, started)
+		hot.trace.reading(7, started)
+		hot.trace.read(7, started)
 	}); allocs != 0 {
 		t.Fatalf("a fast descriptor read allocated %.1f times", allocs)
 	}
-	slowStart := time.Now().Add(-2 * descriptorSlowRead)
-	job.trace.reading(9, slowStart)
-	job.trace.read(9, slowStart)
-	running := time.Now()
+	hs := (&descriptorFailure{job: hot, outcome: "deadline"}).snapshot()
+	// 1000 runs plus AllocsPerRun's warm-up run, every one counted; a stamp
+	// only for a read that really reached the threshold.
+	if hs.DescriptorReads != 1001 || hs.SlowReadNS != int64(descriptorSlowRead) {
+		t.Fatalf("read counters: %d reads, threshold %d", hs.DescriptorReads, hs.SlowReadNS)
+	}
+	var stampedNS int64
+	for _, read := range hs.Reads.stamps[1:] {
+		if took := read.FinishedNS - read.StartedNS; read.FD != 7 || took < int64(descriptorSlowRead) {
+			t.Fatalf("a fast read was stamped: %+v", read)
+		} else {
+			stampedNS += took
+		}
+	}
+	if hs.DescriptorReadNS < stampedNS {
+		t.Fatalf("summed read time %d ns is below the %d ns of stamped reads", hs.DescriptorReadNS, stampedNS)
+	}
+
+	job := &descriptorBatch{queued: time.Now(), deadline: time.Now().Add(time.Second)}
+	job.trace.end(job.trace.begin(-3))
+	// One nanosecond under the threshold is fast; the threshold itself is slow.
+	fast := time.Now()
+	job.trace.reading(7, fast)
+	job.trace.finish(7, fast, fast.Add(descriptorSlowRead-time.Nanosecond))
+	slow := fast.Add(time.Millisecond)
+	job.trace.reading(9, slow)
+	job.trace.finish(9, slow, slow.Add(descriptorSlowRead))
+	running := slow.Add(time.Millisecond)
 	job.trace.reading(11, running)
 	f := &descriptorFailure{job: job, outcome: "deadline"}
 	s := f.snapshot()
 	reads := s.Reads.stamps
-	if len(reads) != 3 || reads[0].FD != -3 || reads[1].FD != 9 || reads[1].FinishedNS-reads[1].StartedNS < int64(descriptorSlowRead) ||
-		reads[2] != (descriptorReadStamp{FD: 11, StartedNS: running.UnixNano()}) {
+	want := []descriptorReadStamp{
+		{FD: 9, StartedNS: slow.UnixNano(), FinishedNS: slow.Add(descriptorSlowRead).UnixNano()},
+		{FD: 11, StartedNS: running.UnixNano()},
+	}
+	if len(reads) != 3 || reads[0].FD != -3 || !slices.Equal(reads[1:], want) {
 		t.Fatalf("want the stage, the slow read and the running read, got %+v", reads)
 	}
-	// Fast reads from AllocsPerRun (1000 plus its warm-up run) and the slow one.
-	if s.DescriptorReads != 1002 || s.DescriptorReadNS < int64(2*descriptorSlowRead) || s.SlowReadNS != int64(descriptorSlowRead) {
+	if s.DescriptorReads != 2 || s.DescriptorReadNS != int64(2*descriptorSlowRead-time.Nanosecond) || s.SlowReadNS != int64(descriptorSlowRead) {
 		t.Fatalf("read counters: %d reads, %d ns, threshold %d", s.DescriptorReads, s.DescriptorReadNS, s.SlowReadNS)
 	}
-	job.trace.read(11, running)
-	if after := f.snapshot().Reads.stamps; len(after) != 2 {
+	job.trace.finish(11, running, running.Add(time.Nanosecond))
+	if after := f.snapshot().Reads.stamps; !slices.Equal(after, reads[:2]) {
 		t.Fatalf("a finished fast read stayed visible as running: %+v", after)
 	}
 	if len(s.Reads.stamps) != 3 {

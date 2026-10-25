@@ -80,7 +80,7 @@ type descriptorTrace struct {
 	// Only the scan's worker writes these; a snapshot reads them at any time.
 	// runningNS is the wall-clock start of the descriptor read in progress,
 	// 0 between reads.
-	runningFD, runningNS             atomic.Int64
+	runningFD, runningNS              atomic.Int64
 	descriptorReads, descriptorReadNS atomic.Int64
 }
 
@@ -110,10 +110,15 @@ func (t *descriptorTrace) reading(fd int64, started time.Time) {
 	t.runningNS.Store(started.UnixNano())
 }
 
-// read finishes the running descriptor read: it is counted, and stamped only
-// if it was slow. The fast path takes no lock and allocates nothing.
+// read finishes the running descriptor read now.
 func (t *descriptorTrace) read(fd int64, started time.Time) {
-	finished := time.Now()
+	t.finish(fd, started, time.Now())
+}
+
+// finish records a descriptor read that ran from started to finished: it is
+// counted, and stamped only if it was slow. The fast path takes no lock and
+// allocates nothing.
+func (t *descriptorTrace) finish(fd int64, started, finished time.Time) {
 	t.runningNS.Store(0)
 	took := finished.Sub(started)
 	t.descriptorReads.Add(1)
