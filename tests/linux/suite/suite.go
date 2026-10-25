@@ -99,7 +99,7 @@ type registry struct {
 }
 
 // SYSTEM-DESIGN 5.6 defers attribution under load until eBPF lands. This
-// explicit catalogue excludes the steady lookup gates and all other cases.
+// explicit 16-entry catalogue excludes the steady lookup gates and all other cases.
 // Capacity bounds, refusal causes, survival and routing remain mandatory.
 // Exact held occupancy is deferred only after distinct unknown-overflow
 // refusals account for its whole shortfall (round 3 acceptance clarification).
@@ -115,6 +115,12 @@ func loadAttributionBlocker(id string) string {
 		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: at least 99.5% natural lookups; identified under-load probe and stream owners; post-fault recovery stays hard"
 	case "protocol.flows-pagination":
 		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: at least 299 of 300 rows identify the app path, app id and PID"
+	case "udp.fifty-destinations-one-session":
+		// Added 2026-10-23 (SYSTEM-DESIGN 5.6): on PR #85's CI, job
+		// 120593704124, the proc fallback's holder scan hit its deadline behind
+		// 10,000 open files, so the burst's one session was admitted unknown
+		// and pinned to main line a. Pinning an unknown session is intended.
+		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: the burst's one UDP session identifies charlie (this process) while 10,000 files are open; one public endpoint, the servers corroborating the engine's own route, exactly one held session, and any nonempty wrong identity or wrong line stay hard"
 	default:
 		return ""
 	}

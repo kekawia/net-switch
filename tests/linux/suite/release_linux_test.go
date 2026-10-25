@@ -26,6 +26,10 @@ func TestOnlyLoadAttributionGatesAreReleaseBlockers(t *testing.T) {
 		"overload.memory-at-limit":           false,
 		"protocol.flows-pagination":          false,
 		"capacity.mixed-caps":                false,
+		"udp.fifty-destinations-one-session": false,
+	}
+	if len(want) != 16 {
+		t.Fatalf("the release catalogue has %d entries, the documented count is 16", len(want))
 	}
 	cases := Cases(Config{})
 	for _, c := range cases {

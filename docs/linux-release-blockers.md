@@ -7,9 +7,12 @@ initiation/send records, with the scanner as a
 fallback. See the [source-backed study](linux-owner-ebpf-study.md).
 
 Attribution assertions in all thirteen overload cases and flow pagination are
-deferred. Round 3 also declares the exact mixed-cap occupancy gate, making
-**15 catalogue entries**. Each overload still requires **99.5% successful lookups** in its own
+deferred. Round 3 also declares the exact mixed-cap occupancy gate, and the
+design decision of 23 October 2026 adds the owner of the 50-destination UDP
+burst (`udp.fifty-destinations-one-session`), making **16 catalogue entries**.
+Each overload still requires **99.5% successful lookups** in its own
 non-injected window. Pagination still requires **299 identified rows out of 300**.
+The burst requires its one session to identify charlie.
 The real numerator, denominator and threshold result remain in the JSON, console
 log and summary. Every declaration carries `release-blocker` status, including
 when a sample meets its threshold. No retry or excluded natural miss changes it.
@@ -48,7 +51,43 @@ classified as unknown-overflow refusals. That is the only kind of shortfall
 the catalogue allows; any other would have failed the job. UDP total, mixed
 UDP, UDP per app and the TCP storm's identified 8,192 were exact on every
 runner. Each runner ran 85 cases: 70 passed and 15 declared release blockers,
-with no hard failures.
+with no hard failures. The 50-destination burst was among the 70 on that run;
+it was declared afterwards (below), so a run of the current suite reports 69
+passes and 16 declared blockers when every threshold is met.
+
+## The 50-destination UDP burst (16th entry, declared 23 October 2026)
+
+`udp.fifty-destinations-one-session` sends the first datagram to 50 servers at
+once from one charlie socket while another app holds 10,000 files open, which
+slows the fallback owner scan on purpose. On PR #85's CI (job 120593704124)
+the scan hit its deadline, so the engine admitted the session as unknown and
+pinned it to main line a. All 50 servers saw one public endpoint, but on
+line a, not charlie's line c. Pinning an unknown session is intended (a mapping
+must not move mid-session), so eBPF is the fix, and the owner check joins the
+catalogue. The old single assertion, "one public endpoint on line c", reported
+"1 different" for that run, which read like a port change. It is now split:
+
+- **Hard, on every engine:** all 50 datagrams are sent within 5 ms and each is
+  answered once from the server it went to; the servers saw exactly **one
+  public endpoint**; the engine lists **exactly one UDP session** for the
+  socket; the servers recorded 50 datagrams to 50 addresses from one source.
+- **Hard on 1.0:** the session is either this charlie process (path, app id and
+  PID) on line c, or fully unknown on main, nothing in between; and the line
+  the servers saw is the line the engine's own record says it decided. A
+  nonempty wrong identity, charlie routed off line c, or an unknown session
+  the servers saw on line c all fail PR CI.
+- **Release check:** the session identifies charlie. The message carries the
+  old combined verdict from the same sample ("original one-endpoint-on-line-c
+  check would pass: true/false"). When the owner is missing, the engine's
+  owner-lookup statistics are logged next to it.
+- **Baseline:** sing-box reports no identity or PID per session, so the
+  servers' line c stays the whole verdict and stays hard.
+
+Harness regressions in `tests/linux/suite` run the judgement through the real
+harness: the CI sample (unknown, one endpoint on main) is release-blocked and
+still fails the release gate; every wrong-owner, wrong-line, two-endpoint and
+two-session sample fails PR CI; and the correct sample is a met measurement,
+not a pass.
 
 These checks stayed hard on every runner and passed:
 - **TIME_WAIT probes:** all 50 alpha and 10 bravo post-burst probes were
