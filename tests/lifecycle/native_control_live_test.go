@@ -52,6 +52,63 @@ func controlDesired(t *testing.T, data string) ce.Revision {
 	return j.Desired
 }
 
+type controlPolicyWitness struct {
+	desired  ce.Revision
+	status   protocol.Status
+	instance string // Control journal's engineInstanceId
+}
+
+func (w controlPolicyWitness) validate(instance, mainID, alias string, initialAck uint64) error {
+	p := w.desired.Policy
+	if w.instance != instance || w.desired.Number < initialAck || len(p.Lines) == 0 || p.Lines[0].ID != mainID || p.Lines[0].Alias != alias {
+		return fmt.Errorf("witness predates action or has wrong main binding: %+v", w.desired)
+	}
+	native, err := lifecycle.NativeRevision(w.desired)
+	if err != nil {
+		return err
+	}
+	s := w.status
+	if s.State != "on" || s.Instance != instance || s.Applied == nil || s.Applied.N != native.N || s.Applied.Hash != native.Hash || s.Applied.Point == 0 {
+		return fmt.Errorf("journal and loaded native policy do not match: desired=%+v status=%+v", w.desired, s)
+	}
+	return nil
+}
+
+// Two exact snapshots bracket one fresh admission. Never retry traffic or
+// infer an intermediate config from a newer revision counter.
+func chooseControlPolicyWitness(before, after controlPolicyWitness, flow flows.Record, instance, mainID, alias string, initialAck uint64) (controlPolicyWitness, string, error) {
+	for _, w := range []controlPolicyWitness{before, after} {
+		if err := w.validate(instance, mainID, alias, initialAck); err != nil {
+			return controlPolicyWitness{}, "", err
+		}
+	}
+	if after.desired.Number < before.desired.Number || after.status.Applied.Point < before.status.Applied.Point ||
+		(after.desired.Number > before.desired.Number && after.status.Applied.Point == before.status.Applied.Point) ||
+		(after.desired.Number == before.desired.Number && (after.status.Applied.Hash != before.status.Applied.Hash || after.status.Applied.Point != before.status.Applied.Point)) {
+		return controlPolicyWitness{}, "", fmt.Errorf("inconsistent before/after policy witnesses")
+	}
+	w := before
+	if flow.Revision != before.desired.Number {
+		if flow.Revision != after.desired.Number {
+			return controlPolicyWitness{}, "", fmt.Errorf("flow revision %d was not witnessed (before=%d after=%d initial=%d)", flow.Revision, before.desired.Number, after.desired.Number, initialAck)
+		}
+		w = after
+	}
+	target := w.desired.Policy.Lanes[mainID]
+	if target == "" {
+		target = mainID
+	}
+	if flow.Lane != mainID || flow.Line != target || !flow.PhysicalSource.IsValid() {
+		return controlPolicyWitness{}, "", fmt.Errorf("flow disagrees with exact witnessed routing: flow=%+v target=%s", flow, target)
+	}
+	for _, line := range w.desired.Policy.Lines {
+		if line.ID == target {
+			return w, line.Alias, nil
+		}
+	}
+	return controlPolicyWitness{}, "", fmt.Errorf("witness has no physical target %s", target)
+}
+
 func controlLiveFlow(t *testing.T, observer *nativeClient, fixture tunFixture, conn net.Conn) flows.Record {
 	t.Helper()
 	_, source := fixture.origin(t, conn)
@@ -113,6 +170,7 @@ func nativeControlLiveUpdates(t *testing.T, ctx context.Context, c *client, owne
 			nativeMust(t, observer, "status", nil, &status)
 			return status.State == "on" && status.Instance == observer.instance && status.Applied != nil && status.Applied.N == native.N && status.Applied.Hash == native.Hash && status.Applied.Point != 0
 		})
+		initialAck := desired.Number
 		// Keep the installed product loops running across several poll and
 		// supervisor rounds; a delayed restart must fail the held exchange too.
 		for range 4 {
@@ -126,26 +184,48 @@ func nativeControlLiveUpdates(t *testing.T, ctx context.Context, c *client, owne
 		if still.ID != original.ID || still.Revision != original.Revision || still.Line != original.Line || still.PhysicalSource != original.PhysicalSource {
 			t.Fatal("held flow changed identity or physical source", original, still)
 		}
+		capture := func() controlPolicyWitness {
+			var j struct {
+				Desired  ce.Revision `json:"desired"`
+				Instance string      `json:"engineInstanceId"`
+			}
+			if err := lifecycle.Read(filepath.Join(data, "control-journal.json"), &j); err != nil {
+				t.Fatal(err)
+			}
+			w := controlPolicyWitness{desired: j.Desired, instance: j.Instance}
+			nativeMust(t, observer, "status", nil, &w.status)
+			return w
+		}
+		beforeAdmission := capture()
 		fresh, err := fixture.dial(ctx, "tcp4", fixture.target)
 		if err != nil {
 			t.Fatal("fresh traffic after "+label, err)
 		}
 		defer fresh.Close()
 		reply := nativeEcho(t, fresh, "fresh-after-"+label)
+		afterAdmission := capture()
 		flow := controlLiveFlow(t, observer, fixture, fresh)
-		if flow.Revision != desired.Number || flow.Line != mainID || flow.Lane != mainID || !flow.PhysicalSource.IsValid() {
-			t.Fatal("fresh traffic did not use acknowledged policy", flow, desired.Number)
+		t.Logf("NATIVE_CONTROL_LIVE_WITNESSES phase=%s initial_ack=%d before=%+v after=%+v raw_flow=%+v", label, initialAck, beforeAdmission, afterAdmission, flow)
+		witness, physicalAlias, err := chooseControlPolicyWitness(beforeAdmission, afterAdmission, flow, observer.instance, mainID, alias, initialAck)
+		if err != nil {
+			t.Fatal("fresh traffic did not use an exactly witnessed acknowledged policy", err)
 		}
+		t.Logf("NATIVE_CONTROL_LIVE_CHOSEN initial_ack=%d chosen_revision=%d native_hash=%s apply_point=%d instance=%s", initialAck, witness.desired.Number, witness.status.Applied.Hash, witness.status.Applied.Point, witness.instance)
 		if runtime.GOOS == "linux" {
-			want := fixture.seen
-			if mainID != "a1" {
+			var want string
+			switch physicalAlias {
+			case fixture.line:
+				want = fixture.seen
+			case fixture.churnLine:
 				want = fixture.churnSeen
+			default:
+				t.Fatal("no external egress mapping for witnessed physical alias", physicalAlias)
 			}
-			if !strings.Contains(reply, want) {
+			if want == "" || !strings.Contains(reply, want) {
 				t.Fatal("external responder saw wrong egress", reply, want)
 			}
 		}
-		t.Logf("NATIVE_CONTROL_LIVE phase=%s instance=%s held_id=%d held_revision=%d fresh_revision=%d lane=%s physical_line=%s physical_source=%s", label, observer.instance, still.ID, still.Revision, flow.Revision, flow.Lane, flow.Line, flow.PhysicalSource)
+		t.Logf("NATIVE_CONTROL_LIVE phase=%s instance=%s held_id=%d held_revision=%d initial_ack=%d chosen_witness=%d fresh_revision=%d lane=%s physical_line=%s physical_alias=%s physical_source=%s", label, observer.instance, still.ID, still.Revision, initialAck, witness.desired.Number, flow.Revision, flow.Lane, flow.Line, physicalAlias, flow.PhysicalSource)
 	}
 	if runtime.GOOS == "windows" {
 		// Let the real adapter reader acquire the stable GUID before renaming.
