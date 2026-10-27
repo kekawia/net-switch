@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -46,22 +48,33 @@ func readControlJournal(t *testing.T, data string) controlJournal {
 // echo whose bytes appear exactly once.
 func routedApps(t *testing.T, data string) map[string]usage.RoutedEntry {
 	t.Helper()
+	out, err := readRoutedApps(data)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func usageSharingViolation(err error) bool {
+	return runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(32))
+}
+
+// Keep the read error separate from an empty record: polling must never accept
+// an unreadable snapshot as evidence of an exact zero-byte total.
+func readRoutedApps(data string) (map[string]usage.RoutedEntry, error) {
 	out := map[string]usage.RoutedEntry{}
 	b, err := os.ReadFile(filepath.Join(data, "usage.json"))
-	if os.IsNotExist(err) {
-		return out
-	}
 	if err != nil {
-		t.Fatal(err)
+		return out, err
 	}
 	routed := usage.LoadRouted(b)
 	if routed == nil {
-		return out
+		return out, nil
 	}
 	for id, e := range routed.Apps {
 		out[id] = *e
 	}
-	return out
+	return out, nil
 }
 
 // quiesceRouted waits until the routed record has not changed for two
@@ -283,13 +296,19 @@ func TestNativeControlCutover(t *testing.T) {
 		own := func() usage.RoutedEntry { return routedApps(t, data)[key] }
 		settle := func(label string, wantUp, wantDown uint64) {
 			deadline := time.Now().Add(25 * time.Second)
+			var last map[string]usage.RoutedEntry
+			var readErr error
 			for time.Now().Before(deadline) {
-				if e := own(); e.Up == wantUp && e.Down == wantDown {
+				last, readErr = readRoutedApps(data)
+				if readErr != nil && !usageSharingViolation(readErr) {
+					t.Fatal(readErr)
+				}
+				if e := last[key]; readErr == nil && e.Up == wantUp && e.Down == wantDown {
 					return
 				}
 				time.Sleep(200 * time.Millisecond)
 			}
-			t.Fatalf("timeout: %s: want up=%d down=%d, routed=%+v", label, wantUp, wantDown, routedApps(t, data))
+			t.Fatalf("timeout: %s: want up=%d down=%d, routed=%+v, last read error=%v", label, wantUp, wantDown, last, readErr)
 		}
 		// want* are the exact bytes this process has sent and received so far;
 		// every exchange adds what it actually put on the wire.

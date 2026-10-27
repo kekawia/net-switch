@@ -132,3 +132,38 @@ was watched.
 For review, compare the seven mappings above with the new tests and the original
 round2/round3 consumers. Check fixture cleanup, reconnect publication barriers,
 and the stated distinction between typed service outcomes and installed proof.
+
+## Hosted usage-read harness follow-up
+
+The reported ARM64 failure on 8291482 was a sharing violation while settle read
+usage.json during publication. Its polling read now preserves the error and
+skips only Windows ERROR_SHARING_VIOLATION (32), including wrapped PathError.
+It does not accept an unreadable record as zero usage. All other read errors
+are fatal. The existing 25-second deadline and 200-ms interval are unchanged;
+timeout remains fatal and reports the last read error without another read.
+Reads outside settle retain their existing behavior.
+
+Product inspection found no matching normal-operation read/write overlap:
+- `Core.New` reads usage.json through durableFiles/os.ReadFile before Core.Run
+  starts the usage writers. Concurrent ordinary readers allow read sharing;
+  they do not block that startup read. This startup reader has no retry for an
+  external writer's delete handle, but no concurrent product publisher was
+  found at that phase. Such an external interference case is not newly proven.
+- `Core.SaveUsage` holds usageWrite across snapshot and atomic publication.
+  AtomicWrite writes and syncs a temporary file, then durableRename uses
+  MoveFileEx replacement. The pinned Windows os.Open implementation shares
+  READ and WRITE, not DELETE, so a concurrent ordinary reader can obstruct
+  publication. AtomicWrite already retries errors 5, 32 and 33 ten times at
+  50-ms intervals (eleven attempts total).
+- A reader held beyond that budget can still fail a product write. The error
+  propagates; readTotals does not acknowledge counters or advance routedSaved.
+  Its next read retries the dirty commit even if the counters are unchanged.
+  Existing tests prove recovery without loss or double counting. This is a
+  bounded, surfaced failure, not evidence requiring new product file handling.
+
+No product file handling changed. Local focused validation passed 13 leaf
+cases: eight sharing-error classifications, three atomic-rename retry cases,
+serialized usage writers and failed-commit accounting recovery. Tests used
+Idle priority, GOMAXPROCS=2 and -p=2. The installed ARM64 scenario was not run
+locally and remains hosted evidence pending. Round 3's mutation results above
+remain unchanged; the handoff fix is already committed.
