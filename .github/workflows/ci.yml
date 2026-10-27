@@ -524,7 +524,12 @@ jobs:
         run: go test -count=1 -v -timeout=3m -run '^TestOwnershipLockHostileDirectoryStartupAndRecovery$' ./internal/engine/windows
       - name: Deterministic gVisor dispatch regression
         run: go test -mod=mod ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1 -timeout=5m gvisor.dev/gvisor/pkg/tcpip/transport/tcp
-      - run: go test -v -timeout=10m ./internal/... ./cmd/... ./tests/...
+      - name: Internal packages and native replay coverage
+        shell: bash
+        run: |
+          set -o pipefail
+          go build -o ./bin/replay-report ./internal/replayledger/cmd/replay-report
+          go test -json -count=1 -timeout=10m ./internal/... ./cmd/... ./tests/... | ./bin/replay-report
       - run: go build ./internal/... ./cmd/... ./tests/...
       - name: Install pinned govulncheck
         run: go install -mod=mod golang.org/x/vuln/cmd/govulncheck@v1.9.0

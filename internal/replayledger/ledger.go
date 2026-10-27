@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 )
@@ -25,18 +26,20 @@ type Fixture struct {
 }
 
 type Rule struct {
-	Kinds       []string `json:"kinds"`
-	Disposition string   `json:"disposition"`
-	Assertion   string   `json:"assertion"`
+	Kinds       []string          `json:"kinds"`
+	Disposition string            `json:"disposition"`
+	Assertion   string            `json:"assertion"`
+	Bindings    map[string]string `json:"bindings,omitempty"`
 }
 
 type Annotation struct {
-	Hash        string `json:"hash"`
-	Seqs        []int  `json:"seqs"`
-	Disposition string `json:"disposition"`
-	Assertion   string `json:"assertion"`
-	Status      string `json:"status"`
-	Group       string `json:"group,omitempty"`
+	Hash        string   `json:"hash"`
+	Seqs        []int    `json:"seqs"`
+	Ranges      [][2]int `json:"ranges,omitempty"`
+	Disposition string   `json:"disposition"`
+	Assertion   string   `json:"assertion"`
+	Status      string   `json:"status"`
+	Group       string   `json:"group,omitempty"`
 }
 
 type Group struct {
@@ -94,7 +97,7 @@ type Counts struct {
 	Consumed      int            `json:"consumed"`
 	Covered       int            `json:"covered"`
 	Uncovered     int            `json:"uncovered"`
-	Pending107    int            `json:"pending107"`
+	Pending       map[string]int `json:"pendingByPR"`
 	ByDisposition map[string]int `json:"byDisposition"`
 	ByKind        map[string]int `json:"uncoveredByKind"`
 	ByTrace       map[string]int `json:"uncoveredByTrace"`
@@ -183,12 +186,28 @@ func validDisposition(disposition, assertion string) bool {
 	return strings.TrimSpace(assertion) != "" && slices.Contains([]string{"unchanged", "translated", "atomic-revision", "obsolete"}, disposition)
 }
 
+var pendingStatus = regexp.MustCompile(`^pending #[1-9][0-9]*$`)
+
+func sequences(a Annotation, count int) ([]int, error) {
+	seqs := slices.Clone(a.Seqs)
+	for _, span := range a.Ranges {
+		if span[0] < 0 || span[1] < span[0] || span[1] >= count {
+			return nil, fmt.Errorf("invalid annotation range %v", span)
+		}
+		for seq := span[0]; seq <= span[1]; seq++ {
+			seqs = append(seqs, seq)
+		}
+	}
+	return seqs, nil
+}
+
 // Build validates and expands the compact plan. It does NOT execute native
 // behavior or promote supporting feature tests into entry coverage.
 func Build(m Mapping, traces map[string]Trace) (Report, error) {
 	r := Report{Version: m.Version, Counts: Counts{
 		ByDisposition: map[string]int{"unchanged": 0, "translated": 0, "atomic-revision": 0, "obsolete": 0},
 		ByKind:        map[string]int{}, ByTrace: map[string]int{},
+		Pending: map[string]int{},
 	}}
 	if m.Version != 1 || m.Total != 7894 || len(m.Fixtures) != 25 || len(traces) != 25 {
 		return r, fmt.Errorf("unsupported mapping version or fixture inventory")
@@ -197,6 +216,11 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 	for _, rule := range m.Rules {
 		if !validDisposition(rule.Disposition, rule.Assertion) || rule.Disposition == "atomic-revision" || len(rule.Kinds) == 0 {
 			return r, fmt.Errorf("invalid generic disposition: %+v", rule)
+		}
+		for hash, ref := range rule.Bindings {
+			if _, ok := m.Fixtures[hash]; !ok || !testReference(ref) {
+				return r, fmt.Errorf("invalid rule test binding %s", ref)
+			}
 		}
 		for _, kind := range rule.Kinds {
 			if !known(kind) {
@@ -211,7 +235,11 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 	annotations := map[string]map[int]Annotation{}
 	for _, a := range m.Annotations {
 		f, ok := m.Fixtures[a.Hash]
-		if !ok || len(a.Seqs) == 0 || !validDisposition(a.Disposition, a.Assertion) || a.Status != "pending #107" && a.Status != "uncovered" {
+		seqs, err := sequences(a, f.Entries)
+		if err != nil {
+			return r, err
+		}
+		if !ok || len(seqs) == 0 || !validDisposition(a.Disposition, a.Assertion) || !testReference(a.Assertion) || !pendingStatus.MatchString(a.Status) && a.Status != "uncovered" {
 			return r, fmt.Errorf("invalid annotation: %+v", a)
 		}
 		if (a.Disposition == "atomic-revision") != (a.Group != "") {
@@ -220,7 +248,7 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 		if annotations[a.Hash] == nil {
 			annotations[a.Hash] = map[int]Annotation{}
 		}
-		for _, seq := range a.Seqs {
+		for _, seq := range seqs {
 			if seq < 0 || seq >= f.Entries {
 				return r, fmt.Errorf("annotation outside trace %s:%d", f.Name, seq)
 			}
@@ -255,6 +283,9 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 				return r, fmt.Errorf("missing disposition for %s:%d %s", f.Name, e.Seq, kind)
 			}
 			row := Row{Hash: hash, Trace: f.Name, Seq: e.Seq, Kind: kind, Disposition: rule.Disposition, Assertion: rule.Assertion, Status: "uncovered"}
+			if ref, ok := rule.Bindings[hash]; ok {
+				row.Assertion = ref
+			}
 			if a, ok := annotations[hash][e.Seq]; ok {
 				row.Disposition, row.Assertion, row.Status, row.Group = a.Disposition, a.Assertion, a.Status, a.Group
 			}
@@ -264,8 +295,8 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 			r.Counts.ByDisposition[row.Disposition]++
 			r.Counts.ByKind[kind]++
 			r.Counts.ByTrace[f.Name]++
-			if row.Status == "pending #107" {
-				r.Counts.Pending107++
+			if pendingStatus.MatchString(row.Status) {
+				r.Counts.Pending[strings.TrimPrefix(row.Status, "pending ")]++
 			}
 		}
 	}
@@ -294,7 +325,7 @@ func validateGroups(m Mapping, traces map[string]Trace, annotations map[string]m
 				return fmt.Errorf("incomplete group %s: unordered members", g.Name)
 			}
 			a, ok := annotations[g.Hash][seq]
-			if !ok || a.Group != g.Name || a.Disposition != "atomic-revision" || t.Entries[seq].Kind != "write" {
+			if !ok || a.Group != g.Name || a.Disposition != "atomic-revision" || !ruleWrite(t.Entries[seq]) {
 				return fmt.Errorf("incomplete group %s at %d", g.Name, seq)
 			}
 			previous = seq
@@ -307,15 +338,7 @@ func validateGroups(m Mapping, traces map[string]Trace, annotations map[string]m
 			if e.Kind == "http" || e.Kind == "api" {
 				return fmt.Errorf("group %s crosses an unrelated HTTP boundary", g.Name)
 			}
-			if e.Kind != "write" {
-				continue
-			}
-			var value struct{ File string }
-			if err := json.Unmarshal(e.Value, &value); err != nil {
-				return err
-			}
-			base := filepath.Base(value.File)
-			if strings.HasPrefix(base, "apps-") || strings.HasPrefix(base, "share-") || strings.HasPrefix(base, "cut-") {
+			if ruleWrite(e) {
 				if !slices.Contains(g.Members, seq) {
 					return fmt.Errorf("incomplete group %s: unassigned rule write %d", g.Name, seq)
 				}
@@ -335,6 +358,18 @@ func validateGroups(m Mapping, traces map[string]Trace, annotations map[string]m
 		}
 	}
 	return nil
+}
+
+func ruleWrite(e Entry) bool {
+	if e.Direction != "output" || e.Kind != "write" {
+		return false
+	}
+	var value struct{ File string }
+	if json.Unmarshal(e.Value, &value) != nil {
+		return false
+	}
+	base := filepath.Base(value.File)
+	return strings.HasPrefix(base, "apps-") || strings.HasPrefix(base, "share-") || strings.HasPrefix(base, "cut-")
 }
 
 // Check the ORIGINAL cross-kind stream. Even uncovered replies must have a
@@ -406,113 +441,6 @@ func validateBoundaries(t Trace) error {
 	}
 	if httpPending {
 		return fmt.Errorf("missing API reply")
-	}
-	return nil
-}
-
-// Cursor is shared by future replay assertions. Consume is called only AFTER
-// the named assertion succeeds, in original entry order. A partial slice must
-// pass only its explicit rows; it cannot claim the other entries as covered.
-type Cursor struct {
-	rows []Row
-	next int
-	err  error
-}
-
-func NewCursor(rows []Row) *Cursor {
-	c := &Cursor{rows: slices.Clone(rows)}
-	seen := map[string]bool{}
-	for i, row := range c.rows {
-		if i == 0 || c.rows[i-1].Hash != row.Hash {
-			if seen[row.Hash] {
-				c.err = fmt.Errorf("repeated trace block %s", row.Trace)
-				break
-			}
-			seen[row.Hash] = true
-		} else if c.rows[i-1].Seq >= row.Seq {
-			c.err = fmt.Errorf("duplicate or reordered cursor rows in %s", row.Trace)
-			break
-		}
-	}
-	return c
-}
-
-func (c *Cursor) Consume(hash string, seq int, disposition, assertion string) error {
-	if c.err != nil {
-		return c.err
-	}
-	if c.next == len(c.rows) {
-		return fmt.Errorf("duplicate disposition after end")
-	}
-	want := c.rows[c.next]
-	if want.Hash != hash || want.Seq != seq || want.Disposition != disposition || want.Assertion != assertion {
-		return fmt.Errorf("duplicate, missing or out-of-order disposition: want %s:%d %s %s, got %s:%d %s %s", want.Trace, want.Seq, want.Disposition, want.Assertion, hash, seq, disposition, assertion)
-	}
-	c.next++
-	return nil
-}
-
-func (c *Cursor) Finish() error {
-	if c.err != nil {
-		return c.err
-	}
-	if c.next != len(c.rows) {
-		return fmt.Errorf("missing dispositions: consumed %d of %d", c.next, len(c.rows))
-	}
-	return nil
-}
-
-// Receipt can only be obtained from an exhausted assertion cursor. It contains
-// identities, not a second copy of the fixture values.
-type Receipt struct{ rows []Row }
-
-func (c *Cursor) Receipt() (Receipt, error) {
-	if err := c.Finish(); err != nil {
-		return Receipt{}, err
-	}
-	return Receipt{rows: slices.Clone(c.rows)}, nil
-}
-
-// Cover merges successful native assertion receipts into the report. Pending
-// work and generic obligation names cannot earn coverage. Calls are atomic:
-// a bad or repeated receipt changes no counters or rows.
-func (r *Report) Cover(receipts ...Receipt) error {
-	type key struct {
-		hash string
-		seq  int
-	}
-	index := map[key]int{}
-	for i, row := range r.Rows {
-		index[key{row.Hash, row.Seq}] = i
-	}
-	selected := map[int]bool{}
-	for _, receipt := range receipts {
-		for _, row := range receipt.rows {
-			i, ok := index[key{row.Hash, row.Seq}]
-			if !ok || selected[i] || r.Rows[i] != row || row.Status != "uncovered" || !strings.Contains(row.Assertion, "_test.go#Test") {
-				return fmt.Errorf("unearned, duplicate or stale coverage receipt: %s:%d", row.Trace, row.Seq)
-			}
-			selected[i] = true
-		}
-	}
-	selectedGroups := map[string]bool{}
-	for i := range selected {
-		if r.Rows[i].Group != "" {
-			selectedGroups[r.Rows[i].Group] = true
-		}
-	}
-	for i, row := range r.Rows {
-		if selectedGroups[row.Group] && !selected[i] {
-			return fmt.Errorf("incomplete group receipt: %s", row.Group)
-		}
-	}
-	for i := range selected {
-		row := &r.Rows[i]
-		row.Status = "covered"
-		r.Counts.Covered++
-		r.Counts.Uncovered--
-		r.Counts.ByKind[row.Kind]--
-		r.Counts.ByTrace[row.Trace]--
 	}
 	return nil
 }

@@ -54,22 +54,76 @@ go test -mod=vendor -p 2 -count=1 -v ./internal/replayledger
 go test -mod=vendor -p 2 -count=1 -v ./internal/replayledger -run ^TestNativeSemanticLedger$ -args -ledger-report
 ```
 
-The JSON is one test-log line. `go test -json` can wrap it in structured test
-events for a machine consumer. Nothing writes a report or modifies a fixture.
+The JSON inventory is one test-log line. Nothing writes a log or modifies a
+fixture. Inventory alone earns no coverage.
 
-Future native replay assertions use `NewCursor` with their explicitly selected
-rows and call `Consume(hash, seq, disposition, assertion)` **after** their checks
-pass. `Finish` rejects omissions, repeats, changed assertions and cross-kind
-reordering. `Receipt` requires a finished cursor. `Report.Cover` accepts only
-matching, uncovered rows with native test references (`_test.go#Test...`), rejects
-pending/generic/stale/duplicate receipts, and updates the covered/uncovered
-counts and breakdowns atomically. Replay must emit that report in the same test
-run; the standalone inventory run deliberately cannot infer another test's pass.
+Native replay assertions use `NewCursor` with their selected rows and call
+`Consume(t, hash, seq, disposition)` **after** their behavioral checks pass.
+There is no caller-supplied assertion string: the identity comes from
+`runtime.Caller`'s source file plus `t.Name()`, including subtests. Call Consume
+and Receipt directly from the registered test file; a helper in another file
+cannot impersonate that file. `Finish` rejects omissions and cross-kind
+reordering. `Receipt(t)` requires the same test, an exhausted cursor and
+`!t.Failed()`. It writes one `REPLAY_RECEIPT {json}` line through `t.Log` per
+assertion/hash/group. Row selections are generated from the mapping, not copied
+by hand into the test. Behavioral checks still need review and mutation proofs;
+knowing which test ran does not prove that its assertions are adequate.
 
-Receipts trust their caller's assertions, as other test helpers do: they are not
-proof that an arbitrary function name performed the behavior. Review and
-behavioral mutations remain required before connecting a new slice. The
-accounting test's own exhaustive cursor walk earns **no** native coverage.
+The AST check covers every annotation, per-trace rule binding and supporting
+reference. A target must be a top-level Test function taking `*testing.T`, with
+no results or type parameters. An absent source file is allowed only if **all**
+references to that function are `pending #N`; those rows can never produce a
+receipt. A present file with a deleted or malformed test fails, even if pending.
+Mixed pending and non-pending references to an absent function fail. Pending
+counts are reported by PR number, not hardcoded to #107.
+
+### Cross-package aggregation in CI
+
+The existing internal-package test step in `ci.yml` now builds the small report
+command and pipes the same test sweep straight into it (Windows and Linux):
+
+```bash
+set -o pipefail
+go build -o ./bin/replay-report ./internal/replayledger/cmd/replay-report
+go test -json -count=1 -timeout=10m ./internal/... ./cmd/... ./tests/... | ./bin/replay-report
+```
+
+The command loads the hash-verified mapping, validates its source targets, and
+joins receipts across packages. It waits for the receipt's exact test, all parent
+tests and the package to PASS. Failures after logging, including cleanup failures,
+invalidate the run. Unknown entries, repeated receipts, mismatched package/test
+identities, pending entries, incomplete groups and truncated streams fail.
+Split test-output events are reassembled before reading receipt JSON. Test
+diagnostics remain visible on stdout. There is no saved log and `pipefail`
+preserves either process's failure. The final line is `covered N / 7,894`, with
+uncovered and per-PR pending counts. The standalone inventory still reports zero
+until the executing native tests are connected; no static `covered` flag exists.
+
+### Compact bindings and the startup slice
+
+The shared startup replay belongs in package `control`, in
+`internal/control/native_startup_replay_test.go`, to reuse its pure Control
+fixtures without importing Control from lifecycle. It will be one
+`TestNativeStartupReplay` with 25 named per-trace subtests, sharing setup code
+but replaying each trace's own startup inputs and ordered assertions.
+
+Each subtest calls `DefaultMapping`, `Load("../..", mapping)`, and `Build`, then
+selects the original-order rows whose hash matches its fixture and whose
+assertion equals its registered `file#TestNativeStartupReplay/traceName` binding.
+It passes those rows to `NewCursor`. Consume each row only when the native
+boundary assertion succeeds; call Receipt once at the end of that subtest.
+Startup rows from a trace must have one owner: a later feature replay must reuse
+the setup without emitting another startup receipt.
+
+Rules accept `"bindings": {"<fixture hash>": "internal/control/native_startup_replay_test.go#TestNativeStartupReplay/appLine"}`.
+This binds every matching kind in that trace unless a sequence annotation
+overrides it. Split the existing I/O rule into a completion-only rule if the
+assertion owners differ. Thus the 3,003 completion markers require per-trace
+bindings, not 3,003 hand-authored sequence numbers. An annotation also accepts
+inclusive `"ranges": [[0,134]]` alongside `seqs`; overlaps, negative/reversed
+ranges and out-of-bounds ranges fail. Use a range only where the whole span has
+one disposition/owner; mixed dispositions retain their kind rules. Ranges and
+rule bindings do not themselves imply coverage.
 
 ## Obligations and existing evidence
 
@@ -88,6 +142,18 @@ These are named **uncovered obligations**, not invented passing tests. Mixed
 kinds such as file completions, writes and engine requests remain translated
 until their value-specific mapping and complete transaction assertions exist.
 No claim is made that every such entry has the same native representation.
+
+For `file-completion`, **translated** means a native Control I/O operation's
+completion replaces the original callback: assert the corresponding operation,
+success or actual error, and its position relative to settings, backup and
+revision publication. A removed adapter-file write instead needs an explicit
+native revision or cleanup assertion; merely finding its completion marker is
+not enough. For `completion`, the original boundary ID/kind and adjacency remain
+checked, and the replay must assert the corresponding native operation completed
+on that side of the next observable effect. Go need not reproduce a JavaScript
+callback ID, but it must prove the operation, result, null/undefined semantics
+where relevant and order before consuming the marker. Current generic bindings
+do not yet supply those behavioral assertions and remain uncovered.
 
 PR #105 proves the twelve config families, six pin/share families and empty-app
 policy from `test/fixtures/windows-golden.json` inputs, through literal native
@@ -115,14 +181,25 @@ PR #107 is read-only input to this work. Its 23 selected entries are pending:
 | Same, acknowledgement replacing reload | 202 | Obsolete |
 | `TestNativeAPIPinReplay/read` | 207, 208, 210 | Unchanged |
 
+The v1 group shape is deliberately **appLine-specific**: HTTP trigger,
+timer-completion acknowledgement replacement, API publication, and output write
+members with `apps-`, `share-` or `cut-` file prefixes. Settings writes are not
+revision members. Other transaction shapes need a reviewed mapping/schema
+extension; do not force them into these appLine assumptions.
+
 The group intervals are 135–170 and 171–206, with acknowledgement replacements
 at 166 and 202. Every intervening entry still has its own row; grouping never
 moves or hides those entries. All rule writes in each interval must be members,
 even if somebody removes both an annotation and its group-member declaration.
 Missing triggers, barriers, publication boundaries, members or groups fail.
 These checks validate the plan's grouping, not the actual native ack semantics.
-After #107 lands, connect its assertions to receipts and then remove the pending
-status. Do not relabel its other 188 entries as covered.
+#107 stays independent and registers itself after #108 merges. Its registration
+commit changes its seven annotations from `pending #107` to `uncovered`, keeps
+the exact 23 sequences and test/subtest references, and adds Consume/Receipt
+calls to those passing native assertions. The AST check then requires the file
+and function to exist. Only a passing aggregated run flips those 23 report rows
+to covered; merely merging the file or changing the status does not. Do not
+relabel its other 188 entries as covered.
 
 ## Exact uncovered inventory
 
@@ -223,6 +300,10 @@ The test checks the original request/reply stream, including all 97 `/delay`
 requests omitted by the old cross-kind comparison, and rejects leftover replies,
 missing responses, unsupported kinds (including future exit), detached/missing
 completion markers, invalid mappings and incomplete revision groups.
+Reply pairing is **per-route FIFO only**: these traces carry a route but no
+request ID. It rejects leftovers and missing results, but cannot distinguish
+two outstanding requests to the same route whose results are swapped. This is
+a trace-format limit, not a claim of native operation-ID verification.
 
 Mutation cases operate on freshly decoded in-memory copies, never frozen bytes.
 The five required mutations are unknown kind, duplicate disposition, removed
@@ -232,14 +313,39 @@ unearned coverage, changed fixture hashes, missing fixture sets, stale assertion
 and out-of-order consumption. A temporary positive expectation is used to show
 the five required mutations make a real test run fail, then reverted.
 
-The five mutated positive cases failed with their specific diagnostics; the
-restored suite passed 25 leaf cases. `go vet` also passed. All Go commands used
+The initial five mutated positive cases failed with their specific diagnostics;
+the initial restored suite passed 25 leaf cases. All Go commands use
 Go 1.27.3, Idle priority, GOMAXPROCS=2 and `-p 2`. The first full dependency-check
 attempt exposed an unresolved computed test-source path. Explicit read-site
 declarations now cover the fixtures, provenance and three supporting test files.
 After that correction, the actual dependency graph reports no problems, both
 here and on the main baseline. The entire classifier mutation suite was not
-rerun; hosted checks and independent logic review remain pending.
+rerun in that round; hosted checks and independent logic review remain pending.
+The declaration list remains unchanged in round 1. A dedicated dependency test
+fails if `supportingEvidence` adds a source file outside its declared reads.
+
+Round 1 validation: 61 passing leaf cases, with one subprocess-only fixture
+skipped in the outer run (its passing, failed and late-cleanup-failure modes all
+ran in bounded child processes). The real test binary's receipt passed through
+the pinned `test2json` converter and aggregator; prior failure refused emission,
+and a cleanup failure after emission invalidated coverage. The streaming command
+ended with `covered 0 / 7,894; uncovered 7894; pending map[#107:23]`. Static checks,
+the dependency graph and 14 dependency/gate tests passed. No log file was saved.
+
+Requested source mutations were run and reverted:
+
+- Rename `TestConsumeIdentity`: Consume failed with the old expected binding and
+  the actual `TestConsumeIdentityRenamed` identity.
+- Delete that function: `TestBindingTargets` failed with the missing
+  `*testing.T` test declaration.
+- Change the absent #107 target's status to uncovered: `TestNativeSemanticLedger`
+  failed opening its missing source file. Pending references alone still pass.
+
+The settings-write mutation also fails at appLine sequence 158: it is not an
+apps/share/cut rule-write member. Counterexamples for unknown and repeated
+receipts, failed/skipped tests, failed parents/packages, incomplete streams,
+range overlaps, and partial groups remain in the ordinary suite. The hosted
+full internal sweep and independent re-review are still pending.
 
 Review this document with the ledger package and the two existing evidence docs:
 can a fresh reader connect the next slice without guessing what counts as proof;
