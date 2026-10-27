@@ -624,27 +624,41 @@ type stopResult struct {
 	err  error
 }
 
-func (r *Remote) Stop(ctx context.Context) error {
-	r.stop.Lock()
-	if flight := r.stopFlight; flight != nil {
-		r.stop.Unlock()
-		select {
-		case <-flight.done:
-			return flight.err
-		case <-ctx.Done():
-			return ctx.Err()
+func (r *Remote) Stop(ctx context.Context) (err error) {
+	for retried := false; ; {
+		r.stop.Lock()
+		if flight := r.stopFlight; flight != nil {
+			r.stop.Unlock()
+			select {
+			case <-flight.done:
+				if !retried && ctx.Err() == nil && (errors.Is(flight.err, context.Canceled) || errors.Is(flight.err, context.DeadlineExceeded)) {
+					retried = true
+					continue
+				}
+				return flight.err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
+		flight := &stopResult{done: make(chan struct{})}
+		r.stopFlight = flight
+		r.stop.Unlock()
+		defer func() {
+			panicked := recover()
+			if panicked != nil {
+				err = fmt.Errorf("engine stop panicked: %v", panicked)
+			}
+			r.stop.Lock()
+			flight.err = err
+			r.stopFlight = nil
+			close(flight.done)
+			r.stop.Unlock()
+			if panicked != nil {
+				panic(panicked)
+			}
+		}()
+		return r.stopOnce(ctx)
 	}
-	flight := &stopResult{done: make(chan struct{})}
-	r.stopFlight = flight
-	r.stop.Unlock()
-	err := r.stopOnce(ctx)
-	r.stop.Lock()
-	flight.err = err
-	close(flight.done)
-	r.stopFlight = nil
-	r.stop.Unlock()
-	return err
 }
 
 func (r *Remote) stopOnce(ctx context.Context) error {
@@ -671,7 +685,9 @@ func (r *Remote) stopOnce(ctx context.Context) error {
 		joined := errors.Join(err, fmt.Errorf("forced engine cleanup failed: %w", killErr))
 		// Renew may already have observed transport loss and exited while
 		// stopping suppressed disconnect. Always hand this session back.
-		r.disconnect(rpc, joined)
+		if rpc != nil {
+			r.disconnect(rpc, joined)
+		}
 		return joined
 	}
 	r.mu.Lock()
@@ -727,9 +743,11 @@ func (r *Remote) stopGracefully(ctx context.Context) error {
 		return err
 	}
 	r.mu.Lock()
-	r.rpc = nil
-	r.snapshot = ce.Snapshot{Status: "off"}
-	r.instance = ""
+	if r.rpc == rpc {
+		r.rpc = nil
+		r.snapshot = ce.Snapshot{Status: "off"}
+		r.instance = ""
+	}
 	r.mu.Unlock()
 	rpc.Close()
 	return nil

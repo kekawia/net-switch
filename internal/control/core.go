@@ -252,7 +252,7 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		c.log("network readings come from native workers (Windows change notifications)")
 	}
 	if o.IO.Files != nil {
-		if b, err := o.IO.Files.ReadFile(filepath.Join(o.UserDir, "usage.json")); err == nil {
+		if b, err := readUsageHistory(o); err == nil {
 			if v, err := js.Decode(b); err == nil {
 				c.usage.Load(js.Object(v))
 				c.usage.Routed = usage.LoadRouted(b) // exact integers, not float64
@@ -260,7 +260,9 @@ func New(ctx context.Context, o Options) (*Core, error) {
 				c.log("could not read the data use record, starting it over: %v", err)
 			}
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			c.log("could not read the data use record, starting it over: %v", err)
+			c.log("could not read the data use record; preserving it and refusing to start: %v", err)
+			cancel()
+			return nil, fmt.Errorf("usage history unreadable; refusing to overwrite it: %w", err)
 		}
 	}
 	if o.Journal != nil {

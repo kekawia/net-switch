@@ -28,7 +28,11 @@ native protocol server and the real in-memory flow table:
   The acknowledged instance stays Stopping through transport loss until its
   verified clean service outcome publishes Off. A new Start clears that intent.
   Concurrent Stops share one in-flight operation and its result; they do not
-  repeat the graceful and forced budgets. A waiting caller can cancel its wait.
+  repeat the graceful and forced budgets. A waiting caller can cancel its wait;
+  a live joiner may retry once after the owner's context error. Deferred flight
+  completion releases waiters even on panic, then rethrows to the crash handler.
+  No-session SCM errors do not start recovery or manufacture failure identities.
+  Successful stop publication cannot discard a replacement session.
   `TestNativeRecoveryReplayFailedForcedStop` covers loss after the failed Stop
   returns. `TestNativeRecoveryReplayTransportLostDuringStop` covers loss during
   the graceful service wait, before failed forced cleanup releases suppression.
@@ -53,8 +57,9 @@ rejection is a protocol property tested separately by
 explicit existing case was found. Old-epoch renewal rejection remains covered
 by `protocol.TestEngineAssignsEpochs`; the duplicate replay assertion is removed.
 
-No HTTP routes, settings/backup/usage/Undo writes, probe votes, outside closes,
-or exact console/event/log ordering are covered. The error/failure fields and
+The replay slice covers no HTTP routes, settings/backup/Undo writes, probe votes,
+outside closes, or exact console/event/log ordering. The later usage-read fixes
+below add separate startup preservation and harness polling evidence. The error/failure fields and
 transport-recovery/forced-stop log conditions are checked, not frozen log text.
 No claim is made about real lease-clock expiry or installed cleanup.
 
@@ -127,7 +132,7 @@ these tests from the spec. Tests check deadlines without sleeping through them.
 
 Existing lifecycle CI includes the new file in its offline contracts. Existing
 main CI includes it under the race detector on Linux x64/ARM64 and Windows x64.
-Review rounds 1–3 are addressed; hosted results and re-review remain pending. No CI
+Review rounds 1–4 are addressed; hosted results and re-review remain pending. No CI
 was watched.
 For review, compare the seven mappings above with the new tests and the original
 round2/round3 consumers. Check fixture cleanup, reconnect publication barriers,
@@ -135,20 +140,29 @@ and the stated distinction between typed service outcomes and installed proof.
 
 ## Hosted usage-read harness follow-up
 
-The reported ARM64 failure on 8291482 was a sharing violation while settle read
-usage.json during publication. Its polling read now preserves the error and
-skips only Windows ERROR_SHARING_VIOLATION (32), including wrapped PathError.
+The reported ARM64 failure on 8291482 was a sharing violation while reading
+usage.json during publication. All harness usage reads now preserve the error and
+skip only Windows ERROR_SHARING_VIOLATION (32), including wrapped PathError.
 It does not accept an unreadable record as zero usage. All other read errors
-are fatal. The existing 25-second deadline and 200-ms interval are unchanged;
-timeout remains fatal and reports the last read error without another read.
-Reads outside settle retain their existing behavior.
+are fatal. Settle and identity polling retain 25 seconds and 200 ms; quiescence
+retains 60 seconds and one second. Standalone own()/routedApps reads use the
+existing enclosing proof context's deadline. No deadline is widened. Timeout
+remains fatal and reports the last good snapshot and last error, without a
+final unguarded read. One shared polling helper enforces this everywhere.
 
-Product inspection found no matching normal-operation read/write overlap:
+The earlier product inspection was too narrow: lack of an overlapping product
+writer does not make startup read errors safe. Round 4 proved that any read
+failure could allow the next save to erase history. The corrected findings are:
 - `Core.New` reads usage.json through durableFiles/os.ReadFile before Core.Run
   starts the usage writers. Concurrent ordinary readers allow read sharing;
-  they do not block that startup read. This startup reader has no retry for an
-  external writer's delete handle, but no concurrent product publisher was
-  found at that phase. Such an external interference case is not newly proven.
+  they do not block that startup read. It now retries Windows errors 32 and 33
+  for ten 20-ms intervals, eleven attempts total. Other non-missing read errors,
+  or conflicts that outlast that budget, log preservation and refuse Core startup.
+  This prevents every usage writer from running until a later startup reads the
+  history successfully. Missing files keep their existing fresh-start behavior.
+  Refusal is safer than moving an unreadable record aside: no history is reset,
+  and no guessed merge of new accounting with unknown old counters is required.
+  Routing cannot start through this Control until the read succeeds.
 - `Core.SaveUsage` holds usageWrite across snapshot and atomic publication.
   AtomicWrite writes and syncs a temporary file, then durableRename uses
   MoveFileEx replacement. The pinned Windows os.Open implementation shares
@@ -159,11 +173,24 @@ Product inspection found no matching normal-operation read/write overlap:
   propagates; readTotals does not acknowledge counters or advance routedSaved.
   Its next read retries the dirty commit even if the counters are unchanged.
   Existing tests prove recovery without loss or double counting. This is a
-  bounded, surfaced failure, not evidence requiring new product file handling.
+  bounded, surfaced write failure. Its handling is unchanged.
 
-No product file handling changed. Local focused validation passed 13 leaf
-cases: eight sharing-error classifications, three atomic-rename retry cases,
-serialized usage writers and failed-commit accounting recovery. Tests used
-Idle priority, GOMAXPROCS=2 and -p=2. The installed ARM64 scenario was not run
-locally and remains hosted evidence pending. Round 3's mutation results above
-remain unchanged; the handoff fix is already committed.
+## Round 4 regression proof
+
+All seven new test functions were shown to fail without their corrections:
+- Restoring remote.go from 19489ce5 failed all four Stop tests: recovery started
+  with no session; panic left a pending flight; a live joiner inherited the
+  canceled result; and old stop publication orphaned the replacement.
+- Restoring Core.New from 19489ce5 failed both startup tests. Permission and
+  persistent 32/33 errors allowed a SaveUsage that replaced the fixture's
+  12,345-byte history with empty lines. Transient 32/33 reads were not retried.
+- Restoring fatal-on-sharing behavior in the shared harness reader failed its
+  retry test. Separately restoring last-read-on-error behavior failed its
+  timeout assertion by replacing the last good 42-byte snapshot with an empty map.
+
+All mutations were reverted. The corrected focused run passed 37 leaf cases:
+21 Stop/recovery cases, five startup cases, two existing usage persistence
+cases, eight error classifications and the new polling test. All 25 retained
+historical trace cases also passed (7,894 entries). Tests used Idle
+priority, GOMAXPROCS=2 and -p=2. The installed ARM64 scenario was not run locally;
+hosted results and re-review remain pending.
