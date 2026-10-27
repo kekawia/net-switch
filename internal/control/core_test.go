@@ -40,6 +40,9 @@ type memoryFiles struct {
 	order         []string
 	syncs         []string
 	beforeWrite   func(path string)
+	// Native replay observes the journal and rejects unexpected file effects;
+	// historical replay keeps its original externally visible file selection.
+	observeAllWrites bool
 }
 
 func (f *memoryFiles) recordOrder(kind string) {
@@ -49,7 +52,7 @@ func (f *memoryFiles) recordOrder(kind string) {
 }
 
 func (f *memoryFiles) recordWriteOrder(path string) {
-	if controlFile(path) || engineFile(path) {
+	if f.observeAllWrites || controlFile(path) || engineFile(path) {
 		f.order = append(f.order, "write:"+filepath.Base(path))
 	}
 }
