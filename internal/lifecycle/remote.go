@@ -613,6 +613,11 @@ func (r *Remote) Stop(ctx context.Context) error {
 		force = service.ForceStop
 	}
 	if killErr := force(killCtx, service.Engine); killErr != nil {
+		// Neither service shutdown nor forced cleanup completed. Let transport
+		// recovery resume instead of leaving it suppressed by a failed stop.
+		r.mu.Lock()
+		r.stopping = false
+		r.mu.Unlock()
 		return errors.Join(err, fmt.Errorf("forced engine cleanup failed: %w", killErr))
 	}
 	r.mu.Lock()
