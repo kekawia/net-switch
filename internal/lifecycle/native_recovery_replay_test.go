@@ -307,6 +307,9 @@ func TestNativeRecoveryReplayFailedForcedStop(t *testing.T) {
 	}
 	r.waitStopped = func(context.Context, string) error { return waitErr }
 	r.forceStop = func(context.Context, string) error { return forceErr }
+	r.mu.Lock()
+	rpc := r.rpc
+	r.mu.Unlock()
 	err := r.Stop(r.ctx)
 	if !errors.Is(err, waitErr) || !errors.Is(err, forceErr) || !strings.Contains(err.Error(), "forced engine cleanup failed") {
 		t.Fatal("stop did not preserve both failures", err)
@@ -317,9 +320,6 @@ func TestNativeRecoveryReplayFailedForcedStop(t *testing.T) {
 	if s := r.Snapshot(); s.Status == "off" || stopping {
 		t.Fatal("failed forced cleanup reported completion or left stopping latched", stopping, s)
 	}
-	r.mu.Lock()
-	rpc := r.rpc
-	r.mu.Unlock()
 	rpc.conn.Close()
 	select {
 	case <-queried:
@@ -353,12 +353,14 @@ func TestNativeRecoveryReplayOverlappingStops(t *testing.T) {
 		}
 		return errors.New("forced cleanup failed")
 	}
-	a, b := make(chan error, 1), make(chan error, 1)
-	t.Cleanup(func() { once.Do(func() { close(release) }); <-a; <-b })
-	go func() { a <- r.Stop(r.ctx) }()
+	var aErr, bErr error
+	var joined sync.WaitGroup
+	joined.Add(2)
+	t.Cleanup(func() { once.Do(func() { close(release) }); joined.Wait() })
+	go func() { defer joined.Done(); aErr = r.Stop(r.ctx) }()
 	<-first
 	started := make(chan struct{})
-	go func() { close(started); b <- r.Stop(r.ctx) }()
+	go func() { defer joined.Done(); close(started); bErr = r.Stop(r.ctx) }()
 	<-started
 	select {
 	case <-second:
@@ -366,10 +368,65 @@ func TestNativeRecoveryReplayOverlappingStops(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 	once.Do(func() { close(release) })
-	select {
-	case <-second:
-	case <-time.After(5 * time.Second):
-		t.Fatal("serialized Stop B did not resume")
+	joined.Wait()
+	if calls.Load() != 1 || aErr == nil || bErr != aErr {
+		t.Fatal("overlapping callers did not share one Stop result", calls.Load(), aErr, bErr)
+	}
+}
+
+func TestNativeRecoveryReplayTransportLostDuringStop(t *testing.T) {
+	for _, reason := range []string{"stop", "failure"} {
+		t.Run(reason, func(t *testing.T) {
+			f := newRecoveryReplay(t)
+			r := f.remote
+			queried := make(chan struct{}, 1)
+			r.queryService = func(string) (service.Status, error) {
+				select {
+				case queried <- struct{}{}:
+				default:
+				}
+				return service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true}, nil
+			}
+			r.outcome = func(instance string) (host.Outcome, error) {
+				return host.Outcome{Instance: instance, State: "complete", Reason: reason}, nil
+			}
+			r.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
+				return nil, errors.New("host no longer answers")
+			}
+			r.waitStopped = func(ctx context.Context, _ string) error {
+				r.mu.Lock()
+				rpc := r.rpc
+				r.mu.Unlock()
+				rpc.conn.Close()
+				select {
+				case <-rpc.Done():
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				// Observe renew's swallowed disconnect before allowing Stop to
+				// clear its flag. This forces the early-loss ordering.
+				awaitRecovery(t, r, func() bool { return f.hasLog("transport interrupted during stop; deferring recovery") })
+				return errors.New("service wait failed after transport loss")
+			}
+			r.forceStop = func(context.Context, string) error { return errors.New("forced cleanup failed") }
+			if err := r.Stop(r.ctx); err == nil {
+				t.Fatal("failed stop returned success")
+			}
+			select {
+			case <-queried:
+			case <-time.After(time.Second):
+				t.Fatal("swallowed transport loss never resumed recovery")
+			}
+			awaitRecovery(t, r, func() bool { return !r.recovering })
+			s := r.Snapshot()
+			if reason == "stop" {
+				if s.Status != "off" || s.FailureID != "" {
+					t.Fatal("clean stop did not converge to off", s)
+				}
+			} else if s.Status != "error" || s.FailureID != f.server.Instance {
+				t.Fatal("crash outcome was not counted", s)
+			}
+		})
 	}
 }
 

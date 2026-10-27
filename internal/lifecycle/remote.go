@@ -31,6 +31,7 @@ type Remote struct {
 	mu                   sync.Mutex
 	connect              sync.Mutex
 	stop                 sync.Mutex
+	stopFlight           *stopResult
 	stopAcknowledged     string // instance whose stop completed before service exit
 	rpc                  *RPC
 	instance             string
@@ -148,8 +149,13 @@ func (r *Remote) failWithReasonLocked(err error, reason string) {
 }
 func (r *Remote) disconnect(rpc *RPC, err error) {
 	r.mu.Lock()
-	if r.rpc != rpc || r.stopping || r.ctx.Err() != nil {
+	if r.rpc != rpc || r.ctx.Err() != nil {
 		r.mu.Unlock()
+		return
+	}
+	if r.stopping {
+		r.mu.Unlock()
+		r.log("engine transport interrupted during stop; deferring recovery: " + err.Error())
 		return
 	}
 	r.rpc = nil
@@ -612,9 +618,36 @@ func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledg
 	}
 	return ack, err
 }
+
+type stopResult struct {
+	done chan struct{}
+	err  error
+}
+
 func (r *Remote) Stop(ctx context.Context) error {
 	r.stop.Lock()
-	defer r.stop.Unlock()
+	if flight := r.stopFlight; flight != nil {
+		r.stop.Unlock()
+		select {
+		case <-flight.done:
+			return flight.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	flight := &stopResult{done: make(chan struct{})}
+	r.stopFlight = flight
+	r.stop.Unlock()
+	err := r.stopOnce(ctx)
+	r.stop.Lock()
+	flight.err = err
+	close(flight.done)
+	r.stopFlight = nil
+	r.stop.Unlock()
+	return err
+}
+
+func (r *Remote) stopOnce(ctx context.Context) error {
 	stopCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	err := r.stopGracefully(stopCtx)
 	cancel()
@@ -633,8 +666,13 @@ func (r *Remote) Stop(ctx context.Context) error {
 		// recovery resume instead of leaving it suppressed by a failed stop.
 		r.mu.Lock()
 		r.stopping = false
+		rpc := r.rpc
 		r.mu.Unlock()
-		return errors.Join(err, fmt.Errorf("forced engine cleanup failed: %w", killErr))
+		joined := errors.Join(err, fmt.Errorf("forced engine cleanup failed: %w", killErr))
+		// Renew may already have observed transport loss and exited while
+		// stopping suppressed disconnect. Always hand this session back.
+		r.disconnect(rpc, joined)
+		return joined
 	}
 	r.mu.Lock()
 	rpc := r.rpc

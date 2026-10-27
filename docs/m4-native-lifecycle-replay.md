@@ -27,7 +27,11 @@ native protocol server and the real in-memory flow table:
   Failed forced cleanup returns both errors and releases recovery suppression.
   The acknowledged instance stays Stopping through transport loss until its
   verified clean service outcome publishes Off. A new Start clears that intent.
-  Concurrent Stops are serialized so one cannot clear another's suppression.
+  Concurrent Stops share one in-flight operation and its result; they do not
+  repeat the graceful and forced budgets. A waiting caller can cancel its wait.
+  `TestNativeRecoveryReplayFailedForcedStop` covers loss after the failed Stop
+  returns. `TestNativeRecoveryReplayTransportLostDuringStop` covers loss during
+  the graceful service wait, before failed forced cleanup releases suppression.
   Stale recovery classifications pause before another dial/query/outcome read.
 - Seven lease exits: one Remote retains state across all seven cycles. Each starts
   a loaded replacement instance, consumes its matching native cleanup outcome,
@@ -64,7 +68,7 @@ later; this slice does not complete M4.
 
 ## Validation and review handoff
 
-Review round 2's final focused run passed 34 leaf tests: 15 replay cases and
+Review round 3's final focused run passed 36 leaf tests: 17 replay cases and
 19 shared-fixture regression tests. Round 1 also checked the two separate
 protocol cases. All runs used
 Go 1.27.3, Idle priority, GOMAXPROCS=2 and -p=2. Frozen reference bytes remain
@@ -77,7 +81,8 @@ made it pass in the final run. The mutation is not committed.
 
 The new failed-forceStop test first failed because stopping remained true after
 an acknowledged stop followed by failed service wait and forced cleanup. Remote
-now clears that flag before returning the joined error. The final test checks
+now clears that flag and hands the current session to disconnect/recovery before
+returning the joined error. The late-loss test checks
 both failures and cleared recovery suppression, then closes the real transport.
 It observes the recovery service query, checks Stopping with no failure identity,
 and supplies a clean stopped outcome. Remote converges to Off without a failure
@@ -85,8 +90,8 @@ identity. This supersedes the earlier test's direct Stop retry.
 
 Review round 2 adds an instance-scoped acknowledged-stop marker, separate from
 the in-progress stop flag. It preserves Stopping in both disconnect publication
-and the snapshot's closed-transport window. A Stop mutex serializes the complete
-graceful/forced sequence. A stale query now takes the same cancellable one-second
+and the snapshot's closed-transport window. Round 3 replaces queued full Stop
+attempts with a shared in-flight result. A stale query takes the cancellable one-second
 pause as other recovery retries instead of immediately issuing more work.
 
 Both requested regression mutations failed, then passed after restoration:
@@ -98,6 +103,18 @@ Both requested regression mutations failed, then passed after restoration:
 
 Neither mutation remains in the patch. The final run includes both fixes.
 
+Round 3's early-loss test closes the transport inside waitStopped, waits for
+rpc.Done and the diagnostic from renew's deferred disconnect, then returns the
+wait error. This proves the loss was swallowed before forced cleanup fails.
+Recovery must consult the service query and reach Off for a clean outcome or
+publish the instance's failure identity for a crash outcome.
+
+Mutation proof: omitting the failed-force recovery handoff made both early-loss
+subtests fail with "swallowed transport loss never resumed recovery". Restoring
+the handoff made both pass. The mutation is reverted. The overlapping-Stop test
+now checks exactly one forced-cleanup call and identical returned errors for
+both callers, instead of allowing a second serialized cleanup attempt.
+
 Crash-budget non-consumption is proven where classification lives, in Remote.
 Control core's counting is already covered by its refused-start tests; this
 slice does not duplicate those. The chained lease cases exercise accumulated
@@ -105,12 +122,12 @@ Remote state, not actual sleep/lease-clock expiry.
 
 Stop cancellation is injected after acknowledgement. The 20-second graceful
 and 10-second forced-cleanup bounds asserted here are implementation constants
-in `Remote.Stop`, not bounds derived by
+in `Remote.stopOnce`, not bounds derived by
 these tests from the spec. Tests check deadlines without sleeping through them.
 
 Existing lifecycle CI includes the new file in its offline contracts. Existing
 main CI includes it under the race detector on Linux x64/ARM64 and Windows x64.
-Review rounds 1 and 2 are addressed; hosted results and re-review remain pending. No CI
+Review rounds 1–3 are addressed; hosted results and re-review remain pending. No CI
 was watched.
 For review, compare the seven mappings above with the new tests and the original
 round2/round3 consumers. Check fixture cleanup, reconnect publication barriers,
