@@ -168,7 +168,10 @@ type Core struct {
 	totalsBusy    bool
 	// usageWrite serialises every usage.json writer: the snapshot is taken and
 	// written under it, so an older snapshot can never replace a newer one.
-	usageWrite sync.Mutex
+	usageWrite           sync.Mutex
+	usageRecovery        *usageRecoveryRecord
+	usageRecoveryBlocked error
+	usageIssue           string
 	// routedGeneration counts routed-usage changes; routedSaved is the last
 	// generation written durably. Unequal means unacknowledged accounting is
 	// not yet on disk, whatever the next engine read says.
@@ -251,20 +254,7 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	} else {
 		c.log("network readings come from native workers (Windows change notifications)")
 	}
-	if o.IO.Files != nil {
-		if b, err := readUsageHistory(o); err == nil {
-			if v, err := js.Decode(b); err == nil {
-				c.usage.Load(js.Object(v))
-				c.usage.Routed = usage.LoadRouted(b) // exact integers, not float64
-			} else {
-				c.log("could not read the data use record, starting it over: %v", err)
-			}
-		} else if !errors.Is(err, fs.ErrNotExist) {
-			c.log("could not read the data use record; preserving it and refusing to start: %v", err)
-			cancel()
-			return nil, fmt.Errorf("usage history unreadable; refusing to overwrite it: %w", err)
-		}
-	}
+	c.loadUsage()
 	if o.Journal != nil {
 		c.revision = uint64(js.Number(o.Journal.Values()["revision"]))
 		var err error
@@ -1236,22 +1226,7 @@ func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
 func (c *Core) SaveUsage() error {
 	c.usageWrite.Lock()
 	defer c.usageWrite.Unlock()
-	c.mu.Lock()
-	b, err := js.Marshal(c.usage.Saved)
-	generation := c.routedGeneration
-	c.mu.Unlock()
-	if err != nil {
-		return err
-	}
-	if err := settings.AtomicWrite(filepath.Join(c.op.UserDir, "usage.json"), b, c.op.IO); err != nil {
-		return err
-	}
-	c.mu.Lock()
-	if generation > c.routedSaved {
-		c.routedSaved = generation
-	}
-	c.mu.Unlock()
-	return nil
+	return c.saveUsage()
 }
 func (c *Core) Shutdown(ctx context.Context) error {
 	// quitting holds off new starts while the stop intent is written. It is

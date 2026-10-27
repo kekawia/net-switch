@@ -80,7 +80,7 @@ func pollRoutedApps(deadline time.Time, interval time.Duration, read func() (map
 }
 
 func usageSharingViolation(err error) bool {
-	return runtime.GOOS == "windows" && errors.Is(err, syscall.Errno(32))
+	return runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33)))
 }
 
 // Keep the read error separate from an empty record: polling must never accept

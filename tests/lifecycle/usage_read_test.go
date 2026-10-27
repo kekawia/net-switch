@@ -22,7 +22,7 @@ func TestUsageSharingViolationOnly(t *testing.T) {
 		{"missing", os.ErrNotExist, false},
 		{"permission", os.ErrPermission, false},
 		{"access-denied", syscall.Errno(5), false},
-		{"lock-violation", syscall.Errno(33), false},
+		{"lock-violation", syscall.Errno(33), true},
 		{"same-text", errors.New("The process cannot access the file because it is being used by another process."), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

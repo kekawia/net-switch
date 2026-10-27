@@ -77,12 +77,15 @@ func (c *stopJoinContext) Done() <-chan struct{} {
 
 func TestStopJoinerRetriesCanceledOwner(t *testing.T) {
 	r := NewRemote(context.Background(), func(string) {})
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	defer cancelOwner()
 	entered, release := make(chan struct{}), make(chan struct{})
 	var queries atomic.Int32
 	r.queryService = func(string) (service.Status, error) {
 		if queries.Add(1) == 1 {
 			close(entered)
 			<-release
+			cancelOwner()
 			return service.Status{}, context.Canceled
 		}
 		return service.Status{Stopped: true}, nil
@@ -90,7 +93,7 @@ func TestStopJoinerRetriesCanceledOwner(t *testing.T) {
 	r.forceStop = func(context.Context, string) error { return context.Canceled }
 	r.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) { return nil, context.Canceled }
 	owner, joiner := make(chan error, 1), make(chan error, 1)
-	go func() { owner <- r.Stop(context.Background()) }()
+	go func() { owner <- r.Stop(ownerCtx) }()
 	<-entered
 	ctx := &stopJoinContext{Context: context.Background(), entered: make(chan struct{})}
 	go func() { joiner <- r.Stop(ctx) }()
@@ -131,5 +134,61 @@ func TestStopSuccessCannotOrphanReplacement(t *testing.T) {
 	}
 	if err := r.call(r.ctx, "renew", nil, "", nil); err != nil {
 		t.Fatal("replacement session unusable", err)
+	}
+}
+
+func TestStopJoinerDoesNotRetryInternalDeadline(t *testing.T) {
+	r := NewRemote(context.Background(), func(string) {})
+	entered, release := make(chan struct{}), make(chan struct{})
+	var queries atomic.Int32
+	r.queryService = func(string) (service.Status, error) {
+		if queries.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return service.Status{}, context.DeadlineExceeded
+	}
+	r.forceStop = func(context.Context, string) error { return context.DeadlineExceeded }
+	owner, joiner := make(chan error, 1), make(chan error, 1)
+	go func() { owner <- r.Stop(context.Background()) }()
+	<-entered
+	ctx := &stopJoinContext{Context: context.Background(), entered: make(chan struct{})}
+	go func() { joiner <- r.Stop(ctx) }()
+	<-ctx.entered
+	close(release)
+	a, b := <-owner, <-joiner
+	if !errors.Is(a, context.DeadlineExceeded) || a != b || queries.Load() != 1 {
+		t.Fatal("internal stop deadline triggered a second operation", a, b, queries.Load())
+	}
+}
+
+func TestStopUnattachedRunningServiceIsObserved(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r := NewRemote(ctx, func(string) {})
+	var stopped atomic.Bool
+	var queries atomic.Int32
+	r.queryService = func(string) (service.Status, error) {
+		queries.Add(1)
+		if stopped.Load() {
+			return service.Status{Stopped: true}, nil
+		}
+		return service.Status{Running: true, PID: 4242}, nil
+	}
+	r.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
+		return nil, errors.New("attach unavailable")
+	}
+	r.forceStop = func(context.Context, string) error { return errors.New("force unavailable") }
+	if err := r.Stop(ctx); err == nil {
+		t.Fatal("errors hidden")
+	}
+	awaitRecovery(t, r, func() bool { return r.recovering && queries.Load() >= 2 })
+	if s := r.Snapshot(); s.FailureID != "" {
+		t.Fatal("unknown instance counted", s)
+	}
+	stopped.Store(true)
+	awaitRecovery(t, r, func() bool { return !r.recovering && r.snapshot.Status == "off" })
+	if s := r.Snapshot(); s.FailureID != "" || s.Error != nil {
+		t.Fatal("unattached service acquired a false failure", s)
 	}
 }

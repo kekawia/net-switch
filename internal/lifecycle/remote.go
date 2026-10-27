@@ -43,6 +43,7 @@ type Remote struct {
 	log                  func(string)
 	recovering, stopping bool
 	recovery             uint64
+	unownedRecovery      uint64
 	attempt              uint64
 	// beforeLoad runs between fixing the attempt's session and sending the
 	// start; nil in production, a test hook for the reattach race.
@@ -253,14 +254,20 @@ func (r *Remote) recoverConnection(cause error, id uint64) {
 			grace := time.Now().Before(r.wakeGrace)
 			current := r.recovery == id && r.rpc == nil && r.instance == instance && r.attempt == attempt
 			if current && !stopping && !grace {
-				switch class.reason {
-				case "lease-expired", exitStopped:
-					// Routing is off; the supervisor restarts it if still wanted.
+				if instance == "" && r.unownedRecovery == id {
+					// A service observed running without an authenticated session
+					// is not an instance whose crash we can count.
 					r.snapshot = ce.Snapshot{Status: "off"}
-				case ce.ReasonAdapterLost:
-					r.failWithReasonLocked(fmt.Errorf("adapter lost; the engine cleaned up and exited (%s)", describeExit(status)), ce.ReasonAdapterLost)
-				default:
-					r.failLocked(fmt.Errorf("engine instance exited: %w", cause))
+				} else {
+					switch class.reason {
+					case "lease-expired", exitStopped:
+						// Routing is off; the supervisor restarts it if still wanted.
+						r.snapshot = ce.Snapshot{Status: "off"}
+					case ce.ReasonAdapterLost:
+						r.failWithReasonLocked(fmt.Errorf("adapter lost; the engine cleaned up and exited (%s)", describeExit(status)), ce.ReasonAdapterLost)
+					default:
+						r.failLocked(fmt.Errorf("engine instance exited: %w", cause))
+					}
 				}
 			}
 			r.mu.Unlock()
@@ -620,8 +627,9 @@ func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledg
 }
 
 type stopResult struct {
-	done chan struct{}
-	err  error
+	done  chan struct{}
+	err   error
+	owner context.Context
 }
 
 func (r *Remote) Stop(ctx context.Context) (err error) {
@@ -631,7 +639,7 @@ func (r *Remote) Stop(ctx context.Context) (err error) {
 			r.stop.Unlock()
 			select {
 			case <-flight.done:
-				if !retried && ctx.Err() == nil && (errors.Is(flight.err, context.Canceled) || errors.Is(flight.err, context.DeadlineExceeded)) {
+				if !retried && ctx.Err() == nil && flight.owner.Err() != nil && (errors.Is(flight.err, context.Canceled) || errors.Is(flight.err, context.DeadlineExceeded)) {
 					retried = true
 					continue
 				}
@@ -640,7 +648,7 @@ func (r *Remote) Stop(ctx context.Context) (err error) {
 				return ctx.Err()
 			}
 		}
-		flight := &stopResult{done: make(chan struct{})}
+		flight := &stopResult{done: make(chan struct{}), owner: ctx}
 		r.stopFlight = flight
 		r.stop.Unlock()
 		defer func() {
@@ -662,8 +670,9 @@ func (r *Remote) Stop(ctx context.Context) (err error) {
 }
 
 func (r *Remote) stopOnce(ctx context.Context) error {
+	observedRunning := false
 	stopCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	err := r.stopGracefully(stopCtx)
+	err := r.stopGracefullyObserved(stopCtx, &observedRunning)
 	cancel()
 	if err == nil {
 		return nil
@@ -687,6 +696,20 @@ func (r *Remote) stopOnce(ctx context.Context) error {
 		// stopping suppressed disconnect. Always hand this session back.
 		if rpc != nil {
 			r.disconnect(rpc, joined)
+		} else if observedRunning {
+			r.mu.Lock()
+			start := r.rpc == nil && !r.recovering && r.ctx.Err() == nil
+			if start {
+				r.recovering = true
+				r.recovery++
+				r.unownedRecovery = r.recovery
+				r.snapshot.Status = "stopping"
+			}
+			id := r.recovery
+			r.mu.Unlock()
+			if start {
+				go r.recoverConnection(joined, id)
+			}
 		}
 		return joined
 	}
@@ -704,16 +727,23 @@ func (r *Remote) stopOnce(ctx context.Context) error {
 }
 
 func (r *Remote) stopGracefully(ctx context.Context) error {
+	var observed bool
+	return r.stopGracefullyObserved(ctx, &observed)
+}
+
+func (r *Remote) stopGracefullyObserved(ctx context.Context, observedRunning *bool) error {
 	r.mu.Lock()
 	rpc := r.rpc
 	r.mu.Unlock()
 	if rpc == nil {
-		if status, err := r.queryService(service.Engine); err != nil || status.Stopped {
+		status, err := r.queryService(service.Engine)
+		if err != nil || status.Stopped {
 			r.mu.Lock()
 			r.snapshot = ce.Snapshot{Status: "off"}
 			r.mu.Unlock()
 			return err
 		}
+		*observedRunning = status.Running
 		if err := r.Attach(ctx, false); err != nil {
 			return err
 		}

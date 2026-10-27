@@ -29,9 +29,12 @@ native protocol server and the real in-memory flow table:
   verified clean service outcome publishes Off. A new Start clears that intent.
   Concurrent Stops share one in-flight operation and its result; they do not
   repeat the graceful and forced budgets. A waiting caller can cancel its wait;
-  a live joiner may retry once after the owner's context error. Deferred flight
+  a live joiner may retry once only after the owner's own context is canceled
+  or expires; an internal stop deadline does not grant another budget. Deferred flight
   completion releases waiters even on panic, then rethrows to the crash handler.
-  No-session SCM errors do not start recovery or manufacture failure identities.
+  No-session SCM errors do not manufacture failure identities. A service that
+  was actually observed running is watched even when attach and force both fail;
+  its unauthenticated identity is never charged to the crash budget.
   Successful stop publication cannot discard a replacement session.
   `TestNativeRecoveryReplayFailedForcedStop` covers loss after the failed Stop
   returns. `TestNativeRecoveryReplayTransportLostDuringStop` covers loss during
@@ -132,7 +135,7 @@ these tests from the spec. Tests check deadlines without sleeping through them.
 
 Existing lifecycle CI includes the new file in its offline contracts. Existing
 main CI includes it under the race detector on Linux x64/ARM64 and Windows x64.
-Review rounds 1–4 are addressed; hosted results and re-review remain pending. No CI
+Review rounds 1–5 are addressed; hosted results and re-review remain pending. No CI
 was watched.
 For review, compare the seven mappings above with the new tests and the original
 round2/round3 consumers. Check fixture cleanup, reconnect publication barriers,
@@ -142,7 +145,7 @@ and the stated distinction between typed service outcomes and installed proof.
 
 The reported ARM64 failure on 8291482 was a sharing violation while reading
 usage.json during publication. All harness usage reads now preserve the error and
-skip only Windows ERROR_SHARING_VIOLATION (32), including wrapped PathError.
+skip only Windows sharing/lock violations (32 and 33), including wrapped PathError.
 It does not accept an unreadable record as zero usage. All other read errors
 are fatal. Settle and identity polling retain 25 seconds and 200 ms; quiescence
 retains 60 seconds and one second. Standalone own()/routedApps reads use the
@@ -156,13 +159,11 @@ failure could allow the next save to erase history. The corrected findings are:
 - `Core.New` reads usage.json through durableFiles/os.ReadFile before Core.Run
   starts the usage writers. Concurrent ordinary readers allow read sharing;
   they do not block that startup read. It now retries Windows errors 32 and 33
-  for ten 20-ms intervals, eleven attempts total. Other non-missing read errors,
-  or conflicts that outlast that budget, log preservation and refuse Core startup.
-  This prevents every usage writer from running until a later startup reads the
-  history successfully. Missing files keep their existing fresh-start behavior.
-  Refusal is safer than moving an unreadable record aside: no history is reset,
-  and no guessed merge of new accounting with unknown old counters is required.
-  Routing cannot start through this Control until the read succeeds.
+  for ten 20-ms intervals, eleven attempts total. The round-4 startup refusal was
+  wrong and is superseded by the round-5 decision below: accounting history must
+  never prevent Control or routing from starting. Missing files retain their
+  fresh-start behavior. I/O errors preserve the original and start in recovery
+  accounting mode. Corrupt JSON is moved aside before any replacement save.
 - `Core.SaveUsage` holds usageWrite across snapshot and atomic publication.
   AtomicWrite writes and syncs a temporary file, then durableRename uses
   MoveFileEx replacement. The pinned Windows os.Open implementation shares
@@ -173,7 +174,8 @@ failure could allow the next save to erase history. The corrected findings are:
   propagates; readTotals does not acknowledge counters or advance routedSaved.
   Its next read retries the dirty commit even if the counters are unchanged.
   Existing tests prove recovery without loss or double counting. This is a
-  bounded, surfaced write failure. Its handling is unchanged.
+  bounded, surfaced write failure on the ordinary primary path. Recovery mode
+  instead commits to the separate recovery file before acknowledging.
 
 ## Round 4 regression proof
 
@@ -194,3 +196,60 @@ cases, eight error classifications and the new polling test. All 25 retained
 historical trace cases also passed (7,894 entries). Tests used Idle
 priority, GOMAXPROCS=2 and -p=2. The installed ARM64 scenario was not run locally;
 hosted results and re-review remain pending.
+
+## Round 5: routing-independent, durable usage recovery
+
+Design decision recorded in the spec: Control always starts despite accounting
+history errors. It exposes `usageError` in /api/state and logs the underlying
+error. The main usage file stays untouched while unreadable. A five-second
+background retry and accounting saves retry the read; the old startup-lockout
+test is replaced. Corrupt content is renamed to `usage.json.corrupt-<UTC time>`;
+failed rename keeps the main file paused and visible as an error.
+
+Pausing the main file must not fill the engine's retained set. Each accounting
+receipt is committed atomically, with the existing sync hooks and trusted folder
+permissions, to `usage.recovery.json` before ackTotals. That file contains a
+versioned saved-usage snapshot and the first complete engine snapshot's marks.
+The marks remove overlap with the unreadable original's last receipt, even if
+acknowledgements have since retired several generations. Physical usage adds
+only matching periods; peaks take the larger value. Routed values retain exact
+uint64 arithmetic and saturate overflow, matching the existing consumer.
+
+Only identities in that first complete snapshot can overlap the original.
+They stay un-compacted until merge; later absent identities compact normally.
+This adds at most one initial snapshot's identities/marks to normal Control
+retention. Engine acknowledgements and its own retained-set limit are unchanged.
+
+Recovery publication order:
+1. While history is unreadable, save the incremental recovery record, then ack.
+2. Once readable, merge the old history and accumulated usage under the usage
+   state lock; atomically commit the recovery record marked **full**.
+3. Replace usage.json with that full snapshot. Remove the recovery file only
+   after the replacement succeeds, then sync its parent where supported.
+
+A leftover full record is authoritative on startup, never added to usage.json.
+Thus crashes before main replacement, after main replacement, and before removal
+cannot double count. Failed primary publication or removal still permits acks
+because the full recovery commit is already durable. Failed recovery writes
+refuse acks and retry, preserving the existing engine capacity behavior. An
+unreadable recovery file is likewise preserved, buffered observations remain
+unacknowledged, and background reads retry it rather than latching until restart.
+
+Tests cover uninterrupted routing startup, durable acks through multiple retired
+generations, a restart while the original is still unreadable, removal after
+merge, failed main publication, repeated restarts with a leftover full record,
+corrupt quarantine, failed quarantine, failed recovery writes, and recovery-file
+read errors that later clear. The original 100-byte unacked receipt plus 32 new
+bytes becomes 132, not 232, after recovery and restart.
+
+Mutation evidence (all reverted): restoring the previous startup path failed
+the unreadable, quarantine, failed-rename and recovery-write cases. Restoring
+the previous Remote failed the internal-deadline join and unattached-running
+service tests. Re-merging a full recovery changed 120 bytes to 240 and failed
+the restart assertion. Disabling recovery-file read retries failed recovery
+after permissions returned. All corrected tests pass.
+
+Final focused validation: 68 leaf cases, including all 25 frozen traces and
+7,894 entries. All local runs used Idle priority, GOMAXPROCS=2 and -p=2. Hosted
+race, installed-service results and independent review remain pending. No
+service, TUN, route, or engine process ran on the PC.
