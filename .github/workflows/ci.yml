@@ -525,11 +525,27 @@ jobs:
       - name: Deterministic gVisor dispatch regression
         run: go test -mod=mod ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1 -timeout=5m gvisor.dev/gvisor/pkg/tcpip/transport/tcp
       - name: Internal packages and native replay coverage
-        shell: bash
+        shell: pwsh
         run: |
-          set -o pipefail
-          go build -o ./bin/replay-report ./internal/replayledger/cmd/replay-report
-          go test -json -count=1 -timeout=10m ./internal/... ./cmd/... ./tests/... | ./bin/replay-report
+          $PSNativeCommandUseErrorActionPreference = $false
+          Write-Host "Replay environment: TMP=$env:TMP TEMP=$env:TEMP"
+          if ($IsWindows) {
+            $replayIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+            try { Write-Host "Replay token owner: $($replayIdentity.Owner.Value)" }
+            finally { $replayIdentity.Dispose() }
+          }
+          go build -o ./bin/replay-report.exe ./internal/replayledger/cmd/replay-report
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $script:replayTestExit = $null
+          & {
+            go test -json -count=1 -timeout=10m ./internal/... ./cmd/... ./tests/...
+            $script:replayTestExit = $LASTEXITCODE
+          } | & ./bin/replay-report.exe
+          $replayReportExit = $LASTEXITCODE
+          if ($null -eq $script:replayTestExit) { throw "Test process did not finish" }
+          if ($script:replayTestExit -ne 0) { exit $script:replayTestExit }
+          if ($replayReportExit -ne 0) { exit $replayReportExit }
+          exit 0
       - run: go build ./internal/... ./cmd/... ./tests/...
       - name: Install pinned govulncheck
         run: go install -mod=mod golang.org/x/vuln/cmd/govulncheck@v1.9.0
