@@ -26,10 +26,17 @@ type Fixture struct {
 }
 
 type Rule struct {
-	Kinds       []string          `json:"kinds"`
-	Disposition string            `json:"disposition"`
-	Assertion   string            `json:"assertion"`
-	Bindings    map[string]string `json:"bindings,omitempty"`
+	Kinds       []string           `json:"kinds"`
+	Disposition string             `json:"disposition"`
+	Assertion   string             `json:"assertion"`
+	Bindings    map[string]Binding `json:"bindings,omitempty"`
+}
+
+// An empty OS requires proof on every job. Scoped bindings are only for
+// genuinely OS-specific native tests, not exceptions for skipped tests.
+type Binding struct {
+	Test string `json:"test"`
+	OS   string `json:"os,omitempty"`
 }
 
 type Annotation struct {
@@ -40,6 +47,7 @@ type Annotation struct {
 	Assertion   string   `json:"assertion"`
 	Status      string   `json:"status"`
 	Group       string   `json:"group,omitempty"`
+	OS          string   `json:"os,omitempty"`
 }
 
 type Group struct {
@@ -91,6 +99,7 @@ type Row struct {
 	Assertion   string `json:"assertion"`
 	Status      string `json:"status"`
 	Group       string `json:"group,omitempty"`
+	OS          string `json:"os,omitempty"`
 }
 
 type Counts struct {
@@ -188,6 +197,8 @@ func validDisposition(disposition, assertion string) bool {
 
 var pendingStatus = regexp.MustCompile(`^pending #[1-9][0-9]*$`)
 
+func validOS(goos string) bool { return goos == "" || goos == "windows" || goos == "linux" }
+
 func sequences(a Annotation, count int) ([]int, error) {
 	seqs := slices.Clone(a.Seqs)
 	for _, span := range a.Ranges {
@@ -214,12 +225,12 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 	}
 	rules := map[string]Rule{}
 	for _, rule := range m.Rules {
-		if !validDisposition(rule.Disposition, rule.Assertion) || rule.Disposition == "atomic-revision" || len(rule.Kinds) == 0 {
+		if !validDisposition(rule.Disposition, rule.Assertion) || testReference(rule.Assertion) || rule.Disposition == "atomic-revision" || len(rule.Kinds) == 0 {
 			return r, fmt.Errorf("invalid generic disposition: %+v", rule)
 		}
-		for hash, ref := range rule.Bindings {
-			if _, ok := m.Fixtures[hash]; !ok || !testReference(ref) {
-				return r, fmt.Errorf("invalid rule test binding %s", ref)
+		for hash, binding := range rule.Bindings {
+			if _, ok := m.Fixtures[hash]; !ok || !testReference(binding.Test) || !validOS(binding.OS) {
+				return r, fmt.Errorf("invalid rule test binding %+v", binding)
 			}
 		}
 		for _, kind := range rule.Kinds {
@@ -239,7 +250,7 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 		if err != nil {
 			return r, err
 		}
-		if !ok || len(seqs) == 0 || !validDisposition(a.Disposition, a.Assertion) || !testReference(a.Assertion) || !pendingStatus.MatchString(a.Status) && a.Status != "uncovered" {
+		if !ok || len(seqs) == 0 || !validDisposition(a.Disposition, a.Assertion) || !testReference(a.Assertion) || !validOS(a.OS) || !pendingStatus.MatchString(a.Status) && a.Status != "uncovered" {
 			return r, fmt.Errorf("invalid annotation: %+v", a)
 		}
 		if (a.Disposition == "atomic-revision") != (a.Group != "") {
@@ -283,11 +294,12 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 				return r, fmt.Errorf("missing disposition for %s:%d %s", f.Name, e.Seq, kind)
 			}
 			row := Row{Hash: hash, Trace: f.Name, Seq: e.Seq, Kind: kind, Disposition: rule.Disposition, Assertion: rule.Assertion, Status: "uncovered"}
-			if ref, ok := rule.Bindings[hash]; ok {
-				row.Assertion = ref
+			if binding, ok := rule.Bindings[hash]; ok {
+				row.Assertion, row.OS = binding.Test, binding.OS
 			}
 			if a, ok := annotations[hash][e.Seq]; ok {
 				row.Disposition, row.Assertion, row.Status, row.Group = a.Disposition, a.Assertion, a.Status, a.Group
+				row.OS = a.OS
 			}
 			r.Rows = append(r.Rows, row)
 			r.Counts.Consumed++
@@ -320,12 +332,13 @@ func validateGroups(m Mapping, traces map[string]Trace, annotations map[string]m
 			return fmt.Errorf("incomplete group %s: missing trigger, acknowledgement or publication", g.Name)
 		}
 		previous := g.Begin
+		groupOS := annotations[g.Hash][g.Members[0]].OS
 		for _, seq := range g.Members {
 			if seq <= previous || seq >= g.Ack {
 				return fmt.Errorf("incomplete group %s: unordered members", g.Name)
 			}
 			a, ok := annotations[g.Hash][seq]
-			if !ok || a.Group != g.Name || a.Disposition != "atomic-revision" || !ruleWrite(t.Entries[seq]) {
+			if !ok || a.Group != g.Name || a.OS != groupOS || a.Disposition != "atomic-revision" || !ruleWrite(t.Entries[seq]) {
 				return fmt.Errorf("incomplete group %s at %d", g.Name, seq)
 			}
 			previous = seq

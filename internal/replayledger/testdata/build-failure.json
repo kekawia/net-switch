@@ -1,0 +1,6 @@
+{"ImportPath":"github.com/AyoubAchour/net-switch/.ledger-buildfail [github.com/AyoubAchour/net-switch/.ledger-buildfail.test]","Action":"build-output","Output":"# github.com/AyoubAchour/net-switch/.ledger-buildfail [github.com/AyoubAchour/net-switch/.ledger-buildfail.test]\n"}
+{"ImportPath":"github.com/AyoubAchour/net-switch/.ledger-buildfail [github.com/AyoubAchour/net-switch/.ledger-buildfail.test]","Action":"build-output","Output":".ledger-buildfail\\fail_test.go:6:2: undefined: missingBuildSymbol\n"}
+{"ImportPath":"github.com/AyoubAchour/net-switch/.ledger-buildfail [github.com/AyoubAchour/net-switch/.ledger-buildfail.test]","Action":"build-fail"}
+{"Time":"2026-10-27T15:14:57.7117942+01:00","Action":"start","Package":"github.com/AyoubAchour/net-switch/.ledger-buildfail"}
+{"Time":"2026-10-27T15:14:57.7117942+01:00","Action":"output","Package":"github.com/AyoubAchour/net-switch/.ledger-buildfail","Output":"FAIL\tgithub.com/AyoubAchour/net-switch/.ledger-buildfail [build failed]\n","OutputType":"frame"}
+{"Time":"2026-10-27T15:14:57.7117942+01:00","Action":"fail","Package":"github.com/AyoubAchour/net-switch/.ledger-buildfail","Elapsed":0,"FailedBuild":"github.com/AyoubAchour/net-switch/.ledger-buildfail [github.com/AyoubAchour/net-switch/.ledger-buildfail.test]"}

@@ -59,15 +59,23 @@ fixture. Inventory alone earns no coverage.
 
 Native replay assertions use `NewCursor` with their selected rows and call
 `Consume(t, hash, seq, disposition)` **after** their behavioral checks pass.
-There is no caller-supplied assertion string: the identity comes from
-`runtime.Caller`'s source file plus `t.Name()`, including subtests. Call Consume
-and Receipt directly from the registered test file; a helper in another file
-cannot impersonate that file. `Finish` rejects omissions and cross-kind
-reordering. `Receipt(t)` requires the same test, an exhausted cursor and
+The cursor compares the mapping's test name with `t.Name()`, including subtests;
+it does not accept a caller-supplied test name. `Finish` rejects omissions and
+cross-kind reordering. `Receipt(t)` requires the same test, an exhausted cursor and
 `!t.Failed()`. It writes one `REPLAY_RECEIPT {json}` line through `t.Log` per
 assertion/hash/group. Row selections are generated from the mapping, not copied
 by hand into the test. Behavioral checks still need review and mutation proofs;
 knowing which test ran does not prove that its assertions are adequate.
+
+**Cursor is a convenience, not a security boundary.** The owning test can print
+a receipt line itself. Review must read its Consume sites and the behavioral
+assertions before them; mutation proofs must show those checks matter. Round 2
+removes `callerIdentity`, `runtime.Caller` and the `-trimpath` special case:
+they cannot prevent the owning test from printing a line and add no protection
+to the aggregate pass/ownership gate. The module-name constant stays solely in
+that gate: it turns the mapping's relative source path into an exact package
+identity, rejecting a same-named test in a foreign package. This is simpler than
+adding a module-discovery mechanism, while retaining the same package check.
 
 The AST check covers every annotation, per-trace rule binding and supporting
 reference. A target must be a top-level Test function taking `*testing.T`, with
@@ -82,10 +90,20 @@ counts are reported by PR number, not hardcoded to #107.
 The existing internal-package test step in `ci.yml` now builds the small report
 command and pipes the same test sweep straight into it (Windows and Linux):
 
-```bash
-set -o pipefail
-go build -o ./bin/replay-report ./internal/replayledger/cmd/replay-report
-go test -json -count=1 -timeout=10m ./internal/... ./cmd/... ./tests/... | ./bin/replay-report
+```powershell
+$PSNativeCommandUseErrorActionPreference = $false
+go build -o ./bin/replay-report.exe ./internal/replayledger/cmd/replay-report
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$script:replayTestExit = $null
+& {
+  go test -json -count=1 -timeout=10m ./internal/... ./cmd/... ./tests/...
+  $script:replayTestExit = $LASTEXITCODE
+} | & ./bin/replay-report.exe
+$replayReportExit = $LASTEXITCODE
+if ($null -eq $script:replayTestExit) { throw "Test process did not finish" }
+if ($script:replayTestExit -ne 0) { exit $script:replayTestExit }
+if ($replayReportExit -ne 0) { exit $replayReportExit }
+exit 0
 ```
 
 The command loads the hash-verified mapping, validates its source targets, and
@@ -93,11 +111,32 @@ joins receipts across packages. It waits for the receipt's exact test, all paren
 tests and the package to PASS. Failures after logging, including cleanup failures,
 invalidate the run. Unknown entries, repeated receipts, mismatched package/test
 identities, pending entries, incomplete groups and truncated streams fail.
+Every non-pending row with a valid test binding **must** receive a receipt on
+each applicable job. A missing Consume, missing Receipt, t.Skip, excluded test,
+build tag, or package left out of the command cannot quietly reduce coverage.
+The gate reports the missing entry count and the first missing trace/sequence
+and test. Unbound generic obligations remain explicitly uncovered.
 Split test-output events are reassembled before reading receipt JSON. Test
-diagnostics remain visible on stdout. There is no saved log and `pipefail`
-preserves either process's failure. The final line is `covered N / 7,894`, with
+diagnostics remain visible on stdout. `build-output` events print their Output;
+`build-fail` marks its ImportPath failed, even when no Package field is present.
+A recorded compile-failure stream proves the original compiler text survives.
+There is no saved log; both native process exit codes are checked explicitly.
+PowerShell preserves the native Windows environment that Git Bash changed;
+see [the CI investigation and separate product follow-up](m4-ledger-ci-environment.md).
+The final line is `covered N / 7,894`, with
 uncovered and per-PR pending counts. The standalone inventory still reports zero
 until the executing native tests are connected; no static `covered` flag exists.
+
+Bindings may set `"os": "windows"` or `"os": "linux"` for genuinely
+OS-specific tests. Omit it for pure cross-platform replay. The joiner uses its
+own GOOS, with no command-line override: a Windows-scoped row is required on
+**every Windows matrix job**, including ARM64, and not credited on Linux. A
+Linux-scoped row is required on every Linux job. A receipt from the wrong OS
+fails, so a scoped test must skip or be excluded by its platform build tag on
+the other OS. Both OS jobs remain required CI jobs; a success on the other OS cannot
+satisfy the scoped obligation. Rows outside this job's scope remain uncovered
+in its report, not falsely covered. An atomic group's members must share one
+OS scope; unknown OS strings fail mapping validation.
 
 ### Compact bindings and the startup slice
 
@@ -107,6 +146,33 @@ fixtures without importing Control from lifecycle. It will be one
 `TestNativeStartupReplay` with 25 named per-trace subtests, sharing setup code
 but replaying each trace's own startup inputs and ordered assertions.
 
+Concrete fixtures to reuse from `internal/control/core_test.go`: `testCore`
+creates the initial settings-backed Core and returns `*fakeEngine`,
+`*fakeClock` and `*memoryFiles`; `testCoreWithFiles` supports accumulated state
+and restart. Reuse `fakeClock.advance`, `memoryFiles.beforeWrite`, `failPrefix`,
+`syncs`, `writes`, `events`, `logs` and `recordOrder`, plus `fakePlatform`'s
+recorded outside-close hook. Set `c.op.ServiceMode = true`. Replace the engine
+boundary with a new pure `nativeStartupEngine` in the startup test file: reuse
+`fakeEngine` only for observation plumbing, override Start/Apply to call the
+production `engine.NativeRevision` compiler, compare independent literal
+`policy.Config` expectations with `apppath.Windows` for these Windows fixtures,
+and supply checked native acknowledgements. Extend the file observer to include
+journal writes: the existing `recordWriteOrder` filter alone is not sufficient.
+Do not call `installReplayAdapter` or delegate mutations to the old adapter.
+
+Build a `nativeTraceComparator` in that same test file. Its
+`Observe(seq, kind, actual)` method compares the next original-sequence value
+and native transaction boundary; reuse `orderedTraceJSON`,
+`rewriteTraceStrings`, `normalizeResourceString`, `operatorStateExpectation`
+and `firstDifference` from `replay_test.go` for their narrow existing purposes.
+Use explicit native group/ack observations, not `revisionOutputOrder`'s old
+adapter reordering. Record all effects in one stream through `recordOrder`;
+do not compare separately sorted kind lists. The comparator reports success
+to the test, which then calls Cursor.Consume. Its `Finish` checks no effects,
+replies or groups remain. Neither `nativeStartupEngine` nor
+`nativeTraceComparator` exists yet: these are the two concrete types the next
+slice must add, rather than silently treating the current fake as native proof.
+
 Each subtest calls `DefaultMapping`, `Load("../..", mapping)`, and `Build`, then
 selects the original-order rows whose hash matches its fixture and whose
 assertion equals its registered `file#TestNativeStartupReplay/traceName` binding.
@@ -115,15 +181,54 @@ boundary assertion succeeds; call Receipt once at the end of that subtest.
 Startup rows from a trace must have one owner: a later feature replay must reuse
 the setup without emitting another startup receipt.
 
-Rules accept `"bindings": {"<fixture hash>": "internal/control/native_startup_replay_test.go#TestNativeStartupReplay/appLine"}`.
+Rules accept `"bindings": {"<fixture hash>": {"test": "internal/control/native_startup_replay_test.go#TestNativeStartupReplay/appLine"}}`.
 This binds every matching kind in that trace unless a sequence annotation
-overrides it. Split the existing I/O rule into a completion-only rule if the
+overrides it. Each rule needs **one binding per fixture hash it is claiming**;
+there is no wildcard or global test binding. Eight rules across all 25 traces
+need at most 200 compact bindings, not 7,894 sequence integers. Split the
+existing I/O rule into a completion-only rule if the
 assertion owners differ. Thus the 3,003 completion markers require per-trace
 bindings, not 3,003 hand-authored sequence numbers. An annotation also accepts
 inclusive `"ranges": [[0,134]]` alongside `seqs`; overlaps, negative/reversed
 ranges and out-of-bounds ranges fail. Use a range only where the whole span has
 one disposition/owner; mixed dispositions retain their kind rules. Ranges and
 rule bindings do not themselves imply coverage.
+
+Worked appLine mapping diff (illustrative; apply only with the actual replay).
+Here `H` is `80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11`
+and `T` is `internal/control/native_startup_replay_test.go#TestNativeStartupReplay/appLine`.
+Each line adds the shown member to the existing rule object; expand H and T
+to those exact strings. Preserve each rule's kinds, disposition and obligation:
+
+```diff
+ rules[0] ordered-external-observations
++  "bindings": { H: { "test": T } }
+ rules[1] native-requests-results-and-instance-flow-bijection
++  "bindings": { H: { "test": T } }
+ rules[2] native-probe-rounds-and-busy-suppression
++  "bindings": { H: { "test": T } }
+ rules[3] control-io-and-revision-boundaries
++  "bindings": { H: { "test": T } }
+ rules[4] native-session-and-verified-cleanup
++  "bindings": { H: { "test": T } }
+ rules[5] diagnostic-conditions-and-session-announcement
++  "bindings": { H: { "test": T } }
+ rules[6] no-stale-compiled-lines-or-pins
++  "bindings": { H: { "test": T } }
+ rules[7] acknowledgement-replaces-reload-wait
++  "bindings": { H: { "test": T } }
+ annotations and groups: unchanged (#107's 23 rows retain their owners/status)
+```
+
+The effective result is 188 registered appLine rows, with 23 still pending #107;
+all other traces remain untouched. This is **not only the 135-entry startup
+prefix**: the appLine subtest must also drive the recorded pin/unpin suffix and
+check its other 53 bookkeeping/completion entries, without emitting #107's 23
+receipts. A prefix-only implementation cannot register all eight whole-trace
+bindings. The reload-wait rule has no remaining unannotated appLine row, so its
+binding adds no required receipt by itself. To scope a real OS-only binding,
+use `{ "test": T, "os": "windows" }`; annotation overrides likewise accept
+`"os"` and replace the entire binding/scope for their rows.
 
 ## Obligations and existing evidence
 
@@ -346,6 +451,24 @@ apps/share/cut rule-write member. Counterexamples for unknown and repeated
 receipts, failed/skipped tests, failed parents/packages, incomplete streams,
 range overlaps, and partial groups remain in the ordinary suite. The hosted
 full internal sweep and independent re-review are still pending.
+
+Round 2 adds a hard completeness gate for all applicable registered rows.
+Two temporary mutations each made `TestReceiptRuntimeProof/pass` fail at the
+joiner with `missing required receipts for 1 registered entries on windows`:
+excluding the registered child test with a non-matching test filter, and
+removing its Receipt call while leaving the test itself passing. Both mutations
+are reverted. Ordinary regressions retain those cases plus skips, excluded
+packages, and required/mismatched Windows and Linux bindings. A real 1.27.3
+compile failure was recorded into `testdata/build-failure.json`; its
+`build-output` diagnostics and `build-fail` ImportPath are both asserted.
+The subprocess converter now comes from `exec.LookPath("go")`; local runs put
+the pinned toolchain on PATH just as CI does.
+
+The restored PowerShell pipeline passed the pure suite (77 leaf cases plus the
+outer subprocess-fixture skip), static checks and the streaming report. Separate
+native-process probes returned 7 for producer=7/consumer=0, 9 for
+producer=0/consumer=9, and 0 only for both=0. No output file was used. The next
+hosted Windows test counts remain a separate pending check.
 
 Review this document with the ledger package and the two existing evidence docs:
 can a fresh reader connect the next slice without guessing what counts as proof;

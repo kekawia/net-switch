@@ -5,8 +5,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +27,7 @@ func TestCursorPlanOrder(t *testing.T) {
 }
 
 func TestCursorIdentityAndOrder(t *testing.T) {
-	for _, name := range []string{"duplicate", "missing", "reordered", "wrong-file", "wrong-test", "wrong-hash", "wrong-disposition", "pending"} {
+	for _, name := range []string{"duplicate", "missing", "reordered", "wrong-test", "wrong-hash", "wrong-disposition", "pending"} {
 		t.Run(name, func(t *testing.T) {
 			row := Row{Hash: "synthetic", Seq: 0, Disposition: "unchanged", Assertion: "internal/replayledger/receipts_test.go#" + t.Name(), Status: "uncovered"}
 			second := row
@@ -37,15 +35,12 @@ func TestCursorIdentityAndOrder(t *testing.T) {
 			if name == "pending" {
 				row.Status = "pending #245"
 			}
-			if name == "wrong-file" {
-				row.Assertion = "does_not_exist_test.go#" + t.Name()
-			}
 			if name == "wrong-test" {
 				row.Assertion = "internal/replayledger/receipts_test.go#TestNope"
 			}
 			c := NewCursor([]Row{row, second})
 			err := c.Consume(t, row.Hash, row.Seq, row.Disposition)
-			if name == "pending" || name == "wrong-file" || name == "wrong-test" {
+			if name == "pending" || name == "wrong-test" {
 				if err == nil {
 					t.Fatal("forged binding accepted")
 				}
@@ -80,6 +75,9 @@ func TestReceiptProcess(t *testing.T) {
 	if mode == "" {
 		t.Skip("subprocess fixture")
 	}
+	if mode == "skipped" {
+		t.Skip("deliberately skipped registered test")
+	}
 	row := Row{Hash: "synthetic", Seq: 0, Disposition: "unchanged", Assertion: "internal/replayledger/receipts_test.go#TestReceiptProcess", Status: "uncovered"}
 	c := NewCursor([]Row{row})
 	if err := c.Consume(t, row.Hash, row.Seq, row.Disposition); err != nil {
@@ -87,6 +85,9 @@ func TestReceiptProcess(t *testing.T) {
 	}
 	if mode == "failed" {
 		t.Error("intentional prior assertion failure")
+	}
+	if mode == "missing-receipt" {
+		return
 	}
 	err := c.Receipt(t)
 	if mode == "failed" {
@@ -105,15 +106,19 @@ func TestReceiptProcess(t *testing.T) {
 }
 
 func TestReceiptRuntimeProof(t *testing.T) {
-	for _, mode := range []string{"pass", "failed", "late-failure"} {
+	for _, mode := range []string{"pass", "failed", "late-failure", "missing-receipt", "excluded", "skipped"} {
 		t.Run(mode, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			t.Cleanup(cancel)
-			goTool := filepath.Join(runtime.GOROOT(), "bin", "go")
-			if runtime.GOOS == "windows" {
-				goTool += ".exe"
+			goTool, err := exec.LookPath("go")
+			if err != nil {
+				t.Fatal(err)
 			}
-			cmd := exec.CommandContext(ctx, goTool, "tool", "test2json", "-p", Module+"/internal/replayledger", os.Args[0], "-test.run=^TestReceiptProcess$", "-test.v=test2json")
+			filter := "-test.run=^TestReceiptProcess$"
+			if mode == "excluded" {
+				filter = "-test.run=^NoRegisteredTestSelected$"
+			}
+			cmd := exec.CommandContext(ctx, goTool, "tool", "test2json", "-p", Module+"/internal/replayledger", os.Args[0], filter, "-test.v=test2json")
 			cmd.Env = append(os.Environ(), "NETSWITCH_LEDGER_CHILD="+mode)
 			out, err := cmd.CombinedOutput()
 			r := receiptReport()
@@ -122,6 +127,10 @@ func TestReceiptRuntimeProof(t *testing.T) {
 			if mode == "pass" {
 				if err != nil || aggregateErr != nil || report.Counts.Covered != 1 {
 					t.Fatalf("receipt subprocess failed: %v; aggregate: %v; covered %d", err, aggregateErr, report.Counts.Covered)
+				}
+			} else if mode == "missing-receipt" || mode == "excluded" || mode == "skipped" {
+				if err != nil || aggregateErr == nil || !strings.Contains(aggregateErr.Error(), "missing required receipts") {
+					t.Fatalf("missing coverage was not gated: process %v, aggregate %v", err, aggregateErr)
 				}
 			} else if mode == "late-failure" {
 				if err == nil || aggregateErr == nil || !strings.Contains(string(out), ReceiptPrefix) {

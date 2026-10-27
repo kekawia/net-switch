@@ -6,32 +6,65 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"runtime"
 	"strings"
 )
 
+// The pass gate needs the module prefix to bind a source-relative mapping to
+// an exact go test package, rather than accepting a same-named foreign package.
+const Module = "github.com/AyoubAchour/net-switch"
+
 type TestEvent struct {
-	Action  string
-	Package string
-	Test    string
-	Output  string
+	Action     string
+	Package    string
+	Test       string
+	Output     string
+	ImportPath string
 }
 
 // Aggregate consumes go test -json directly. Nothing is credited until EOF,
 // every package has a terminal result, and every receipt's test and ancestors
 // passed. A failure after emission (including cleanup) invalidates the run.
 func Aggregate(input io.Reader, r Report, log io.Writer) (Report, error) {
+	return AggregateForOS(input, r, log, runtime.GOOS)
+}
+
+// AggregateForOS allows pure tests to exercise both CI platforms. The command
+// always uses Aggregate and its own GOOS; there is no CLI override to waive it.
+func AggregateForOS(input io.Reader, r Report, log io.Writer, goos string) (Report, error) {
+	if goos == "" || !validOS(goos) {
+		return r, fmt.Errorf("unsupported replay job OS %q", goos)
+	}
 	type key struct{ pkg, test string }
 	states := map[key]string{}
 	lines := map[key]string{}
 	var receipts []WireReceipt
 	receiptGroups := map[[3]string]bool{}
 	owners := map[key]bool{}
+	failedBuilds := map[string]bool{}
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 16<<20)
 	for scanner.Scan() {
 		var e TestEvent
-		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil || e.Package == "" {
+		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			return r, fmt.Errorf("invalid go test JSON event: %s", scanner.Text())
+		}
+		if e.Action == "build-output" || e.Action == "build-fail" {
+			if e.ImportPath == "" {
+				return r, fmt.Errorf("build event has no ImportPath")
+			}
+			if log != nil {
+				if _, err := io.WriteString(log, e.Output); err != nil {
+					return r, err
+				}
+			}
+			if e.Action == "build-fail" {
+				failedBuilds[e.ImportPath] = true
+			}
+			continue
+		}
+		if e.Package == "" {
+			return r, fmt.Errorf("test event has no Package")
 		}
 		k := key{e.Package, e.Test}
 		if _, ok := states[key{e.Package, ""}]; !ok {
@@ -96,6 +129,9 @@ func Aggregate(input io.Reader, r Report, log io.Writer) (Report, error) {
 	if err := scanner.Err(); err != nil {
 		return r, err
 	}
+	for importPath := range failedBuilds {
+		return r, fmt.Errorf("build failed: %s", importPath)
+	}
 	if len(states) == 0 {
 		return r, fmt.Errorf("empty test stream")
 	}
@@ -128,7 +164,7 @@ func Aggregate(input io.Reader, r Report, log io.Writer) (Report, error) {
 			}
 		}
 	}
-	if err := r.cover(receipts); err != nil {
+	if err := r.cover(receipts, goos); err != nil {
 		return r, err
 	}
 	return r, nil

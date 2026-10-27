@@ -2,10 +2,81 @@ package replayledger
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
 	"strings"
 	"testing"
 )
+
+// Recorded with Go 1.27.3: go test -json ./.ledger-buildfail, containing
+// TestBrokenBuild's undefined missingBuildSymbol call. No generated log file
+// was saved; these are the unmodified events captured from the command output.
+//
+//go:embed testdata/build-failure.json
+var recordedBuildFailure string
+
+func TestRecordedBuildFailureDiagnostics(t *testing.T) {
+	var log bytes.Buffer
+	_, err := Aggregate(strings.NewReader(recordedBuildFailure), receiptReport(), &log)
+	importPath := Module + "/.ledger-buildfail [" + Module + "/.ledger-buildfail.test]"
+	if err == nil || !strings.Contains(err.Error(), "build failed: "+importPath) {
+		t.Fatal("missing build-fail identity", err)
+	}
+	if !strings.Contains(log.String(), "undefined: missingBuildSymbol") || !strings.Contains(log.String(), "# "+importPath) || !strings.Contains(log.String(), "[build failed]") {
+		t.Fatal("compiler diagnostics were lost", log.String())
+	}
+}
+
+func TestRequiredReceiptsByOS(t *testing.T) {
+	for _, goos := range []string{"windows", "linux"} {
+		for _, scope := range []string{"", "windows", "linux"} {
+			t.Run(goos+"/scope="+scope, func(t *testing.T) {
+				r := receiptReport()
+				r.Rows[0].OS = scope
+				e := receiptEvents()
+				withoutTest := []TestEvent{e[0], e[len(e)-1]}
+				_, err := AggregateForOS(encodeEvents(withoutTest), r, nil, goos)
+				required := scope == "" || scope == goos
+				if required && (err == nil || !strings.Contains(err.Error(), "missing required receipts")) {
+					t.Fatal("excluded OS test was not gated", err)
+				}
+				if !required && err != nil {
+					t.Fatal("other OS was required", err)
+				}
+				got, err := AggregateForOS(encodeEvents(e), r, nil, goos)
+				if required && (err != nil || got.Counts.Covered != 1) {
+					t.Fatal("matching OS receipt rejected", err)
+				}
+				if !required && (err == nil || !strings.Contains(err.Error(), "scoped to")) {
+					t.Fatal("foreign OS receipt accepted", err)
+				}
+			})
+		}
+	}
+}
+
+func TestRequiredReceiptCannotDisappear(t *testing.T) {
+	for _, name := range []string{"test-excluded", "missing-receipt", "skipped-test", "package-excluded"} {
+		t.Run(name, func(t *testing.T) {
+			e := receiptEvents()
+			switch name {
+			case "test-excluded":
+				e = []TestEvent{e[0], e[6]}
+			case "package-excluded":
+				e = []TestEvent{{Action: "start", Package: Module + "/internal/other"}, {Action: "pass", Package: Module + "/internal/other"}}
+			case "missing-receipt":
+				e = append(e[:3], e[4:]...)
+			case "skipped-test":
+				e[4].Action = "skip"
+				e = append(e[:3], e[4:]...)
+			}
+			_, err := Aggregate(encodeEvents(e), receiptReport(), nil)
+			if err == nil || !strings.Contains(err.Error(), "missing required receipts") {
+				t.Fatal("registered entry lost coverage silently", err)
+			}
+		})
+	}
+}
 
 func receiptReport() Report {
 	return Report{Version: 1, Rows: []Row{{Hash: "synthetic", Trace: "synthetic", Seq: 0, Kind: "output:api", Disposition: "unchanged", Assertion: "internal/control/replay_test.go#TestNative/trace", Status: "uncovered"}}, Counts: Counts{Consumed: 1, Uncovered: 1, ByKind: map[string]int{"output:api": 1}, ByTrace: map[string]int{"synthetic": 1}}}

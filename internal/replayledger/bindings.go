@@ -52,8 +52,8 @@ func ValidateReferences(m Mapping, parse func(string) (*ast.File, error)) error 
 		}
 	}
 	for _, rule := range m.Rules {
-		for _, ref := range rule.Bindings {
-			if err := add(ref, false); err != nil {
+		for _, binding := range rule.Bindings {
+			if err := add(binding.Test, false); err != nil {
 				return err
 			}
 		}

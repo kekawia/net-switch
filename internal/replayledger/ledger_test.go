@@ -95,6 +95,7 @@ func TestLedgerRejectsMutations(t *testing.T) {
 		{"duplicate-generic-rule", "duplicate disposition", func(m *Mapping, _ map[string]Trace) { m.Rules = append(m.Rules, m.Rules[0]) }},
 		{"unknown-rule", "unknown kind", func(m *Mapping, _ map[string]Trace) { m.Rules[0].Kinds = append(m.Rules[0].Kinds, "output:exit") }},
 		{"missing-assertion", "invalid generic disposition", func(m *Mapping, _ map[string]Trace) { m.Rules[0].Assertion = "" }},
+		{"implicit-global-binding", "invalid generic disposition", func(m *Mapping, _ map[string]Trace) { m.Rules[0].Assertion = "does_not_exist_test.go#TestNope" }},
 		{"invented-disposition", "invalid generic disposition", func(m *Mapping, _ map[string]Trace) { m.Rules[0].Disposition = "ignore" }},
 		{"unearned-coverage", "invalid annotation", func(m *Mapping, _ map[string]Trace) { m.Annotations[0].Status = "covered" }},
 		{"detached-completion", "detached completion", func(_ *Mapping, traces map[string]Trace) {

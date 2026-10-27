@@ -79,7 +79,7 @@ func TestRangesAndRuleBindings(t *testing.T) {
 	m, traces := load(t)
 	hash := m.Annotations[0].Hash
 	// A per-trace binding covers this rule's kinds without listing sequences.
-	m.Rules[3].Bindings = map[string]string{hash: consumeIdentity}
+	m.Rules[3].Bindings = map[string]Binding{hash: {Test: consumeIdentity}}
 	r, err := Build(m, traces)
 	if err != nil {
 		t.Fatal(err)
@@ -132,5 +132,69 @@ func TestPendingCountsPerPR(t *testing.T) {
 	}
 	if r.Counts.Pending["#245"] != 5 || r.Counts.Pending["#107"] != 18 {
 		t.Fatal(r.Counts.Pending)
+	}
+}
+
+func TestMappingOSScopes(t *testing.T) {
+	m, traces := load(t)
+	hash := m.Annotations[0].Hash
+	m.Rules[3].Bindings = map[string]Binding{hash: {Test: consumeIdentity, OS: "windows"}}
+	r, err := Build(m, traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range r.Rows {
+		if row.Hash == hash && row.Kind == "input:completion" && row.OS != "windows" {
+			t.Fatal("lost OS binding", row)
+		}
+	}
+	m.Rules[3].Bindings[hash] = Binding{Test: consumeIdentity, OS: "windwos"}
+	if _, err := Build(m, traces); err == nil {
+		t.Fatal("typo in OS binding accepted")
+	}
+	m, traces = load(t)
+	m.Annotations[0].OS = "windwos"
+	if _, err := Build(m, traces); err == nil {
+		t.Fatal("typo in annotation OS accepted")
+	}
+	m, traces = load(t)
+	a := m.Annotations[1]
+	a.Seqs = []int{a.Seqs[0]}
+	a.OS = "windows"
+	m.Annotations[1].Seqs = m.Annotations[1].Seqs[1:]
+	m.Annotations = append(m.Annotations, a)
+	if _, err := Build(m, traces); err == nil {
+		t.Fatal("atomic revision split across OS jobs")
+	}
+}
+
+func TestAppLineWorkedBindings(t *testing.T) {
+	m, traces := load(t)
+	hash := m.Annotations[0].Hash
+	for i := range m.Rules {
+		m.Rules[i].Bindings = map[string]Binding{hash: {Test: consumeIdentity}}
+	}
+	r, err := Build(m, traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered, pending := 0, 0
+	for _, row := range r.Rows {
+		if row.Hash != hash {
+			if row.Assertion == consumeIdentity {
+				t.Fatal("binding escaped its trace")
+			}
+			continue
+		}
+		if row.Assertion == consumeIdentity {
+			registered++
+		} else if row.Status == "pending #107" {
+			pending++
+		} else {
+			t.Fatal("unassigned worked-example row", row)
+		}
+	}
+	if registered != 188 || pending != 23 {
+		t.Fatal("worked mapping counts", registered, pending)
 	}
 }
