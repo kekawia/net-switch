@@ -55,19 +55,33 @@ func TestMachineStoreAliases(t *testing.T) {
 		t.Run(spelling.name, func(t *testing.T) {
 			path := filepath.Join(parent, spelling.name)
 			alias := filepath.Join(spelling.parent, spelling.name)
-			if err := ProtectDirectory(path); err != nil { t.Fatal(err) }
+			if err := ProtectDirectory(path); err != nil {
+				t.Fatal(err)
+			}
 			before, err := os.ReadFile(filepath.Join(path, directoryMarkerName))
-			if err != nil { t.Fatal(err) }
-			if err := VerifyDirectory(alias); err != nil { t.Error("alias verification", err) }
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := VerifyDirectory(alias); err != nil {
+				t.Error("alias verification", err)
+			}
 			resolved, err := PrepareMachineDirectory(alias)
-			if err != nil { t.Fatal("alias preparation", err) }
+			if err != nil {
+				t.Fatal("alias preparation", err)
+			}
 			after, err := os.ReadFile(filepath.Join(resolved, directoryMarkerName))
-			if err != nil || string(before) != string(after) { t.Fatal("alias preparation replaced the certified store", err) }
+			if err != nil || string(before) != string(after) {
+				t.Fatal("alias preparation replaced the certified store", err)
+			}
 			resolved, err = ResolveMachineDirectory(alias)
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			a, err := os.Stat(path)
 			b, other := os.Stat(resolved)
-			if err != nil || other != nil || !os.SameFile(a, b) { t.Fatal("alias location differs", err, other) }
+			if err != nil || other != nil || !os.SameFile(a, b) {
+				t.Fatal("alias location differs", err, other)
+			}
 		})
 	}
 }
@@ -77,19 +91,64 @@ func TestMachineStoreStagedAlias(t *testing.T) {
 	for _, phase := range []string{"staged", "quarantined"} {
 		t.Run(phase, func(t *testing.T) {
 			path := filepath.Join(parent, phase)
-			if err := os.Mkdir(path, 0700); err != nil { t.Fatal(err) }
+			if err := os.Mkdir(path, 0700); err != nil {
+				t.Fatal(err)
+			}
 			interrupted := errors.New("interrupted migration")
 			err := protectDirectory(path, func(string) {}, func(at string) error {
-				if at == phase { return interrupted }; return nil
+				if at == phase {
+					return interrupted
+				}
+				return nil
 			})
-			if !errors.Is(err, interrupted) { t.Fatal("did not reach checkpoint", err) }
+			if !errors.Is(err, interrupted) {
+				t.Fatal("did not reach checkpoint", err)
+			}
 			before, err := os.ReadFile(filepath.Join(path+".migrating", directoryMarkerName))
-			if err != nil { t.Fatal(err) }
+			if err != nil {
+				t.Fatal(err)
+			}
 			alias := filepath.Join(short, phase)
-			if err := ProtectDirectory(alias); err != nil { t.Fatal(err) }
+			if err := ProtectDirectory(alias); err != nil {
+				t.Fatal(err)
+			}
 			after, err := os.ReadFile(filepath.Join(path, directoryMarkerName))
-			if err != nil || string(before) != string(after) { t.Fatal("certified stage was not recovered", err) }
-			if err := VerifyDirectory(alias); err != nil { t.Fatal(err) }
+			if err != nil || string(before) != string(after) {
+				t.Fatal("certified stage was not recovered", err)
+			}
+			if err := VerifyDirectory(alias); err != nil {
+				t.Fatal(err)
+			}
 		})
+	}
+}
+
+func TestMachineStoreFallbackAlias(t *testing.T) {
+	parent, short := aliasStoreParent(t)
+	path := filepath.Join(parent, "fallback")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := windows.UTF16PtrFromString(filepath.Join(path, "held"))
+	h, err := windows.CreateFile(p, windows.GENERIC_WRITE, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer windows.CloseHandle(h)
+	fresh, err := PrepareMachineDirectory(path)
+	if err != nil || fresh == path {
+		t.Fatal("fixture did not publish a fallback store", fresh, err)
+	}
+	for _, alias := range []string{strings.ToUpper(path), filepath.Join(short, "fallback")} {
+		resolved, err := ResolveMachineDirectory(alias)
+		if err != nil {
+			t.Error("alias fallback lookup", err)
+			continue
+		}
+		a, err := os.Stat(fresh)
+		b, other := os.Stat(resolved)
+		if err != nil || other != nil || !os.SameFile(a, b) {
+			t.Error("alias selected a different fallback store", resolved, err, other)
+		}
 	}
 }
