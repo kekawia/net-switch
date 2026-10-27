@@ -33,6 +33,22 @@ export const narrowed = [{
 // the site exactly as the guard reports it; sites is how many such call sites
 // the file has. Each needs a reason and must still match.
 export const declared = [{
+  from: 'internal/replayledger/ledger.go', call: 'os.ReadFile(filepath.Join(root, "tests/oracle/provenance.json"))',
+  reads: ['tests/oracle/provenance.json'],
+  why: 'Load receives the repository root from its test and verifies the frozen provenance sidecar',
+}, {
+  from: 'internal/replayledger/ledger.go', call: 'filepath.Glob(filepath.Join(root, "tests/oracle/fixtures/*.trace.json"))',
+  reads: ['tests/oracle/fixtures'],
+  why: 'Load enumerates the 25 frozen trace paths relative to its caller-supplied repository root',
+}, {
+  from: 'internal/replayledger/ledger.go', call: 'os.ReadFile(path)',
+  reads: ['tests/oracle/fixtures'],
+  why: 'each path is a frozen trace returned by the preceding repository-relative glob',
+}, {
+  from: 'internal/replayledger/ledger_test.go', call: 'filepath.Join("../..", path)',
+  reads: ['internal/control/native_golden_control_test.go', 'internal/control/engine/native_golden_test.go', 'internal/lifecycle/native_recovery_replay_test.go'],
+  why: 'supportingEvidence in mapping.json names test declarations in these three source files; parsing checks references, not test execution',
+}, {
   from: 'scripts/smoke-test-installer.ps1', call: 'import(process.argv[1])', reads: ['lib/engine.mjs'],
   why: 'it imports the installed copy of lib/engine.mjs, passed on the node command line',
 }, {

@@ -1,0 +1,518 @@
+// Package replayledger accounts for frozen trace entries without running an
+// engine. Accounting is not replay coverage: only an executing native assertion
+// may supply a receipt. The checked-in mapping intentionally has no receipts.
+package replayledger
+
+import (
+	"bytes"
+	"crypto/sha256"
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+)
+
+//go:embed mapping.json
+var mappingJSON []byte
+
+type Fixture struct {
+	Name    string `json:"name"`
+	Entries int    `json:"entries"`
+}
+
+type Rule struct {
+	Kinds       []string `json:"kinds"`
+	Disposition string   `json:"disposition"`
+	Assertion   string   `json:"assertion"`
+}
+
+type Annotation struct {
+	Hash        string `json:"hash"`
+	Seqs        []int  `json:"seqs"`
+	Disposition string `json:"disposition"`
+	Assertion   string `json:"assertion"`
+	Status      string `json:"status"`
+	Group       string `json:"group,omitempty"`
+}
+
+type Group struct {
+	Name    string `json:"name"`
+	Hash    string `json:"hash"`
+	Members []int  `json:"members"`
+	Begin   int    `json:"begin"`
+	End     int    `json:"end"`
+	Ack     int    `json:"ack"`
+}
+
+type Evidence struct {
+	PR    int      `json:"pr"`
+	Scope string   `json:"scope"`
+	Tests []string `json:"tests"`
+}
+
+type Mapping struct {
+	Version            int                `json:"version"`
+	Total              int                `json:"total"`
+	Fixtures           map[string]Fixture `json:"fixtures"`
+	Rules              []Rule             `json:"rules"`
+	Annotations        []Annotation       `json:"annotations"`
+	Groups             []Group            `json:"groups"`
+	SupportingEvidence []Evidence         `json:"supportingEvidence"`
+}
+
+type Entry struct {
+	Seq       int             `json:"seq"`
+	Direction string          `json:"direction"`
+	Kind      string          `json:"kind"`
+	Value     json.RawMessage `json:"value"`
+}
+
+type Trace struct {
+	Version int     `json:"version"`
+	Name    string  `json:"name"`
+	Entries []Entry `json:"entries"`
+}
+
+// Row is a disposition in original sequence order, never a sorted effect list.
+// Assertion names on uncovered rows are obligations, not claims of execution.
+type Row struct {
+	Hash        string `json:"hash"`
+	Trace       string `json:"trace"`
+	Seq         int    `json:"seq"`
+	Kind        string `json:"kind"`
+	Disposition string `json:"disposition"`
+	Assertion   string `json:"assertion"`
+	Status      string `json:"status"`
+	Group       string `json:"group,omitempty"`
+}
+
+type Counts struct {
+	Consumed      int            `json:"consumed"`
+	Covered       int            `json:"covered"`
+	Uncovered     int            `json:"uncovered"`
+	Pending107    int            `json:"pending107"`
+	ByDisposition map[string]int `json:"byDisposition"`
+	ByKind        map[string]int `json:"uncoveredByKind"`
+	ByTrace       map[string]int `json:"uncoveredByTrace"`
+}
+
+type Report struct {
+	Version int    `json:"version"`
+	Counts  Counts `json:"counts"`
+	Rows    []Row  `json:"rows"`
+}
+
+func DefaultMapping() (Mapping, error) {
+	var m Mapping
+	d := json.NewDecoder(bytes.NewReader(mappingJSON))
+	d.DisallowUnknownFields()
+	if err := d.Decode(&m); err != nil {
+		return m, err
+	}
+	var extra any
+	if err := d.Decode(&extra); err != io.EOF {
+		return m, fmt.Errorf("trailing mapping JSON")
+	}
+	return m, nil
+}
+
+// Load reads only the existing oracle paths. Both the mapping and the frozen
+// provenance sidecar must agree with the actual byte hashes and fixture set.
+func Load(root string, m Mapping) (map[string]Trace, error) {
+	var provenance struct {
+		Version  int
+		Fixtures map[string]struct{ SHA256 string }
+	}
+	b, err := os.ReadFile(filepath.Join(root, "tests/oracle/provenance.json"))
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &provenance); err != nil {
+		return nil, err
+	}
+	files, err := filepath.Glob(filepath.Join(root, "tests/oracle/fixtures/*.trace.json"))
+	if err != nil {
+		return nil, err
+	}
+	if provenance.Version != 1 || len(files) != 25 || len(m.Fixtures) != len(files) || len(provenance.Fixtures) != len(files) {
+		return nil, fmt.Errorf("fixture set must contain exactly 25 traces")
+	}
+	traces := make(map[string]Trace)
+	for _, path := range files {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		hash := fmt.Sprintf("%x", sha256.Sum256(b))
+		f, ok := m.Fixtures[hash]
+		if !ok {
+			return nil, fmt.Errorf("fixture hash mismatch: %s (%s)", path, hash)
+		}
+		if filepath.Base(path) != f.Name+".trace.json" || provenance.Fixtures[f.Name].SHA256 != hash {
+			return nil, fmt.Errorf("fixture identity/provenance mismatch: %s", path)
+		}
+		var trace Trace
+		if err := json.Unmarshal(b, &trace); err != nil {
+			return nil, err
+		}
+		if _, exists := traces[hash]; exists {
+			return nil, fmt.Errorf("duplicate fixture %s", hash)
+		}
+		traces[hash] = trace
+	}
+	return traces, nil
+}
+
+// This whitelist is independent of the mapping, and deliberately excludes exit:
+// the contract names it but none of the frozen traces implements its semantics.
+func known(kind string) bool {
+	const input = " initial-files http helper-line interfaces connections probes adapter-snapshot counter-sample engine-reply probe-result clock-tick file-completion completion async-result socket-completion process-exit timer-completion routes connectionsStatus update-reply release updateStatus quitFailure adapters refresh-adapters directory-list probe-vote state-snapshot "
+	const output = " api event engine spawn write remove outside-close log console "
+	p := strings.Split(kind, ":")
+	if len(p) != 2 {
+		return false
+	}
+	return p[0] == "input" && strings.Contains(input, " "+p[1]+" ") || p[0] == "output" && strings.Contains(output, " "+p[1]+" ")
+}
+
+func validDisposition(disposition, assertion string) bool {
+	return strings.TrimSpace(assertion) != "" && slices.Contains([]string{"unchanged", "translated", "atomic-revision", "obsolete"}, disposition)
+}
+
+// Build validates and expands the compact plan. It does NOT execute native
+// behavior or promote supporting feature tests into entry coverage.
+func Build(m Mapping, traces map[string]Trace) (Report, error) {
+	r := Report{Version: m.Version, Counts: Counts{
+		ByDisposition: map[string]int{"unchanged": 0, "translated": 0, "atomic-revision": 0, "obsolete": 0},
+		ByKind:        map[string]int{}, ByTrace: map[string]int{},
+	}}
+	if m.Version != 1 || m.Total != 7894 || len(m.Fixtures) != 25 || len(traces) != 25 {
+		return r, fmt.Errorf("unsupported mapping version or fixture inventory")
+	}
+	rules := map[string]Rule{}
+	for _, rule := range m.Rules {
+		if !validDisposition(rule.Disposition, rule.Assertion) || rule.Disposition == "atomic-revision" || len(rule.Kinds) == 0 {
+			return r, fmt.Errorf("invalid generic disposition: %+v", rule)
+		}
+		for _, kind := range rule.Kinds {
+			if !known(kind) {
+				return r, fmt.Errorf("unknown kind %s", kind)
+			}
+			if _, ok := rules[kind]; ok {
+				return r, fmt.Errorf("duplicate disposition rule for %s", kind)
+			}
+			rules[kind] = rule
+		}
+	}
+	annotations := map[string]map[int]Annotation{}
+	for _, a := range m.Annotations {
+		f, ok := m.Fixtures[a.Hash]
+		if !ok || len(a.Seqs) == 0 || !validDisposition(a.Disposition, a.Assertion) || a.Status != "pending #107" && a.Status != "uncovered" {
+			return r, fmt.Errorf("invalid annotation: %+v", a)
+		}
+		if (a.Disposition == "atomic-revision") != (a.Group != "") {
+			return r, fmt.Errorf("atomic revision needs a named group")
+		}
+		if annotations[a.Hash] == nil {
+			annotations[a.Hash] = map[int]Annotation{}
+		}
+		for _, seq := range a.Seqs {
+			if seq < 0 || seq >= f.Entries {
+				return r, fmt.Errorf("annotation outside trace %s:%d", f.Name, seq)
+			}
+			if _, ok := annotations[a.Hash][seq]; ok {
+				return r, fmt.Errorf("duplicate disposition at %s:%d", f.Name, seq)
+			}
+			annotations[a.Hash][seq] = a
+		}
+	}
+	if err := validateGroups(m, traces, annotations); err != nil {
+		return r, err
+	}
+	// Sorting traces makes reports reproducible; entries within a trace never move.
+	hashes := make([]string, 0, len(m.Fixtures))
+	for hash := range m.Fixtures {
+		hashes = append(hashes, hash)
+	}
+	slices.SortFunc(hashes, func(a, b string) int { return strings.Compare(m.Fixtures[a].Name, m.Fixtures[b].Name) })
+	for _, hash := range hashes {
+		f := m.Fixtures[hash]
+		trace, ok := traces[hash]
+		if !ok || trace.Version != 1 || trace.Name != f.Name || len(trace.Entries) != f.Entries {
+			return r, fmt.Errorf("trace inventory mismatch: %s", f.Name)
+		}
+		if err := validateBoundaries(trace); err != nil {
+			return r, fmt.Errorf("%s: %w", f.Name, err)
+		}
+		for _, e := range trace.Entries {
+			kind := e.Direction + ":" + e.Kind
+			rule, ok := rules[kind]
+			if !ok {
+				return r, fmt.Errorf("missing disposition for %s:%d %s", f.Name, e.Seq, kind)
+			}
+			row := Row{Hash: hash, Trace: f.Name, Seq: e.Seq, Kind: kind, Disposition: rule.Disposition, Assertion: rule.Assertion, Status: "uncovered"}
+			if a, ok := annotations[hash][e.Seq]; ok {
+				row.Disposition, row.Assertion, row.Status, row.Group = a.Disposition, a.Assertion, a.Status, a.Group
+			}
+			r.Rows = append(r.Rows, row)
+			r.Counts.Consumed++
+			r.Counts.Uncovered++
+			r.Counts.ByDisposition[row.Disposition]++
+			r.Counts.ByKind[kind]++
+			r.Counts.ByTrace[f.Name]++
+			if row.Status == "pending #107" {
+				r.Counts.Pending107++
+			}
+		}
+	}
+	if r.Counts.Consumed != m.Total {
+		return r, fmt.Errorf("consumed %d entries, expected %d", r.Counts.Consumed, m.Total)
+	}
+	return r, nil
+}
+
+func validateGroups(m Mapping, traces map[string]Trace, annotations map[string]map[int]Annotation) error {
+	groups := map[string]Group{}
+	for _, g := range m.Groups {
+		if _, ok := groups[g.Name]; ok || g.Name == "" {
+			return fmt.Errorf("duplicate or unnamed group %q", g.Name)
+		}
+		t, ok := traces[g.Hash]
+		if !ok || len(g.Members) == 0 || g.Begin < 0 || g.End >= len(t.Entries) || g.Begin >= g.Ack || g.Ack >= g.End {
+			return fmt.Errorf("incomplete group %s: invalid boundaries", g.Name)
+		}
+		if t.Entries[g.Begin].Kind != "http" || t.Entries[g.End].Kind != "api" || t.Entries[g.Ack].Kind != "timer-completion" {
+			return fmt.Errorf("incomplete group %s: missing trigger, acknowledgement or publication", g.Name)
+		}
+		previous := g.Begin
+		for _, seq := range g.Members {
+			if seq <= previous || seq >= g.Ack {
+				return fmt.Errorf("incomplete group %s: unordered members", g.Name)
+			}
+			a, ok := annotations[g.Hash][seq]
+			if !ok || a.Group != g.Name || a.Disposition != "atomic-revision" || t.Entries[seq].Kind != "write" {
+				return fmt.Errorf("incomplete group %s at %d", g.Name, seq)
+			}
+			previous = seq
+		}
+		// Omitting a write from BOTH the group and its annotations must not
+		// quietly make a smaller transaction look complete. All rule writes in
+		// this trigger/response interval belong to the same atomic revision.
+		for seq := g.Begin + 1; seq < g.End; seq++ {
+			e := t.Entries[seq]
+			if e.Kind == "http" || e.Kind == "api" {
+				return fmt.Errorf("group %s crosses an unrelated HTTP boundary", g.Name)
+			}
+			if e.Kind != "write" {
+				continue
+			}
+			var value struct{ File string }
+			if err := json.Unmarshal(e.Value, &value); err != nil {
+				return err
+			}
+			base := filepath.Base(value.File)
+			if strings.HasPrefix(base, "apps-") || strings.HasPrefix(base, "share-") || strings.HasPrefix(base, "cut-") {
+				if !slices.Contains(g.Members, seq) {
+					return fmt.Errorf("incomplete group %s: unassigned rule write %d", g.Name, seq)
+				}
+			}
+		}
+		groups[g.Name] = g
+	}
+	for hash, entries := range annotations {
+		for seq, a := range entries {
+			if a.Group == "" {
+				continue
+			}
+			g, ok := groups[a.Group]
+			if !ok || g.Hash != hash || !slices.Contains(g.Members, seq) {
+				return fmt.Errorf("incomplete group %s: extra member %d", a.Group, seq)
+			}
+		}
+	}
+	return nil
+}
+
+// Check the ORIGINAL cross-kind stream. Even uncovered replies must have a
+// request, and all requests (including /delay) must have exactly one result.
+func validateBoundaries(t Trace) error {
+	requests := map[string][]int{}
+	completion := 0
+	httpPending := false
+	for i, e := range t.Entries {
+		if e.Seq != i {
+			return fmt.Errorf("duplicate/missing sequence at %d: got %d", i, e.Seq)
+		}
+		if !known(e.Direction + ":" + e.Kind) {
+			return fmt.Errorf("unknown kind at %d: %s:%s", i, e.Direction, e.Kind)
+		}
+		if !json.Valid(e.Value) {
+			return fmt.Errorf("invalid value at %d", i)
+		}
+		const completedKinds = " file-completion async-result socket-completion adapter-snapshot counter-sample engine-reply probe-result process-exit timer-completion directory-list probe-vote state-snapshot update-reply "
+		if strings.Contains(completedKinds, " "+e.Kind+" ") && (i+1 == len(t.Entries) || t.Entries[i+1].Kind != "completion") {
+			return fmt.Errorf("missing completion after %d %s", i, e.Kind)
+		}
+		var v struct {
+			ID          int
+			Kind, Route string
+		}
+		switch e.Kind {
+		case "engine", "engine-reply", "probe-result", "completion":
+			if err := json.Unmarshal(e.Value, &v); err != nil {
+				return fmt.Errorf("entry %d: %w", i, err)
+			}
+		}
+		switch e.Kind {
+		case "engine":
+			if v.Route == "" {
+				return fmt.Errorf("empty engine route at %d", i)
+			}
+			requests[v.Route] = append(requests[v.Route], i)
+		case "engine-reply", "probe-result":
+			pending := requests[v.Route]
+			if len(pending) == 0 {
+				return fmt.Errorf("leftover reply at %d for %s", i, v.Route)
+			}
+			if strings.HasSuffix(v.Route, "/delay") != (e.Kind == "probe-result") {
+				return fmt.Errorf("wrong reply kind at %d", i)
+			}
+			requests[v.Route] = pending[1:]
+		case "completion":
+			completion++
+			if i == 0 || v.ID != completion || t.Entries[i-1].Direction != "input" || t.Entries[i-1].Kind != v.Kind || v.Kind == "completion" {
+				return fmt.Errorf("detached completion at %d", i)
+			}
+		case "http":
+			if httpPending {
+				return fmt.Errorf("HTTP input before prior response at %d", i)
+			}
+			httpPending = true
+		case "api":
+			if !httpPending {
+				return fmt.Errorf("leftover API reply at %d", i)
+			}
+			httpPending = false
+		}
+	}
+	for route, pending := range requests {
+		if len(pending) != 0 {
+			return fmt.Errorf("incomplete request group %s: %v", route, pending)
+		}
+	}
+	if httpPending {
+		return fmt.Errorf("missing API reply")
+	}
+	return nil
+}
+
+// Cursor is shared by future replay assertions. Consume is called only AFTER
+// the named assertion succeeds, in original entry order. A partial slice must
+// pass only its explicit rows; it cannot claim the other entries as covered.
+type Cursor struct {
+	rows []Row
+	next int
+	err  error
+}
+
+func NewCursor(rows []Row) *Cursor {
+	c := &Cursor{rows: slices.Clone(rows)}
+	seen := map[string]bool{}
+	for i, row := range c.rows {
+		if i == 0 || c.rows[i-1].Hash != row.Hash {
+			if seen[row.Hash] {
+				c.err = fmt.Errorf("repeated trace block %s", row.Trace)
+				break
+			}
+			seen[row.Hash] = true
+		} else if c.rows[i-1].Seq >= row.Seq {
+			c.err = fmt.Errorf("duplicate or reordered cursor rows in %s", row.Trace)
+			break
+		}
+	}
+	return c
+}
+
+func (c *Cursor) Consume(hash string, seq int, disposition, assertion string) error {
+	if c.err != nil {
+		return c.err
+	}
+	if c.next == len(c.rows) {
+		return fmt.Errorf("duplicate disposition after end")
+	}
+	want := c.rows[c.next]
+	if want.Hash != hash || want.Seq != seq || want.Disposition != disposition || want.Assertion != assertion {
+		return fmt.Errorf("duplicate, missing or out-of-order disposition: want %s:%d %s %s, got %s:%d %s %s", want.Trace, want.Seq, want.Disposition, want.Assertion, hash, seq, disposition, assertion)
+	}
+	c.next++
+	return nil
+}
+
+func (c *Cursor) Finish() error {
+	if c.err != nil {
+		return c.err
+	}
+	if c.next != len(c.rows) {
+		return fmt.Errorf("missing dispositions: consumed %d of %d", c.next, len(c.rows))
+	}
+	return nil
+}
+
+// Receipt can only be obtained from an exhausted assertion cursor. It contains
+// identities, not a second copy of the fixture values.
+type Receipt struct{ rows []Row }
+
+func (c *Cursor) Receipt() (Receipt, error) {
+	if err := c.Finish(); err != nil {
+		return Receipt{}, err
+	}
+	return Receipt{rows: slices.Clone(c.rows)}, nil
+}
+
+// Cover merges successful native assertion receipts into the report. Pending
+// work and generic obligation names cannot earn coverage. Calls are atomic:
+// a bad or repeated receipt changes no counters or rows.
+func (r *Report) Cover(receipts ...Receipt) error {
+	type key struct {
+		hash string
+		seq  int
+	}
+	index := map[key]int{}
+	for i, row := range r.Rows {
+		index[key{row.Hash, row.Seq}] = i
+	}
+	selected := map[int]bool{}
+	for _, receipt := range receipts {
+		for _, row := range receipt.rows {
+			i, ok := index[key{row.Hash, row.Seq}]
+			if !ok || selected[i] || r.Rows[i] != row || row.Status != "uncovered" || !strings.Contains(row.Assertion, "_test.go#Test") {
+				return fmt.Errorf("unearned, duplicate or stale coverage receipt: %s:%d", row.Trace, row.Seq)
+			}
+			selected[i] = true
+		}
+	}
+	selectedGroups := map[string]bool{}
+	for i := range selected {
+		if r.Rows[i].Group != "" {
+			selectedGroups[r.Rows[i].Group] = true
+		}
+	}
+	for i, row := range r.Rows {
+		if selectedGroups[row.Group] && !selected[i] {
+			return fmt.Errorf("incomplete group receipt: %s", row.Group)
+		}
+	}
+	for i := range selected {
+		row := &r.Rows[i]
+		row.Status = "covered"
+		r.Counts.Covered++
+		r.Counts.Uncovered--
+		r.Counts.ByKind[row.Kind]--
+		r.Counts.ByTrace[row.Trace]--
+	}
+	return nil
+}
