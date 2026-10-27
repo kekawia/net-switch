@@ -287,6 +287,24 @@ func TestNativeRecoveryReplayFailedForcedStop(t *testing.T) {
 	f := newRecoveryReplay(t)
 	r := f.remote
 	waitErr, forceErr := errors.New("service did not stop"), errors.New("cleanup refused")
+	var stopped atomic.Bool
+	queried := make(chan struct{}, 1)
+	r.queryService = func(string) (service.Status, error) {
+		select {
+		case queried <- struct{}{}:
+		default:
+		}
+		if stopped.Load() {
+			return service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true}, nil
+		}
+		return service.Status{Running: true, PID: 4242}, nil
+	}
+	r.outcome = func(instance string) (host.Outcome, error) {
+		return host.Outcome{Instance: instance, State: "complete", Reason: "stop"}, nil
+	}
+	r.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
+		return nil, errors.New("host is stopping")
+	}
 	r.waitStopped = func(context.Context, string) error { return waitErr }
 	r.forceStop = func(context.Context, string) error { return forceErr }
 	err := r.Stop(r.ctx)
@@ -299,8 +317,96 @@ func TestNativeRecoveryReplayFailedForcedStop(t *testing.T) {
 	if s := r.Snapshot(); s.Status == "off" || stopping {
 		t.Fatal("failed forced cleanup reported completion or left stopping latched", stopping, s)
 	}
-	r.forceStop = func(context.Context, string) error { return nil }
-	if err := r.Stop(r.ctx); err != nil || r.Snapshot().Status != "off" {
-		t.Fatal("stop could not recover after failed forced cleanup", err, r.Snapshot())
+	r.mu.Lock()
+	rpc := r.rpc
+	r.mu.Unlock()
+	rpc.conn.Close()
+	select {
+	case <-queried:
+	case <-time.After(5 * time.Second):
+		t.Fatal("transport loss did not resume recovery")
+	}
+	if s := r.Snapshot(); s.Status != "stopping" || s.FailureID != "" {
+		t.Fatal("acknowledged stop was reported as starting or failed", s)
+	}
+	stopped.Store(true)
+	awaitRecovery(t, r, func() bool { return !r.recovering && r.snapshot.Status == "off" })
+	if s := r.Snapshot(); s.FailureID != "" || s.Error != nil {
+		t.Fatal("completed stop consumed crash budget", s)
+	}
+}
+
+func TestNativeRecoveryReplayOverlappingStops(t *testing.T) {
+	f := newRecoveryReplay(t)
+	r := f.remote
+	r.waitStopped = func(context.Context, string) error { return errors.New("service wait failed") }
+	first, second := make(chan struct{}), make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	var calls atomic.Int32
+	r.forceStop = func(context.Context, string) error {
+		if calls.Add(1) == 1 {
+			close(first)
+			<-release
+		} else {
+			close(second)
+		}
+		return errors.New("forced cleanup failed")
+	}
+	a, b := make(chan error, 1), make(chan error, 1)
+	t.Cleanup(func() { once.Do(func() { close(release) }); <-a; <-b })
+	go func() { a <- r.Stop(r.ctx) }()
+	<-first
+	started := make(chan struct{})
+	go func() { close(started); b <- r.Stop(r.ctx) }()
+	<-started
+	select {
+	case <-second:
+		t.Error("Stop B entered forced cleanup while Stop A still owned stop state")
+	case <-time.After(100 * time.Millisecond):
+	}
+	once.Do(func() { close(release) })
+	select {
+	case <-second:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serialized Stop B did not resume")
+	}
+}
+
+func TestNativeRecoveryReplayStaleQueryIsPaced(t *testing.T) {
+	f := newRecoveryReplay(t)
+	r := f.remote
+	r.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
+		return nil, errors.New("unavailable")
+	}
+	queries := make(chan time.Time, 2)
+	r.queryService = func(string) (service.Status, error) {
+		// A concurrent failed start advances attempt while the service query
+		// is in flight, making this classification stale on every iteration.
+		r.mu.Lock()
+		r.attempt++
+		r.mu.Unlock()
+		select {
+		case queries <- time.Now():
+		default:
+		}
+		return service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true}, nil
+	}
+	r.outcome = func(instance string) (host.Outcome, error) {
+		return host.Outcome{Instance: instance, State: "complete", Reason: "stop"}, nil
+	}
+	f.interrupted()
+	read := func() time.Time {
+		select {
+		case at := <-queries:
+			return at
+		case <-time.After(5 * time.Second):
+			t.Fatal("recovery did not query service")
+			return time.Time{}
+		}
+	}
+	first, second := read(), read()
+	if elapsed := second.Sub(first); elapsed < 900*time.Millisecond {
+		t.Fatalf("stale recovery spun without pause: two queries in %s", elapsed)
 	}
 }

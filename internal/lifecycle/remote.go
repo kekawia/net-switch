@@ -30,6 +30,8 @@ func isRPCRejection(err error) bool {
 type Remote struct {
 	mu                   sync.Mutex
 	connect              sync.Mutex
+	stop                 sync.Mutex
+	stopAcknowledged     string // instance whose stop completed before service exit
 	rpc                  *RPC
 	instance             string
 	epoch                uint64
@@ -98,6 +100,9 @@ func (r *Remote) Snapshot() ce.Snapshot {
 		select {
 		case <-r.rpc.Done():
 			s.Status = "starting"
+			if r.stopAcknowledged != "" && r.stopAcknowledged == r.instance {
+				s.Status = "stopping"
+			}
 		default:
 		}
 	}
@@ -155,6 +160,9 @@ func (r *Remote) disconnect(rpc *RPC, err error) {
 	// instance-ending error already classified keeps its status and identity.
 	if r.snapshot.Status != "error" || r.snapshot.FailureID == "" {
 		r.snapshot.Status = "starting"
+		if r.stopAcknowledged != "" && r.stopAcknowledged == r.instance {
+			r.snapshot.Status = "stopping"
+		}
 	}
 	already := r.recovering
 	if !already {
@@ -251,6 +259,11 @@ func (r *Remote) recoverConnection(cause error, id uint64) {
 			}
 			r.mu.Unlock()
 			if !current {
+				// Starts and stops can invalidate a query while it is in flight.
+				// A stale result must not turn recovery into an unbounded retry loop.
+				if localipc.Pause(r.ctx, time.Second) != nil {
+					return
+				}
 				continue
 			}
 			if grace {
@@ -486,6 +499,7 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	defer cancel()
 	r.mu.Lock()
 	r.stopping = false
+	r.stopAcknowledged = ""
 	r.attempt++
 	attempt := r.attempt
 	// Failures before an instance exists belong to this one start attempt.
@@ -599,6 +613,8 @@ func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledg
 	return ack, err
 }
 func (r *Remote) Stop(ctx context.Context) error {
+	r.stop.Lock()
+	defer r.stop.Unlock()
 	stopCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	err := r.stopGracefully(stopCtx)
 	cancel()
@@ -653,6 +669,7 @@ func (r *Remote) stopGracefully(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	r.stopping = true
+	instance := r.instance
 	r.mu.Unlock()
 	if err := r.call(ctx, "stop", nil, "", nil); err != nil {
 		r.mu.Lock()
@@ -662,6 +679,12 @@ func (r *Remote) stopGracefully(ctx context.Context) error {
 	}
 	// The acknowledgement precedes the engine's final journal append and
 	// SCM transition. Do not start a replacement until both have completed.
+	r.mu.Lock()
+	if r.instance == instance {
+		r.stopAcknowledged = instance
+		r.snapshot.Status = "stopping"
+	}
+	r.mu.Unlock()
 	if err := r.waitStopped(ctx, service.Engine); err != nil {
 		return err
 	}

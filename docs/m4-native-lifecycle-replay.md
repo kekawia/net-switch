@@ -24,7 +24,11 @@ native protocol server and the real in-memory flow table:
 - ForgetLane: it is a native no-op with no IPC; the complete revision owns lanes.
 - Acknowledged stop: the real stop unloads policy; a blocked service wait has a
   deadline, invokes bounded forced cleanup and publishes off only after success.
-  Failed forced cleanup returns both errors, clears stopping, and permits retry.
+  Failed forced cleanup returns both errors and releases recovery suppression.
+  The acknowledged instance stays Stopping through transport loss until its
+  verified clean service outcome publishes Off. A new Start clears that intent.
+  Concurrent Stops are serialized so one cannot clear another's suppression.
+  Stale recovery classifications pause before another dial/query/outcome read.
 - Seven lease exits: one Remote retains state across all seven cycles. Each starts
   a loaded replacement instance, consumes its matching native cleanup outcome,
   and reaches off without a failure identity. Its start-attempt count accumulates.
@@ -60,8 +64,9 @@ later; this slice does not complete M4.
 
 ## Validation and review handoff
 
-Review round 1's final focused run passed 34 leaf tests: 13 replay cases,
-19 shared-fixture regression tests, and two protocol cases. All runs used
+Review round 2's final focused run passed 34 leaf tests: 15 replay cases and
+19 shared-fixture regression tests. Round 1 also checked the two separate
+protocol cases. All runs used
 Go 1.27.3, Idle priority, GOMAXPROCS=2 and -p=2. Frozen reference bytes remain
 unchanged. Hosted race results remain pending.
 
@@ -73,7 +78,25 @@ made it pass in the final run. The mutation is not committed.
 The new failed-forceStop test first failed because stopping remained true after
 an acknowledged stop followed by failed service wait and forced cleanup. Remote
 now clears that flag before returning the joined error. The final test checks
-both failures, retained not-off status, cleared stopping and successful retry.
+both failures and cleared recovery suppression, then closes the real transport.
+It observes the recovery service query, checks Stopping with no failure identity,
+and supplies a clean stopped outcome. Remote converges to Off without a failure
+identity. This supersedes the earlier test's direct Stop retry.
+
+Review round 2 adds an instance-scoped acknowledged-stop marker, separate from
+the in-progress stop flag. It preserves Stopping in both disconnect publication
+and the snapshot's closed-transport window. A Stop mutex serializes the complete
+graceful/forced sequence. A stale query now takes the same cancellable one-second
+pause as other recovery retries instead of immediately issuing more work.
+
+Both requested regression mutations failed, then passed after restoration:
+- Removing Stop serialization let B enter forced cleanup while A was held there;
+  `TestNativeRecoveryReplayOverlappingStops` failed on that overlap.
+- Removing the stale-result pause made two service queries occur in 0 seconds;
+  `TestNativeRecoveryReplayStaleQueryIsPaced` failed. The test advances the start
+  attempt during each service query to exercise accumulated stale results.
+
+Neither mutation remains in the patch. The final run includes both fixes.
 
 Crash-budget non-consumption is proven where classification lives, in Remote.
 Control core's counting is already covered by its refused-start tests; this
@@ -82,12 +105,12 @@ Remote state, not actual sleep/lease-clock expiry.
 
 Stop cancellation is injected after acknowledgement. The 20-second graceful
 and 10-second forced-cleanup bounds asserted here are implementation constants
-in `Remote.Stop` (`remote.go:602` and `remote.go:609`), not bounds derived by
+in `Remote.Stop`, not bounds derived by
 these tests from the spec. Tests check deadlines without sleeping through them.
 
 Existing lifecycle CI includes the new file in its offline contracts. Existing
 main CI includes it under the race detector on Linux x64/ARM64 and Windows x64.
-Review round 1 is addressed; hosted results and re-review remain pending. No CI
+Review rounds 1 and 2 are addressed; hosted results and re-review remain pending. No CI
 was watched.
 For review, compare the seven mappings above with the new tests and the original
 round2/round3 consumers. Check fixture cleanup, reconnect publication barriers,
