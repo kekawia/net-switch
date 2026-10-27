@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -113,29 +114,76 @@ type nativeFixture struct {
 	remote  *Remote
 	status  service.Status
 	outcome host.Outcome
+	logMu   sync.Mutex
+	logs    []string
+	dialMu  sync.Mutex
 }
 
 func newNativeFixture(t *testing.T, prober platform.Prober) *nativeFixture {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
 	table := flows.New(flows.Defaults(), nil)
 	runtime := &nativeRuntime{table: table, started: time.Date(2026, 10, 24, 9, 0, 0, 0, time.UTC)}
 	server := protocol.New(runtime, table, prober)
 	f := &nativeFixture{server: server, runtime: runtime}
-	remote := NewRemote(ctx, func(string) {})
+	remote := NewRemote(ctx, func(message string) {
+		f.logMu.Lock()
+		defer f.logMu.Unlock()
+		f.logs = append(f.logs, message)
+	})
+	var serving sync.WaitGroup
+	closed := false
 	remote.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
+		f.dialMu.Lock()
+		defer f.dialMu.Unlock()
+		if closed {
+			return nil, context.Canceled
+		}
+		server := f.server
 		left, right := net.Pipe()
-		go server.Serve(ctx, left)
+		serving.Add(1)
+		go func() { defer serving.Done(); _ = server.Serve(ctx, left) }()
 		return &localipc.Conn{ReadWriteCloser: right}, nil
 	}
 	remote.startService = func(context.Context, string) error { return nil }
 	remote.queryService = func(string) (service.Status, error) { return f.status, nil }
 	remote.waitStopped = func(context.Context, string) error { return nil }
 	remote.outcome = func(string) (host.Outcome, error) { return f.outcome, nil }
+	remote.forceStop = func(context.Context, string) error { return errors.New("unexpected forced stop") }
+	t.Cleanup(func() {
+		f.dialMu.Lock()
+		closed = true
+		cancel()
+		f.dialMu.Unlock()
+		remote.mu.Lock()
+		rpc := remote.rpc
+		remote.mu.Unlock()
+		if rpc != nil {
+			rpc.Close()
+		}
+		done := make(chan struct{})
+		go func() { serving.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("native fixture server did not join")
+		}
+		awaitRecovery(t, remote, func() bool { return !remote.recovering })
+	})
 	f.remote = remote
 	f.status = service.Status{Running: true, PID: 4242}
 	return f
+}
+
+func (f *nativeFixture) hasLog(fragment string) bool {
+	f.logMu.Lock()
+	defer f.logMu.Unlock()
+	for _, message := range f.logs {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
 }
 
 func testPolicy() ce.Policy {

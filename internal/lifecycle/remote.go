@@ -30,6 +30,9 @@ func isRPCRejection(err error) bool {
 type Remote struct {
 	mu                   sync.Mutex
 	connect              sync.Mutex
+	stop                 sync.Mutex
+	stopFlight           *stopResult
+	stopAcknowledged     string // instance whose stop completed before service exit
 	rpc                  *RPC
 	instance             string
 	epoch                uint64
@@ -40,6 +43,7 @@ type Remote struct {
 	log                  func(string)
 	recovering, stopping bool
 	recovery             uint64
+	unownedRecovery      uint64
 	attempt              uint64
 	// beforeLoad runs between fixing the attempt's session and sending the
 	// start; nil in production, a test hook for the reattach race.
@@ -98,6 +102,9 @@ func (r *Remote) Snapshot() ce.Snapshot {
 		select {
 		case <-r.rpc.Done():
 			s.Status = "starting"
+			if r.stopAcknowledged != "" && r.stopAcknowledged == r.instance {
+				s.Status = "stopping"
+			}
 		default:
 		}
 	}
@@ -143,8 +150,13 @@ func (r *Remote) failWithReasonLocked(err error, reason string) {
 }
 func (r *Remote) disconnect(rpc *RPC, err error) {
 	r.mu.Lock()
-	if r.rpc != rpc || r.stopping || r.ctx.Err() != nil {
+	if r.rpc != rpc || r.ctx.Err() != nil {
 		r.mu.Unlock()
+		return
+	}
+	if r.stopping {
+		r.mu.Unlock()
+		r.log("engine transport interrupted during stop; deferring recovery: " + err.Error())
 		return
 	}
 	r.rpc = nil
@@ -155,6 +167,9 @@ func (r *Remote) disconnect(rpc *RPC, err error) {
 	// instance-ending error already classified keeps its status and identity.
 	if r.snapshot.Status != "error" || r.snapshot.FailureID == "" {
 		r.snapshot.Status = "starting"
+		if r.stopAcknowledged != "" && r.stopAcknowledged == r.instance {
+			r.snapshot.Status = "stopping"
+		}
 	}
 	already := r.recovering
 	if !already {
@@ -239,18 +254,29 @@ func (r *Remote) recoverConnection(cause error, id uint64) {
 			grace := time.Now().Before(r.wakeGrace)
 			current := r.recovery == id && r.rpc == nil && r.instance == instance && r.attempt == attempt
 			if current && !stopping && !grace {
-				switch class.reason {
-				case "lease-expired", exitStopped:
-					// Routing is off; the supervisor restarts it if still wanted.
+				if instance == "" && r.unownedRecovery == id {
+					// A service observed running without an authenticated session
+					// is not an instance whose crash we can count.
 					r.snapshot = ce.Snapshot{Status: "off"}
-				case ce.ReasonAdapterLost:
-					r.failWithReasonLocked(fmt.Errorf("adapter lost; the engine cleaned up and exited (%s)", describeExit(status)), ce.ReasonAdapterLost)
-				default:
-					r.failLocked(fmt.Errorf("engine instance exited: %w", cause))
+				} else {
+					switch class.reason {
+					case "lease-expired", exitStopped:
+						// Routing is off; the supervisor restarts it if still wanted.
+						r.snapshot = ce.Snapshot{Status: "off"}
+					case ce.ReasonAdapterLost:
+						r.failWithReasonLocked(fmt.Errorf("adapter lost; the engine cleaned up and exited (%s)", describeExit(status)), ce.ReasonAdapterLost)
+					default:
+						r.failLocked(fmt.Errorf("engine instance exited: %w", cause))
+					}
 				}
 			}
 			r.mu.Unlock()
 			if !current {
+				// Starts and stops can invalidate a query while it is in flight.
+				// A stale result must not turn recovery into an unbounded retry loop.
+				if localipc.Pause(r.ctx, time.Second) != nil {
+					return
+				}
 				continue
 			}
 			if grace {
@@ -486,6 +512,7 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	defer cancel()
 	r.mu.Lock()
 	r.stopping = false
+	r.stopAcknowledged = ""
 	r.attempt++
 	attempt := r.attempt
 	// Failures before an instance exists belong to this one start attempt.
@@ -598,9 +625,54 @@ func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledg
 	}
 	return ack, err
 }
-func (r *Remote) Stop(ctx context.Context) error {
+
+type stopResult struct {
+	done  chan struct{}
+	err   error
+	owner context.Context
+}
+
+func (r *Remote) Stop(ctx context.Context) (err error) {
+	for retried := false; ; {
+		r.stop.Lock()
+		if flight := r.stopFlight; flight != nil {
+			r.stop.Unlock()
+			select {
+			case <-flight.done:
+				if !retried && ctx.Err() == nil && flight.owner.Err() != nil && (errors.Is(flight.err, context.Canceled) || errors.Is(flight.err, context.DeadlineExceeded)) {
+					retried = true
+					continue
+				}
+				return flight.err
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		flight := &stopResult{done: make(chan struct{}), owner: ctx}
+		r.stopFlight = flight
+		r.stop.Unlock()
+		defer func() {
+			panicked := recover()
+			if panicked != nil {
+				err = fmt.Errorf("engine stop panicked: %v", panicked)
+			}
+			r.stop.Lock()
+			flight.err = err
+			r.stopFlight = nil
+			close(flight.done)
+			r.stop.Unlock()
+			if panicked != nil {
+				panic(panicked)
+			}
+		}()
+		return r.stopOnce(ctx)
+	}
+}
+
+func (r *Remote) stopOnce(ctx context.Context) error {
+	observedRunning := false
 	stopCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	err := r.stopGracefully(stopCtx)
+	err := r.stopGracefullyObserved(stopCtx, &observedRunning)
 	cancel()
 	if err == nil {
 		return nil
@@ -613,7 +685,33 @@ func (r *Remote) Stop(ctx context.Context) error {
 		force = service.ForceStop
 	}
 	if killErr := force(killCtx, service.Engine); killErr != nil {
-		return errors.Join(err, fmt.Errorf("forced engine cleanup failed: %w", killErr))
+		// Neither service shutdown nor forced cleanup completed. Let transport
+		// recovery resume instead of leaving it suppressed by a failed stop.
+		r.mu.Lock()
+		r.stopping = false
+		rpc := r.rpc
+		r.mu.Unlock()
+		joined := errors.Join(err, fmt.Errorf("forced engine cleanup failed: %w", killErr))
+		// Renew may already have observed transport loss and exited while
+		// stopping suppressed disconnect. Always hand this session back.
+		if rpc != nil {
+			r.disconnect(rpc, joined)
+		} else if observedRunning {
+			r.mu.Lock()
+			start := r.rpc == nil && !r.recovering && r.ctx.Err() == nil
+			if start {
+				r.recovering = true
+				r.recovery++
+				r.unownedRecovery = r.recovery
+				r.snapshot.Status = "stopping"
+			}
+			id := r.recovery
+			r.mu.Unlock()
+			if start {
+				go r.recoverConnection(joined, id)
+			}
+		}
+		return joined
 	}
 	r.mu.Lock()
 	rpc := r.rpc
@@ -629,16 +727,23 @@ func (r *Remote) Stop(ctx context.Context) error {
 }
 
 func (r *Remote) stopGracefully(ctx context.Context) error {
+	var observed bool
+	return r.stopGracefullyObserved(ctx, &observed)
+}
+
+func (r *Remote) stopGracefullyObserved(ctx context.Context, observedRunning *bool) error {
 	r.mu.Lock()
 	rpc := r.rpc
 	r.mu.Unlock()
 	if rpc == nil {
-		if status, err := r.queryService(service.Engine); err != nil || status.Stopped {
+		status, err := r.queryService(service.Engine)
+		if err != nil || status.Stopped {
 			r.mu.Lock()
 			r.snapshot = ce.Snapshot{Status: "off"}
 			r.mu.Unlock()
 			return err
 		}
+		*observedRunning = status.Running
 		if err := r.Attach(ctx, false); err != nil {
 			return err
 		}
@@ -648,6 +753,7 @@ func (r *Remote) stopGracefully(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	r.stopping = true
+	instance := r.instance
 	r.mu.Unlock()
 	if err := r.call(ctx, "stop", nil, "", nil); err != nil {
 		r.mu.Lock()
@@ -657,13 +763,21 @@ func (r *Remote) stopGracefully(ctx context.Context) error {
 	}
 	// The acknowledgement precedes the engine's final journal append and
 	// SCM transition. Do not start a replacement until both have completed.
+	r.mu.Lock()
+	if r.instance == instance {
+		r.stopAcknowledged = instance
+		r.snapshot.Status = "stopping"
+	}
+	r.mu.Unlock()
 	if err := r.waitStopped(ctx, service.Engine); err != nil {
 		return err
 	}
 	r.mu.Lock()
-	r.rpc = nil
-	r.snapshot = ce.Snapshot{Status: "off"}
-	r.instance = ""
+	if r.rpc == rpc {
+		r.rpc = nil
+		r.snapshot = ce.Snapshot{Status: "off"}
+		r.instance = ""
+	}
 	r.mu.Unlock()
 	rpc.Close()
 	return nil

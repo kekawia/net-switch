@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -44,24 +46,59 @@ func readControlJournal(t *testing.T, data string) controlJournal {
 // record. The runner's own background traffic crosses the TUN too, so the
 // exactness checks follow one identity: this test process, found by the first
 // echo whose bytes appear exactly once.
-func routedApps(t *testing.T, data string) map[string]usage.RoutedEntry {
+func routedApps(t *testing.T, data string, deadline time.Time) map[string]usage.RoutedEntry {
 	t.Helper()
+	out, err := pollRoutedApps(deadline, 200*time.Millisecond, func() (map[string]usage.RoutedEntry, error) { return readRoutedApps(data) }, func(map[string]usage.RoutedEntry) bool { return true })
+	if err != nil {
+		t.Fatalf("routed usage read: %v; last good read=%+v", err, out)
+	}
+	return out
+}
+
+// All usage observations share the caller's existing deadline. Unreadable
+// snapshots never satisfy an assertion and never replace the last good read.
+func pollRoutedApps(deadline time.Time, interval time.Duration, read func() (map[string]usage.RoutedEntry, error), accept func(map[string]usage.RoutedEntry) bool) (map[string]usage.RoutedEntry, error) {
+	var last map[string]usage.RoutedEntry
+	var lastErr error
+	for time.Now().Before(deadline) {
+		value, err := read()
+		lastErr = err
+		if err == nil {
+			last = value
+			if accept(value) {
+				return last, nil
+			}
+		} else if !usageSharingViolation(err) {
+			return last, err
+		}
+		remaining := time.Until(deadline)
+		if remaining > 0 {
+			time.Sleep(min(interval, remaining))
+		}
+	}
+	return last, fmt.Errorf("usage polling deadline reached; last read error=%v", lastErr)
+}
+
+func usageSharingViolation(err error) bool {
+	return runtime.GOOS == "windows" && (errors.Is(err, syscall.Errno(32)) || errors.Is(err, syscall.Errno(33)))
+}
+
+// Keep the read error separate from an empty record: polling must never accept
+// an unreadable snapshot as evidence of an exact zero-byte total.
+func readRoutedApps(data string) (map[string]usage.RoutedEntry, error) {
 	out := map[string]usage.RoutedEntry{}
 	b, err := os.ReadFile(filepath.Join(data, "usage.json"))
-	if os.IsNotExist(err) {
-		return out
-	}
 	if err != nil {
-		t.Fatal(err)
+		return out, err
 	}
 	routed := usage.LoadRouted(b)
 	if routed == nil {
-		return out
+		return out, nil
 	}
 	for id, e := range routed.Apps {
 		out[id] = *e
 	}
-	return out
+	return out, nil
 }
 
 // quiesceRouted waits until the routed record has not changed for two
@@ -88,22 +125,20 @@ func ownIdentity(t *testing.T) string {
 // seconds) cannot land inside a later measurement's baseline.
 func quiesceRouted(t *testing.T, data, key string) usage.RoutedEntry {
 	t.Helper()
-	last := routedApps(t, data)[key]
-	stableSince := time.Now()
 	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(time.Second)
-		now := routedApps(t, data)[key]
-		if now != last {
+	var last usage.RoutedEntry
+	var stableSince time.Time
+	good, err := pollRoutedApps(deadline, time.Second, func() (map[string]usage.RoutedEntry, error) { return readRoutedApps(data) }, func(values map[string]usage.RoutedEntry) bool {
+		now := values[key]
+		if stableSince.IsZero() || now != last {
 			last, stableSince = now, time.Now()
-			continue
 		}
-		if time.Since(stableSince) >= 12*time.Second {
-			return last
-		}
+		return time.Since(stableSince) >= 12*time.Second
+	})
+	if err != nil {
+		t.Fatalf("routed usage for %q never settled: %v; last good read=%+v", key, err, good)
 	}
-	t.Fatalf("routed usage for %q never settled: %+v", key, last)
-	return usage.RoutedEntry{}
+	return last
 }
 
 // findOwnIdentity settles this process's entry, sends one exact exchange and
@@ -114,14 +149,14 @@ func findOwnIdentity(t *testing.T, ctx context.Context, fixture tunFixture, data
 	before := quiesceRouted(t, data, key)
 	up, down := echoExact(t, ctx, fixture, n)
 	deadline := time.Now().Add(25 * time.Second)
-	for time.Now().Before(deadline) {
-		if e := routedApps(t, data)[key]; e.Up == before.Up+up && e.Down == before.Down+down {
-			return key, e
-		}
-		time.Sleep(200 * time.Millisecond)
+	last, err := pollRoutedApps(deadline, 200*time.Millisecond, func() (map[string]usage.RoutedEntry, error) { return readRoutedApps(data) }, func(values map[string]usage.RoutedEntry) bool {
+		e := values[key]
+		return e.Up == before.Up+up && e.Down == before.Down+down
+	})
+	if err != nil {
+		t.Fatalf("own entry %q did not grow by exactly up=%d down=%d: before=%+v last good=%+v: %v", key, up, down, before, last, err)
 	}
-	t.Fatalf("own entry %q did not grow by exactly up=%d down=%d: before=%+v now=%+v", key, up, down, before, routedApps(t, data)[key])
-	return "", usage.RoutedEntry{}
+	return key, last[key]
 }
 
 // echoExact sends one "ping <marker>" line of about n bytes through the TUN
@@ -280,16 +315,17 @@ func TestNativeControlCutover(t *testing.T) {
 		const n = 16384
 		key, start := findOwnIdentity(t, ctx, fixture, data, n)
 		t.Logf("NATIVE_CONTROL_USAGE_IDENTITY app=%q up=%d down=%d", key, start.Up, start.Down)
-		own := func() usage.RoutedEntry { return routedApps(t, data)[key] }
+		proofDeadline, _ := ctx.Deadline()
+		own := func() usage.RoutedEntry { return routedApps(t, data, proofDeadline)[key] }
 		settle := func(label string, wantUp, wantDown uint64) {
 			deadline := time.Now().Add(25 * time.Second)
-			for time.Now().Before(deadline) {
-				if e := own(); e.Up == wantUp && e.Down == wantDown {
-					return
-				}
-				time.Sleep(200 * time.Millisecond)
+			last, err := pollRoutedApps(deadline, 200*time.Millisecond, func() (map[string]usage.RoutedEntry, error) { return readRoutedApps(data) }, func(values map[string]usage.RoutedEntry) bool {
+				e := values[key]
+				return e.Up == wantUp && e.Down == wantDown
+			})
+			if err != nil {
+				t.Fatalf("%s: want up=%d down=%d, last good=%+v: %v", label, wantUp, wantDown, last, err)
 			}
-			t.Fatalf("timeout: %s: want up=%d down=%d, routed=%+v", label, wantUp, wantDown, routedApps(t, data))
 		}
 		// want* are the exact bytes this process has sent and received so far;
 		// every exchange adds what it actually put on the wire.
@@ -328,7 +364,7 @@ func TestNativeControlCutover(t *testing.T) {
 		wantUp, wantDown = wantUp+up, wantDown+down
 		settle("totals exact after the ack crash", wantUp, wantDown)
 		e := own()
-		t.Logf("NATIVE_CONTROL_USAGE app=%q base_up=%d base_down=%d up=%d down=%d apps=%d exact=true", key, start.Up, start.Down, e.Up, e.Down, len(routedApps(t, data)))
+		t.Logf("NATIVE_CONTROL_USAGE app=%q base_up=%d base_down=%d up=%d down=%d apps=%d exact=true", key, start.Up, start.Down, e.Up, e.Down, len(routedApps(t, data, proofDeadline)))
 	})
 	t.Run("child-crash-counts-one-failure-and-restarts", func(t *testing.T) {
 		before := getStatus(t, c)

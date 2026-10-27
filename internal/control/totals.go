@@ -95,8 +95,23 @@ func (c *Core) readTotals(ctx context.Context, accounting engine.Accounting, gen
 		c.usage.Routed = usage.NewRouted()
 	}
 	changed := false
+	captureFirst := c.usageRecovery != nil && !c.usageRecovery.Full && c.usageRecovery.First == nil
 	for _, page := range pages {
+		if captureFirst {
+			c.observeRecovery(instance, routedCounters(page.Apps), routedCounters(page.Lines))
+		}
 		changed = c.usage.Routed.Absorb(instance, routedCounters(page.Apps), routedCounters(page.Lines)) || changed
+	}
+	// Only identities in the first complete snapshot can overlap original
+	// marks: absent generations have already retired and cannot return. Keep
+	// those entries until merge; later absent identities compact normally.
+	if rec := c.usageRecovery; rec != nil && !rec.Full && rec.First != nil {
+		for id := range rec.First.Apps {
+			apps[id] = true
+		}
+		for id := range rec.First.Lines {
+			lines[id] = true
+		}
 	}
 	changed = c.usage.Routed.Compact(apps, lines) || changed
 	if changed {
@@ -104,7 +119,7 @@ func (c *Core) readTotals(ctx context.Context, accounting engine.Accounting, gen
 	}
 	// Dirty means an earlier commit failed or this read changed something. An
 	// unchanged read after a failed commit must still write before it acks.
-	dirty := c.routedGeneration != c.routedSaved
+	dirty := c.routedGeneration != c.routedSaved || c.usageRecovery != nil || c.usageRecoveryBlocked != nil
 	c.mu.Unlock()
 	if dirty {
 		if err := c.SaveUsage(); err != nil {

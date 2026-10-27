@@ -484,6 +484,7 @@ func (c *Core) Run() {
 		}, func(err error) { c.log("network worker: %v; keeping last good adapter list", err) })
 	})
 	every(time.Minute, func(context.Context) error { return c.SaveUsage() })
+	every(5*time.Second, c.retryUsage)
 	for _, mode := range []string{"meters", "outside"} {
 		if mode == "outside" && c.op.Mode == "proxy" {
 			continue

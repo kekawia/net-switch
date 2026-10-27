@@ -258,7 +258,7 @@ func (c *Core) State() map[string]any {
 	_, policyChanged := js.Object(undo["policy"])["value"]
 	_, others := c.outrankingLocked()
 	updates := c.op.Mode != "proxy" && c.values["checkForUpdates"] == true
-	return map[string]any{
+	state := map[string]any{
 		"mode": c.op.Mode, "elevated": c.elevated, "version": c.op.Version,
 		"update": offer, "updateChecks": updates,
 		"features": map[string]any{"reconnect": true, "combine": true, "lines": true, "installedApps": true},
@@ -280,4 +280,8 @@ func (c *Core) State() map[string]any {
 			"changed":           map[string]any{"cableDefault": metricChanged, "keepBoth": policyChanged},
 		},
 	}
+	if c.usageIssue != "" {
+		state["usageError"] = c.usageIssue
+	}
+	return state
 }
