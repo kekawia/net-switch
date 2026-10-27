@@ -135,7 +135,7 @@ these tests from the spec. Tests check deadlines without sleeping through them.
 
 Existing lifecycle CI includes the new file in its offline contracts. Existing
 main CI includes it under the race detector on Linux x64/ARM64 and Windows x64.
-Review rounds 1–6 are addressed; hosted results and re-review remain pending. No CI
+Review rounds 1–7 are addressed; hosted results and re-review remain pending. No CI
 was watched.
 For review, compare the seven mappings above with the new tests and the original
 round2/round3 consumers. Check fixture cleanup, reconnect publication barriers,
@@ -264,8 +264,10 @@ service, TUN, route, or engine process ran on the PC.
 
 ## Round 6: corruption, compatibility and duplicate saves
 
-Primary history is quarantined only for invalid JSON syntax or a non-object
-top-level value. Per-entry decoding delegates to the existing usage.Load rules:
+Primary decoding is **stricter on shape, same per entry**. Trailing bytes after
+a valid object and a non-object top level are now quarantined; before, they
+were accepted or silently restarted. This does not exactly match the old
+whole-file behavior. Per-entry decoding delegates to the existing usage.Load rules:
 non-numeric/non-finite bytes and missing periodStart are skipped, negative bytes
 are clamped to zero, and invalid peaks are ignored. One bad entry cannot discard
 the other history. Routed counters still use exact uint64 decoding.
@@ -283,3 +285,14 @@ restoring the permanent recovery decode-error return again failed both recovery
 cases. The mutation was reverted and the final run passed 73 leaf cases,
 including all 25 historical traces. Tests also retain the I/O-error blockage
 and later read recovery. Hosted checks and independent re-review are pending.
+
+## Round 7: both quarantine notices and deterministic names
+
+When both history files are corrupt during one startup, their notices append
+rather than overwrite each other. /api/state retains both notices after a
+successful save. Backup timestamps come from the Core clock and are formatted
+in UTC. The regression fixes that clock at UTC+02 and checks the two exact
+`20261019T100000.123456789Z` names and preserved bytes. It failed on the previous
+head because the first notice disappeared and the names used wall time.
+All 14 focused usage recovery/decoding cases passed after the fix. Hosted checks
+and independent re-review remain pending.

@@ -409,3 +409,31 @@ func TestUsageRetryReadsWithoutDuplicateCommit(t *testing.T) {
 		t.Fatal("recent commit delayed a successful recovery merge")
 	}
 }
+
+func TestBothCorruptUsageFilesKeepNoticesAndClockNames(t *testing.T) {
+	base, _, clock, files := testCore(t, map[string]any{"lines": testLines()})
+	clock.mu.Lock()
+	clock.at = time.Date(2026, 10, 19, 12, 0, 0, 123456789, time.FixedZone("test", 2*60*60))
+	clock.mu.Unlock()
+	for _, name := range []string{"usage.json", "usage.recovery.json"} {
+		files.data[filepath.Join("/test", name)] = []byte("broken " + name)
+	}
+	c := usageRestart(t, base, &usageReadFault{Files: files})
+	if err := c.SaveUsage(); err != nil {
+		t.Fatal(err)
+	}
+	notice, _ := c.State()["usageError"].(string)
+	for _, name := range []string{"usage.json", "usage.recovery.json"} {
+		backup := name + ".corrupt-20261019T100000.123456789Z"
+		if !strings.Contains(notice, backup) {
+			t.Errorf("notice omitted %s: %s", backup, notice)
+		}
+		b, err := files.ReadFile(filepath.Join("/test", backup))
+		if err != nil || string(b) != "broken "+name {
+			t.Errorf("exact Core-clock backup %s: %q, %v", backup, b, err)
+		}
+	}
+	if strings.Count(notice, "Corrupt usage history preserved") != 2 {
+		t.Fatal("both notices must survive a successful save", notice)
+	}
+}

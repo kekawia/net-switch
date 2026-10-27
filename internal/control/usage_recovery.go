@@ -69,12 +69,15 @@ func (c *Core) readPrimaryUsage() (usage.Saved, error) {
 }
 
 func (c *Core) quarantineUsage(path string, cause error) error {
-	backup := path + ".corrupt-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+	backup := path + ".corrupt-" + c.op.Clock.Now().UTC().Format("20060102T150405.000000000Z")
 	if renameErr := c.op.IO.Files.Rename(path, backup); renameErr != nil {
 		return fmt.Errorf("corrupt %s could not be preserved: %w", filepath.Base(path), renameErr)
 	}
 	c.mu.Lock()
-	c.usageNotice = fmt.Sprintf("Corrupt usage history preserved as %s; accounting continues: %v", filepath.Base(backup), cause)
+	if c.usageNotice != "" {
+		c.usageNotice += "\n"
+	}
+	c.usageNotice += fmt.Sprintf("Corrupt usage history preserved as %s; accounting continues: %v", filepath.Base(backup), cause)
 	c.mu.Unlock()
 	if c.op.IO.SyncParent != nil {
 		if err := c.op.IO.SyncParent(c.op.UserDir); err != nil {
