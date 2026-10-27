@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"sync/atomic"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/apppath"
@@ -37,14 +39,16 @@ var pinReplaySteps = []pinReplayStep{
 }
 
 // Uses no adapter, engine process, sockets, capture or OS routes. The embedded
-// fake supplies only lifecycle/observation plumbing; Apply is wholly native.
+// fake supplies lifecycle/ack bookkeeping; compilation and decisions are native.
 type pinReplayEngine struct {
 	*fakeEngine
-	files   *memoryFiles
-	check   func(engine.Revision) error
-	want    policy.Config
-	active  *policy.Policy
-	applies int
+	files      *memoryFiles
+	check      func(engine.Revision) error
+	want       policy.Config
+	active     *policy.Policy
+	applies    int
+	guardError error
+	probes     atomic.Uint64
 }
 
 func (e *pinReplayEngine) ForgetLane(string) {} // complete revisions own lanes
@@ -54,7 +58,17 @@ func (e *pinReplayEngine) CloseFlows(context.Context, engine.CloseRequest) (engi
 	return engine.CloseResult{}, fmt.Errorf("pin changes must not close existing flows")
 }
 
-func (e *pinReplayEngine) Apply(_ context.Context, r engine.Revision) (engine.Acknowledgement, error) {
+func (e *pinReplayEngine) Probe(ctx context.Context, r engine.ProbeRequest) engine.ProbeResult {
+	e.probes.Add(1)
+	return e.fakeEngine.Probe(ctx, r)
+}
+
+func (e *pinReplayEngine) Apply(ctx context.Context, r engine.Revision) (ack engine.Acknowledgement, err error) {
+	defer func() {
+		if err != nil {
+			e.guardError = err
+		}
+	}()
 	if e.check != nil {
 		if err := e.check(r); err != nil {
 			return engine.Acknowledgement{}, err
@@ -72,13 +86,14 @@ func (e *pinReplayEngine) Apply(_ context.Context, r engine.Revision) (engine.Ac
 		return engine.Acknowledgement{}, err
 	}
 	e.files.recordOrder("native:apply")
+	ack, err = e.fakeEngine.Apply(ctx, r)
+	if err != nil {
+		return engine.Acknowledgement{}, err
+	}
 	e.active = compiled
 	e.applies++
 	e.mu.Lock()
-	e.s.Policy, e.s.StartedWith = r.Policy, &r.Policy
-	e.s.AppliedRevision, e.s.AppliedHash = r.Number, r.Hash
-	e.s.AppliedPoint++
-	ack := engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: e.s.Instance, Point: e.s.AppliedPoint}
+	e.s.StartedWith = &r.Policy
 	e.mu.Unlock()
 	e.files.recordOrder("native:ack")
 	return ack, nil
@@ -127,6 +142,7 @@ func TestNativeAPIPinReplay(t *testing.T) {
 	}
 	c, base, clock, files := testCore(t, initial.Settings)
 	c.op.ServiceMode = true
+	base.ackPoint = 1
 	e := &pinReplayEngine{fakeEngine: base, files: files}
 	c.op.Engine = e
 	// Recorded startup inputs establish the suffix precondition. Startup itself
@@ -145,13 +161,21 @@ func TestNativeAPIPinReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &HTTP{Core: c, Port: 47821, Token: "native-replay"}
+	clock.afterImmediate = true
+	platformCalls := func() int {
+		p := c.op.Platform.(*fakePlatform)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.calls)
+	}
 	files.observeAllWrites = true
-	startCalls := len(base.calls)
 	for _, step := range pinReplaySteps {
 		t.Run(step.name, func(t *testing.T) {
 			orderStart, logsStart, eventsStart := len(files.order), len(files.logs), len(files.events)
 			applies := e.applies
+			callsBefore := len(base.calls)
 			previous := e.Snapshot()
+			waitsBefore, probesBefore, platformBefore := clock.afterCalls.Load(), e.probes.Load(), platformCalls()
 			var input struct {
 				Method, Route string
 				Body          json.RawMessage
@@ -191,6 +215,13 @@ func TestNativeAPIPinReplay(t *testing.T) {
 				}
 				for _, seq := range step.rules {
 					entry(seq, "write", "output", step.name+" native revision")
+				}
+				before, err := files.ReadFile(filepath.Join("/test", "settings.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if reflect.DeepEqual(replayJSON(t, before), documentValues[0]) {
+					t.Fatal("precondition: settings.json already matches the requested change")
 				}
 				var wait struct{ MS int }
 				if err := json.Unmarshal(entry(step.barrier, "timer-completion", "input", step.name+" acknowledgement"), &wait); err != nil || wait.MS != 300 {
@@ -239,6 +270,15 @@ func TestNativeAPIPinReplay(t *testing.T) {
 			response := httptest.NewRecorder()
 			h.ServeHTTP(response, req)
 			files.recordOrder("api")
+			if e.guardError != nil {
+				t.Fatalf("native apply guard: %v", e.guardError)
+			}
+			if calls := clock.afterCalls.Load() - waitsBefore; calls != 0 {
+				t.Fatalf("request called Clock.After %d times; native acknowledgement must not add a reload wait", calls)
+			}
+			if e.probes.Load() != probesBefore || platformCalls() != platformBefore {
+				t.Fatalf("request performed unexpected I/O: probes %d -> %d, platform calls %d -> %d", probesBefore, e.probes.Load(), platformBefore, platformCalls())
+			}
 			if response.Code != expected.Status || !reflect.DeepEqual(replayJSON(t, response.Body.Bytes()), wantBody) {
 				t.Fatalf("response entry %d: status %d body %s; want %s", step.api, response.Code, response.Body, expected.Body)
 			}
@@ -251,19 +291,21 @@ func TestNativeAPIPinReplay(t *testing.T) {
 				}
 			}
 			wantOrder := []string{"api"}
+			var wantCalls []string
 			wantApplies := applies
 			if step.settings >= 0 {
 				wantApplies++
+				wantCalls = []string{"apply"}
 				wantOrder = []string{"write:control-journal.json", "write:control-journal.json.bak", "write:settings.json", "write:settings.json.bak", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "api"}
 			}
 			if !reflect.DeepEqual(files.order[orderStart:], wantOrder) {
 				t.Fatalf("semantic ledger: %v; want %v", files.order[orderStart:], wantOrder)
 			}
-			if e.applies != wantApplies || len(base.calls) != startCalls || len(files.logs) != logsStart || len(files.events) != eventsStart {
+			if e.applies != wantApplies || !slices.Equal(base.calls[callsBefore:], wantCalls) || len(files.logs) != logsStart || len(files.events) != eventsStart {
 				t.Fatal("unexpected apply, lifecycle/closure, log or event", base.calls, files.logs[logsStart:])
 			}
 			if clock.Now().UnixMilli() != snapshot.Now {
-				t.Fatal("native acknowledgement introduced a reload sleep")
+				t.Fatal("response returned at a different snapshot time")
 			}
 			for _, owner := range []string{`c:\apps\firefox.exe`, `c:\apps\other.exe`, ""} {
 				want := "a1"
