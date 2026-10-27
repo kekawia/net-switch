@@ -172,6 +172,8 @@ type Core struct {
 	usageRecovery        *usageRecoveryRecord
 	usageRecoveryBlocked error
 	usageIssue           string
+	usageNotice          string
+	usageLastSave        time.Time // protected by usageWrite
 	// routedGeneration counts routed-usage changes; routedSaved is the last
 	// generation written durably. Unequal means unacknowledged accounting is
 	// not yet on disk, whatever the next engine read says.
@@ -1226,7 +1228,7 @@ func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
 func (c *Core) SaveUsage() error {
 	c.usageWrite.Lock()
 	defer c.usageWrite.Unlock()
-	return c.saveUsage()
+	return c.saveUsage(false)
 }
 func (c *Core) Shutdown(ctx context.Context) error {
 	// quitting holds off new starts while the stop intent is written. It is

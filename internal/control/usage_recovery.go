@@ -30,18 +30,21 @@ func emptyUsageSaved() usage.Saved {
 }
 
 func decodeUsage(b []byte) (usage.Saved, error) {
-	s := emptyUsageSaved()
-	if err := json.Unmarshal(b, &s); err != nil {
-		return s, err
+	if !json.Valid(b) {
+		return usage.Saved{}, errors.New("invalid usage JSON syntax")
 	}
-	if s.Lines == nil {
-		s.Lines = map[string]usage.Entry{}
+	v, err := js.Decode(b)
+	if err != nil {
+		return usage.Saved{}, err
 	}
-	if s.Peaks == nil {
-		s.Peaks = map[string]float64{}
+	object, ok := v.(map[string]any)
+	if !ok {
+		return usage.Saved{}, errors.New("usage history must be a JSON object")
 	}
-	s.Routed = usage.LoadRouted(b)
-	return s, nil
+	u := usage.New(time.UTC)
+	u.Load(object)                 // preserve the existing lenient per-entry validation
+	u.Routed = usage.LoadRouted(b) // routed counters retain exact uint64 values
+	return u.Saved, nil
 }
 
 // Read and, if necessary, quarantine corruption before permitting publication.
@@ -59,17 +62,27 @@ func (c *Core) readPrimaryUsage() (usage.Saved, error) {
 		return s, nil
 	}
 	path := filepath.Join(c.op.UserDir, "usage.json")
+	if err := c.quarantineUsage(path, err); err != nil {
+		return usage.Saved{}, err
+	}
+	return emptyUsageSaved(), nil
+}
+
+func (c *Core) quarantineUsage(path string, cause error) error {
 	backup := path + ".corrupt-" + time.Now().UTC().Format("20060102T150405.000000000Z")
 	if renameErr := c.op.IO.Files.Rename(path, backup); renameErr != nil {
-		return usage.Saved{}, fmt.Errorf("corrupt usage history could not be preserved: %w", renameErr)
+		return fmt.Errorf("corrupt %s could not be preserved: %w", filepath.Base(path), renameErr)
 	}
+	c.mu.Lock()
+	c.usageNotice = fmt.Sprintf("Corrupt usage history preserved as %s; accounting continues: %v", filepath.Base(backup), cause)
+	c.mu.Unlock()
 	if c.op.IO.SyncParent != nil {
 		if err := c.op.IO.SyncParent(c.op.UserDir); err != nil {
-			return usage.Saved{}, err
+			return err
 		}
 	}
-	c.log("corrupt usage history preserved as %s: %v", filepath.Base(backup), err)
-	return emptyUsageSaved(), nil
+	c.usageProblem(nil)
+	return nil
 }
 
 func (c *Core) usageProblem(err error) {
@@ -78,6 +91,9 @@ func (c *Core) usageProblem(err error) {
 		message = "Usage history unavailable; routing continues: " + err.Error()
 	}
 	c.mu.Lock()
+	if message == "" {
+		message = c.usageNotice
+	}
 	changed := c.usageIssue != message
 	c.usageIssue = message
 	c.mu.Unlock()
@@ -116,10 +132,22 @@ func (c *Core) loadUsage() {
 }
 
 func (c *Core) readRecoveryUsage() (*usageRecoveryRecord, error) {
-	b, err := c.op.IO.Files.ReadFile(filepath.Join(c.op.UserDir, "usage.recovery.json"))
+	path := filepath.Join(c.op.UserDir, "usage.recovery.json")
+	b, err := c.op.IO.Files.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
+	rec, err := decodeRecoveryUsage(b)
+	if err == nil {
+		return rec, nil
+	}
+	if err := c.quarantineUsage(path, err); err != nil {
+		return nil, err
+	}
+	return nil, fs.ErrNotExist
+}
+
+func decodeRecoveryUsage(b []byte) (*usageRecoveryRecord, error) {
 	var rec usageRecoveryRecord
 	if err := json.Unmarshal(b, &rec); err != nil {
 		return nil, err
@@ -273,11 +301,13 @@ func mergeUsage(old, recent usage.Saved, first *usage.Routed) usage.Saved {
 // SaveUsage owns usageWrite. The recovery commit is an equally durable receipt
 // for ackTotals while primary history is unavailable. A failed recovery
 // commit still refuses acknowledgement.
-func (c *Core) saveUsage() error {
+func (c *Core) saveUsage(retry bool) error {
+	progress := false
 	if c.usageRecoveryBlocked != nil {
 		if err := c.resumeUsageRecovery(); err != nil {
 			return fmt.Errorf("usage recovery file is unreadable: %w", err)
 		}
+		progress = true
 	}
 	c.mu.Lock()
 	rec := c.usageRecovery
@@ -289,9 +319,15 @@ func (c *Core) saveUsage() error {
 			c.usage.Saved = mergeUsage(primary, c.usage.Saved, rec.First)
 			rec.Full, rec.First = true, nil
 			c.mu.Unlock()
+			progress = true
 		} else {
 			c.usageProblem(err)
 		}
+	}
+	// Still perform recovery reads, but avoid a second write just after the
+	// accounting consumer committed. Successful read/merge progress is exempt.
+	if elapsed := c.op.Clock.Now().Sub(c.usageLastSave); retry && !progress && !c.usageLastSave.IsZero() && elapsed >= 0 && elapsed < 3*time.Second {
+		return nil
 	}
 	c.mu.Lock()
 	generation := c.routedGeneration
@@ -343,15 +379,18 @@ func (c *Core) saveUsage() error {
 	c.mu.Lock()
 	c.routedSaved = max(c.routedSaved, generation)
 	c.mu.Unlock()
+	c.usageLastSave = c.op.Clock.Now()
 	return nil
 }
 
 func (c *Core) retryUsage(context.Context) error {
 	c.mu.Lock()
-	pending := c.usageRecovery != nil || c.usageRecoveryBlocked != nil || c.usageIssue != ""
+	pending := c.usageRecovery != nil || c.usageRecoveryBlocked != nil || (c.usageIssue != "" && c.usageIssue != c.usageNotice)
 	c.mu.Unlock()
 	if pending {
-		return c.SaveUsage()
+		c.usageWrite.Lock()
+		defer c.usageWrite.Unlock()
+		return c.saveUsage(true)
 	}
 	return nil
 }

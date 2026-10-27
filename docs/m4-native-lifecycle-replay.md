@@ -135,7 +135,7 @@ these tests from the spec. Tests check deadlines without sleeping through them.
 
 Existing lifecycle CI includes the new file in its offline contracts. Existing
 main CI includes it under the race detector on Linux x64/ARM64 and Windows x64.
-Review rounds 1–5 are addressed; hosted results and re-review remain pending. No CI
+Review rounds 1–6 are addressed; hosted results and re-review remain pending. No CI
 was watched.
 For review, compare the seven mappings above with the new tests and the original
 round2/round3 consumers. Check fixture cleanup, reconnect publication barriers,
@@ -206,6 +206,9 @@ background retry and accounting saves retry the read; the old startup-lockout
 test is replaced. Corrupt content is renamed to `usage.json.corrupt-<UTC time>`;
 failed rename keeps the main file paused and visible as an error.
 
+`usageError` is API-only in this PR. Rendering it in the window and tray is a
+follow-up for desktop work, after the design is approved. No UI is added here.
+
 Pausing the main file must not fill the engine's retained set. Each accounting
 receipt is committed atomically, with the existing sync hooks and trusted folder
 permissions, to `usage.recovery.json` before ackTotals. That file contains a
@@ -234,6 +237,11 @@ because the full recovery commit is already durable. Failed recovery writes
 refuse acks and retry, preserving the existing engine capacity behavior. An
 unreadable recovery file is likewise preserved, buffered observations remain
 unacknowledged, and background reads retry it rather than latching until restart.
+An undecodable recovery record is different from an I/O error: round 6 preserves
+it as `usage.recovery.json.corrupt-<UTC time>` and continues accounting. Failed
+quarantine stays blocked. The quarantine notice remains in /api/state and logs
+for this Control lifetime, including after a successful save, so corruption is
+not silently hidden by resumed accounting.
 
 Tests cover uninterrupted routing startup, durable acks through multiple retired
 generations, a restart while the original is still unreadable, removal after
@@ -253,3 +261,25 @@ Final focused validation: 68 leaf cases, including all 25 frozen traces and
 7,894 entries. All local runs used Idle priority, GOMAXPROCS=2 and -p=2. Hosted
 race, installed-service results and independent review remain pending. No
 service, TUN, route, or engine process ran on the PC.
+
+## Round 6: corruption, compatibility and duplicate saves
+
+Primary history is quarantined only for invalid JSON syntax or a non-object
+top-level value. Per-entry decoding delegates to the existing usage.Load rules:
+non-numeric/non-finite bytes and missing periodStart are skipped, negative bytes
+are clamped to zero, and invalid peaks are ignored. One bad entry cannot discard
+the other history. Routed counters still use exact uint64 decoding.
+
+The background retry still attempts recovery reads on its five-second cadence.
+Under the same usageWrite lock, it skips a redundant commit if a durable save
+completed less than three seconds ago. Successful read/merge progress bypasses
+that suppression. Accounting's commit-before-ack path is never throttled, and a
+quarantine notice alone does not schedule repeated saves.
+
+All five new leaf cases failed on the previous head: both corrupt-recovery
+cases remained blocked, mixed entries lost good data, negative bytes remained
+negative, and a retry duplicated a recent durable write. An explicit mutation
+restoring the permanent recovery decode-error return again failed both recovery
+cases. The mutation was reverted and the final run passed 73 leaf cases,
+including all 25 historical traces. Tests also retain the I/O-error blockage
+and later read recovery. Hosted checks and independent re-review are pending.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"syscall"
@@ -27,7 +28,7 @@ type usageReadFault struct {
 }
 
 func (f *usageReadFault) Rename(from, to string) error {
-	if strings.Contains(to, "usage.json.corrupt-") && f.renameError != nil {
+	if (strings.Contains(to, "usage.json.corrupt-") || strings.Contains(to, "usage.recovery.json.corrupt-")) && f.renameError != nil {
 		return f.renameError
 	}
 	return f.Files.Rename(from, to)
@@ -302,5 +303,109 @@ func TestUsageStartupSharingRetry(t *testing.T) {
 				t.Fatal("sharing conflict not retried", sleeps, fault.reads, c.usage.Lines)
 			}
 		})
+	}
+}
+
+func TestCorruptRecoveryQuarantinedContinuesAccounting(t *testing.T) {
+	for _, blocked := range []bool{false, true} {
+		t.Run(fmt.Sprint(blocked), func(t *testing.T) {
+			base, e, _, files := testCore(t, map[string]any{"lines": testLines()})
+			path := filepath.Join("/test", "usage.recovery.json")
+			files.data[path] = []byte("broken recovery")
+			fault := &usageReadFault{Files: files}
+			if blocked {
+				fault.renameError = errors.New("rename denied")
+			}
+			c := usageRestart(t, base, fault)
+			table := accountingTable(t)
+			acct := &accountingEngine{fakeEngine: e, table: table}
+			transfer(t, table, "C:/apps/recovered.exe", 3, 4)
+			if blocked {
+				if err := c.readTotals(context.Background(), acct, c.generation); err == nil || acct.acks != 0 {
+					t.Fatal("failed quarantine acknowledged", err, acct.acks)
+				}
+				if b, _ := files.ReadFile(path); string(b) != "broken recovery" {
+					t.Fatal("failed quarantine altered file")
+				}
+				fault.renameError = nil
+			}
+			if err := c.readTotals(context.Background(), acct, c.generation); err != nil || acct.acks != 1 {
+				t.Fatal("corrupt recovery still stalls accounting", err, acct.acks)
+			}
+			found := false
+			for name, b := range files.data {
+				if strings.HasPrefix(name, path+".corrupt-") {
+					if _, err := time.Parse("20060102T150405.000000000Z", strings.TrimPrefix(name, path+".corrupt-")); err != nil {
+						t.Fatal(err)
+					}
+					found = string(b) == "broken recovery"
+				}
+			}
+			if !found || c.State()["usageError"] == nil {
+				t.Fatal("quarantine or visible warning missing", found, c.State()["usageError"])
+			}
+			if got := routedUsage(t, files).Apps[apps.AppKey("C:/apps/recovered.exe")]; got == nil || got.Up != 3 || got.Down != 4 {
+				t.Fatal("new accounting lost", got)
+			}
+		})
+	}
+}
+
+func TestUsageDecodeKeepsLenientEntries(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       map[string]usage.Entry
+	}{
+		{"mixed", `{"lines":{"a1":{"bytes":12,"periodStart":1},"bad":{"bytes":"oops","periodStart":1},"missing":{"bytes":8},"overflow":{"bytes":1e400,"periodStart":1}},"peaks":{"a1":7,"bad":"oops"}}`, map[string]usage.Entry{"a1": {Bytes: 12, PeriodStart: 1}}},
+		{"negative", `{"lines":{"a1":{"bytes":-12,"periodStart":1}},"peaks":{"a1":-7}}`, map[string]usage.Entry{"a1": {Bytes: 0, PeriodStart: 1}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, _, _, files := testCore(t, map[string]any{"lines": testLines()})
+			path := filepath.Join("/test", "usage.json")
+			files.data[path] = []byte(tc.body)
+			saved, err := base.readPrimaryUsage()
+			if err != nil || !reflect.DeepEqual(saved.Lines, tc.want) {
+				t.Fatal("legacy entry rules changed", saved.Lines, err)
+			}
+			if b, err := files.ReadFile(path); err != nil || string(b) != tc.body {
+				t.Fatal("parseable history quarantined", err)
+			}
+			if tc.name == "negative" && len(saved.Peaks) != 0 {
+				t.Fatal("negative peak retained", saved.Peaks)
+			}
+		})
+	}
+}
+
+func TestUsageRetryReadsWithoutDuplicateCommit(t *testing.T) {
+	base, _, clock, files := testCore(t, map[string]any{"lines": testLines()})
+	fault := &usageReadFault{Files: files, err: os.ErrPermission, remaining: 1000}
+	c := usageRestart(t, base, fault)
+	if err := c.SaveUsage(); err != nil {
+		t.Fatal(err)
+	}
+	writes, reads := len(files.writes), fault.reads
+	clock.advance(1000)
+	if err := c.retryUsage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fault.reads <= reads || len(files.writes) != writes {
+		t.Fatal("retry skipped reading or duplicated recent durable commit", fault.reads, reads, len(files.writes), writes)
+	}
+	clock.advance(3000)
+	if err := c.retryUsage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(files.writes) <= writes {
+		t.Fatal("retry never resumes saving")
+	}
+	// Read progress must be published immediately, even just after a save.
+	fault.remaining = 0
+	files.data[filepath.Join("/test", "usage.json")] = []byte(`{"lines":{"a1":{"bytes":10,"periodStart":1}},"peaks":{}}`)
+	if err := c.retryUsage(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if c.usageRecovery != nil || c.usage.Lines["a1"].Bytes != 10 {
+		t.Fatal("recent commit delayed a successful recovery merge")
 	}
 }
