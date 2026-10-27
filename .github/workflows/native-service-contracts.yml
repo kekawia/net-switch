@@ -8,6 +8,10 @@ on:
     paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'scripts/run-native-proof.mjs', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
   workflow_dispatch:
     inputs:
+      kvm_probe:
+        description: 'Only inspect KVM availability; no build, engine or guest'
+        type: boolean
+        default: false
       runner:
         description: 'One runner for focused diagnostics; ordinary PRs use the full matrix'
         type: choice
@@ -26,7 +30,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  kvm-probe:
+    if: github.event_name == 'workflow_dispatch' && inputs.kvm_probe
+    name: KVM availability / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 3
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-24.04]
+    steps:
+      - name: Inspect KVM device and API without creating a guest
+        shell: bash
+        run: |
+          uname -a
+          id
+          if [ ! -e /dev/kvm ]; then
+            echo 'KVM_PROBE device=absent usable=false'
+            exit 0
+          fi
+          ls -l /dev/kvm
+          sudo python3 -c 'import os,fcntl; fd=os.open("/dev/kvm",os.O_RDWR|os.O_CLOEXEC); api=fcntl.ioctl(fd,0xAE00,0); print("KVM_PROBE device=present usable="+str(api==12).lower()+" api="+str(api)); os.close(fd); assert api==12'
   services:
+    if: ${{ !inputs.kvm_probe }}
     name: Native services / ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
