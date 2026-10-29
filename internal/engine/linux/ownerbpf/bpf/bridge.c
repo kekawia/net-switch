@@ -49,6 +49,9 @@ static void *(*lookup)(void *, const void *) = (void *)1;
 static long (*update)(void *, const void *, const void *, u64) = (void *)2;
 static long (*erase)(void *, const void *) = (void *)3;
 static u32 (*cpu_id)(void) = (void *)8;
+#ifdef NS_OWNER_PROOF_FAULTS
+static u64 (*ktime_ns)(void) = (void *)5;
+#endif
 static u64 (*pid_tgid)(void) = (void *)14;
 static void *(*current_task)(void) = (void *)35;
 static u64 (*socket_cookie)(void *) = (void *)46;
@@ -204,12 +207,57 @@ INLINE int terminal(struct sk_buff *skb, u32 kind) {
     s->packet = p;
     return 0;
 }
+INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
+#ifdef NS_OWNER_PROOF_FAULTS
+    /* Fixture-only, bounded preemption window. Does not invent a skip or edit
+     * evidence/counters: the kernel recursion guard must cause the refusal.
+     * reserved = {active pid_tgid, release, ended}; mode 8 holds consume,
+     * mode 16 holds free. Neither path is present in the normal object.
+     * 20k iterations bounds the verifier and runtime work even if control dies. */
+    u32 zero = 0;
+    struct ns_faults *f = lookup(&faults, &zero);
+    struct ns_config *cfg = lookup(&config, &zero);
+    struct net_device *dev = 0;
+    if (f && cfg && f->mode == mode && f->epoch == cfg->epoch &&
+        f->cpu == cpu_id() && !f->hits &&
+        !READ(dev, skb->dev) && selected(dev, cfg)) {
+        __sync_fetch_and_add(&f->hits, 1);
+        f->reserved[0] = pid_tgid();
+        u64 start = ktime_ns();
+        for (u32 i = 0; i < 20000; i++) {
+            if (*(volatile u64 *)&f->reserved[1] || ktime_ns() - start >= 20000000)
+                break;
+        }
+        f->reserved[2] = 1;
+    }
+#endif
+}
 SEC("raw_tracepoint/consume_skb") int consume(struct raw_args *ctx) {
+    proof_hold(8, (void *)ctx->args[0]);
     return terminal((void *)ctx->args[0], NS_TERMINAL_CONSUME);
 }
 SEC("raw_tracepoint/kfree_skb") int freed(struct raw_args *ctx) {
+    proof_hold(16, (void *)ctx->args[0]);
     return terminal((void *)ctx->args[0], NS_TERMINAL_FREE);
 }
+
+#ifdef NS_OWNER_PROOF_FAULTS
+/* Independent observer: proves a terminal occurred in the interrupted task
+ * while the primary free callback was held. It never supplies provenance or
+ * modifies packet records. mode 16 uses address as the observation count. */
+SEC("raw_tracepoint/kfree_skb") int observe_nested_free(struct raw_args *ctx) {
+    u32 zero = 0;
+    struct ns_faults *f = lookup(&faults, &zero);
+    struct ns_config *cfg = lookup(&config, &zero);
+    struct sk_buff *skb = (void *)ctx->args[0];
+    struct net_device *dev = 0;
+    if (f && cfg && f->mode == 16 && f->epoch == cfg->epoch &&
+        f->reserved[0] == pid_tgid() && !f->reserved[2] &&
+        !READ(dev, skb->dev) && selected(dev, cfg))
+        __sync_fetch_and_add(&f->address, 1);
+    return 0;
+}
+#endif
 
 /* Fixture-only positive control. trace_entry is 8 bytes on both adapters.
  * The skb pointer field's actual tracefs offset is checked before attachment.

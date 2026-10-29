@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -50,6 +51,7 @@ type Bridge struct {
 	links                                                     []link.Link
 	slots, health                                             []byte
 	mu                                                        sync.Mutex
+	activeReads                                               sync.WaitGroup
 	readers                                                   [ReaderLimit]bool
 	next                                                      uint64
 	stopped                                                   bool
@@ -129,6 +131,13 @@ func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
 		return nil, fmt.Errorf("perf tracepoint consume_skb counter: %w", err)
 	}
 	b.links = append(b.links, perf)
+	if observer := c.Programs["observe_nested_free"]; observer != nil {
+		l, e := link.AttachRawTracepoint(link.RawTracepointOptions{Name: "kfree_skb", Program: observer})
+		if e != nil {
+			return nil, fmt.Errorf("fixture raw free observer: %w", e)
+		}
+		b.links = append(b.links, l)
+	}
 	// Terminals precede capture. Reverse close detaches capture first.
 	for _, a := range [][2]string{{"consume", "consume_skb"}, {"freed", "kfree_skb"}, {"capture", "net_dev_start_xmit"}} {
 		l, e := link.AttachRawTracepoint(link.RawTracepointOptions{Name: a[1], Program: c.Programs[a[0]]})
@@ -146,10 +155,16 @@ func checkBridgeSpec(s *ebpf.CollectionSpec) error {
 		"read_slots": {uint32(ebpf.Array), 4, 256, ReaderLimit}, "config": {uint32(ebpf.Array), 4, 64, 1},
 		"health": {uint32(ebpf.Array), 4, 64, 1}, "cpu_state": {uint32(ebpf.PerCPUArray), 4, 128, 1},
 	}
+	programCount := 5
 	if s.Maps["faults"] != nil {
 		want["faults"] = [4]uint32{uint32(ebpf.Array), 4, 64, 1}
+		programCount++
+		observer := s.Programs["observe_nested_free"]
+		if observer == nil || observer.Type != ebpf.RawTracepoint || observer.License != "Dual MIT/GPL" {
+			return errors.New("fault object lacks its independent nested-free observer")
+		}
 	}
-	if len(s.Maps) != len(want) || len(s.Programs) != 5 {
+	if len(s.Maps) != len(want) || len(s.Programs) != programCount {
 		return errors.New("unexpected bridge object map/program set")
 	}
 	for name, w := range want {
@@ -235,13 +250,15 @@ func (b *Bridge) Enable(actualQueue uint64) error {
 func (b *Bridge) Faults() uint64 { return atomic.LoadUint64((*uint64)(unsafe.Pointer(&b.health[0]))) }
 
 type BridgeReader struct {
-	b        *Bridge
-	key      ReaderKey
-	reg      ReaderRegistration
-	slot     *ReaderSlot
-	guard    *BurstGuard
-	sequence uint64
-	closed   bool
+	Measure              bool
+	LastSample, LastHold time.Duration
+	b                    *Bridge
+	key                  ReaderKey
+	reg                  ReaderRegistration
+	slot                 *ReaderSlot
+	guard                *BurstGuard
+	sequence             uint64
+	closed               bool
 }
 
 func (b *Bridge) Register() (_ *BridgeReader, err error) {
@@ -294,16 +311,29 @@ type ReadFrame struct {
 // ReadBurst returns no frame until all post-burst queries finish. It requests,
 // but does not fake completion of, the caller's full quiesced collection reload.
 func (r *BridgeReader) ReadBurst(fd int, limit int) ([]ReadFrame, error) {
+	return r.readBurst(fd, limit, unix.Read)
+}
+
+func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int, error)) ([]ReadFrame, error) {
+	var started time.Time
+	if r.Measure {
+		started = time.Now()
+		defer func() { r.LastHold = time.Since(started) }()
+	}
 	if r.closed || uint32(unix.Gettid()) != r.key.TID || limit < 1 || limit > BurstLimit {
 		return nil, errors.New("invalid reader thread/burst bound")
 	}
 	b := r.b
 	b.mu.Lock()
 	stopped := b.stopped
+	if !stopped {
+		b.activeReads.Add(1)
+	}
 	b.mu.Unlock()
 	if stopped {
 		return nil, ErrEpochRebuild
 	}
+	defer b.activeReads.Done()
 	frames := make([]ReadFrame, 0, limit)
 	var readFailure error
 	for len(frames) < limit {
@@ -317,7 +347,7 @@ func (r *BridgeReader) ReadBurst(fd int, limit int) ([]ReadFrame, error) {
 		r.slot.Control = ReadControl{ABI: ProvenanceABI, Registration: r.reg.Generation, Epoch: r.reg.Epoch, Sequence: r.sequence}
 		data := make([]byte, 65536)
 		atomic.StoreUint64(&r.slot.Control.Armed, 1)
-		n, e := unix.Read(fd, data)
+		n, e := read(fd, data)
 		_ = atomic.LoadUint64(&r.slot.Completion.Count)
 		snapshot := *r.slot
 		atomic.StoreUint64(&r.slot.Control.Armed, 0)
@@ -337,7 +367,7 @@ func (r *BridgeReader) ReadBurst(fd int, limit int) ([]ReadFrame, error) {
 			}
 		}
 		if decision.Rebuild {
-			readFailure = ErrEpochRebuild
+			readFailure = errors.Join(ErrEpochRebuild, e)
 			break
 		}
 		if errors.Is(e, unix.EAGAIN) {
@@ -351,8 +381,15 @@ func (r *BridgeReader) ReadBurst(fd int, limit int) ([]ReadFrame, error) {
 			break
 		}
 	}
+	var sampleStart time.Time
+	if r.Measure {
+		sampleStart = time.Now()
+	}
 	burstBarrier()
 	after, sampleErr := b.Sample()
+	if r.Measure {
+		r.LastSample = time.Since(sampleStart)
+	}
 	valid := r.guard.Certify(after, sampleErr)
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -418,6 +455,23 @@ func (b *Bridge) Close() error {
 		}
 	}
 	return b.closeObjects()
+}
+
+// Stop closes the shared publication gate before joining in-flight bursts.
+// The owner then closes the TUN (disposing queued packets), unregisters readers,
+// and closes this collection. A new epoch uses a fresh collection, never Reset.
+func (b *Bridge) Stop() error {
+	b.mu.Lock()
+	b.stopped = true
+	b.mu.Unlock()
+	b.activeReads.Wait()
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.Collection == nil {
+		return nil
+	}
+	b.config.Enabled = 0
+	return b.Collection.Maps["config"].Update(uint32(0), b.config, ebpf.UpdateAny)
 }
 
 func (b *Bridge) closeObjects() error {

@@ -28,7 +28,7 @@ type bridgeFixture struct {
 	epoch uint64
 }
 
-func newBridgeFixture(t *testing.T, fault bool) *bridgeFixture {
+func newBridgeFixture(t *testing.T, fault bool, receiveFlags ...uint16) *bridgeFixture {
 	t.Helper()
 	if os.Geteuid() != 0 || os.Getenv("NS_OWNERBPF_PROOF") != "1" {
 		t.Fatal("hosted root proof required")
@@ -95,7 +95,11 @@ func newBridgeFixture(t *testing.T, fault bool) *bridgeFixture {
 	if e != nil {
 		t.Fatal(e)
 	}
-	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_TUN_EXCL)
+	flags := uint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_TUN_EXCL)
+	for _, extra := range receiveFlags {
+		flags |= extra
+	}
+	ifr.SetUint16(flags)
 	if e = unix.IoctlIfreq(f.fd, unix.TUNSETIFF, ifr); e != nil {
 		t.Fatal(e)
 	}
@@ -238,6 +242,11 @@ func TestBridgeQueuedPair(t *testing.T) {
 
 func TestBridgeConcurrentDrops(t *testing.T) {
 	f := newBridgeFixture(t, false)
+	initialLink, err := netlink.LinkByName("nsbridge0")
+	if err != nil || initialLink.Attrs().Statistics == nil {
+		t.Fatal("kernel drop counter precondition", err)
+	}
+	initialDrops := initialLink.Attrs().Statistics.TxDropped
 	const senders = 2
 	var sockets [senders]int
 	var cookies [senders]uint64
@@ -250,6 +259,10 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 		cookies[i] = c
 	}
 	var wg sync.WaitGroup
+	var ready sync.WaitGroup
+	ready.Add(senders)
+	start := make(chan struct{})
+	var started, ended [senders]time.Time
 	errCh := make(chan error, senders)
 	for i := range senders {
 		wg.Add(1)
@@ -262,9 +275,14 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 			var set unix.CPUSet
 			set.Set(i)
 			if e := unix.SchedSetaffinity(0, &set); e != nil {
+				ready.Done()
 				errCh <- e
 				return
 			}
+			ready.Done()
+			<-start
+			started[i] = time.Now()
+			defer func() { ended[i] = time.Now() }()
 			for j := range 600 {
 				var p [8]byte
 				binary.BigEndian.PutUint32(p[:4], uint32(i))
@@ -276,10 +294,15 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 			}
 		}()
 	}
+	ready.Wait()
+	close(start)
 	wg.Wait()
 	close(errCh)
 	for e := range errCh {
 		t.Fatal(e)
+	}
+	if !started[0].Before(ended[1]) || !started[1].Before(ended[0]) {
+		t.Fatal("sender execution intervals did not overlap", started, ended)
 	}
 	var states []CPUState
 	if e := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); e != nil {
@@ -293,7 +316,16 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 	if captured != 1200 || dropped == 0 {
 		t.Fatalf("drop precondition captured=%d dropped=%d", captured, dropped)
 	}
+	afterLink, err := netlink.LinkByName("nsbridge0")
+	if err != nil || afterLink.Attrs().Statistics == nil {
+		t.Fatal("kernel drop counter readback", err)
+	}
+	kernelDrops := afterLink.Attrs().Statistics.TxDropped - initialDrops
+	if kernelDrops != dropped {
+		t.Fatalf("independent kernel drop counter=%d BPF frees=%d", kernelDrops, dropped)
+	}
 	delivered := 0
+	var seen [senders][600]bool
 	for {
 		frames, e := f.r.ReadBurst(f.fd, BurstLimit)
 		if e != nil {
@@ -307,9 +339,14 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 				t.Fatal("short packet")
 			}
 			i := binary.BigEndian.Uint32(fr.Data[28:32])
+			sequence := binary.BigEndian.Uint32(fr.Data[32:36])
 			if i >= senders || fr.Decision.Status != ReadCookie || fr.Decision.Packet.Cookie != cookies[i] {
 				t.Fatalf("payload/cookie swap: sender=%d result=%+v", i, fr.Decision)
 			}
+			if sequence >= 600 || seen[i][sequence] {
+				t.Fatal("invalid or duplicate independently labelled datagram", i, sequence)
+			}
+			seen[i][sequence] = true
 			delivered++
 		}
 	}
@@ -324,7 +361,7 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 	if uint64(delivered)+dropped != captured {
 		t.Fatalf("independent sent/read/drop accounting: read=%d drop=%d sent=%d", delivered, dropped, captured)
 	}
-	t.Logf("P1_DROP sent=1200 read=%d dropped=%d post_drop_cookie=correct", delivered, dropped)
+	t.Logf("P1_DROP sent=1200 read=%d dropped=%d kernel_dropped=%d unique_payloads=true post_drop_cookie=correct", delivered, dropped, kernelDrops)
 }
 
 func TestBridgePointerReuse(t *testing.T) {
@@ -339,6 +376,10 @@ func TestBridgePointerReuse(t *testing.T) {
 			t.Fatal(e)
 		}
 		st := states[f.cpu]
+		var before PacketRecord
+		if e := f.b.Collection.Maps["packets"].Lookup(st.Address, &before); e != nil || before.Cookie != c || before.Serial != st.SeenSerial {
+			t.Fatal("deletion precondition: actual packet record missing/mismatched before read", e, before)
+		}
 		fr := bridgeRead(t, f, 1)[0]
 		if fr.Decision.Status != ReadCookie || fr.Decision.Packet.Cookie != c {
 			t.Fatal("ping-pong attribution", fr.Decision)
@@ -359,6 +400,13 @@ func TestBridgePointerReuse(t *testing.T) {
 				bridgeSend(t, s, []byte("fixed-size"))
 				if e := f.b.Collection.Maps["faults"].Lookup(uint32(0), &fctl); e != nil {
 					t.Fatal(e)
+				}
+				var observed []CPUState
+				if e := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &observed); e != nil {
+					t.Fatal(e)
+				}
+				if fctl.Hits != 0 && observed[f.cpu].Address != st.Address {
+					t.Fatal("suppression hit without independently observed pointer recurrence")
 				}
 				frames, e := f.r.ReadBurst(f.fd, 1)
 				if fctl.Hits != 0 {
