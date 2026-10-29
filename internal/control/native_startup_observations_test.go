@@ -162,13 +162,14 @@ func (c *startupCounterparts) Finish() error {
 // (journal/recovery and the migration mirror repair) are folded into groups.
 // Every other read/write/rename must match the next original file operation.
 type startupFileCursor struct {
-	files     *memoryFiles
-	next      int
-	legacy    bool
-	pending   map[string]recordedFileResult
-	published map[string]bool
-	renames   map[string]int
-	repair    map[string][]byte
+	files        *memoryFiles
+	next         int
+	legacy       bool
+	pending      map[string]recordedFileResult
+	published    map[string]bool
+	renames      map[string]int
+	repair       map[string][]byte
+	revisionAcks map[int]bool
 }
 
 func newStartupFileCursor(files *memoryFiles, legacy bool) *startupFileCursor {

@@ -47,6 +47,10 @@ existing supporting tests. V2 adds response-bounded HTTP groups with an explicit
 `boundary: response` and `ack: -1`: no fake original acknowledgement is invented.
 Their executing owner proves native acknowledgement before the HTTP return.
 All members must share one owner and scope. V1 timer-backed groups still work.
+Response-only intervals reject recorded timer-completion and state-snapshot
+markers. Poll and HTTP rule-file representations also pass the shared ordered
+revision-file cursor: exact file sets, distinct write/publication/rename pairs,
+and a distinct consumed native acknowledgement are required before receipts.
 It contains no copied fixture payloads. The fixtures and provenance are read
 from their existing `tests/oracle` paths, never regenerated or rewritten.
 

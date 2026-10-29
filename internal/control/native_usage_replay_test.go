@@ -200,7 +200,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				pos++
 				continue
 			}
-			clock.at = time.UnixMilli(tick.Now)
+			clock.at = time.UnixMilli(tick.Now).UTC()
 			lastPoll = tick.Now
 			polls++
 			end := pos + 1
@@ -262,6 +262,17 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			order = append([]string{"native:poll"}, order...)
 			if err := cmp.Effects(order...); err != nil {
 				t.Fatal("poll native ordering", err, files.order[effectAt:])
+			}
+			var ruleFiles []string
+			if (polls == 2 && !movedTrace) || (resetTrace && polls == 3) {
+				ruleFiles = twoLineRevisionFiles()
+				if combined {
+					ruleFiles = append(ruleFiles, twoLineRevisionFiles()...)
+				}
+			}
+			ruleProof, err := fileCursor.CheckRevision(trace.Entries[pos+1:end], ruleFiles, cmp, effectAt)
+			if err != nil {
+				t.Fatal("poll rule revision", err)
 			}
 			if reads != polls {
 				t.Fatal("physical poll read count", reads, polls)
@@ -447,15 +458,10 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 					}
 					guard = "actual empty native connection result"
 				case "write", "file-completion":
-					file, _ := value["file"].(string)
-					base := filepath.Base(file)
-					if !(strings.HasPrefix(base, "apps-") || strings.HasPrefix(base, "share-") || strings.HasPrefix(base, "cut-")) || (polls != 2 && !(resetTrace && polls == 3)) {
-						t.Fatal("unmapped poll file", x)
+					if ruleProof[seq] != revisionFileProof {
+						t.Fatal("unmapped poll rule file", x)
 					}
-					if x.Kind == "file-completion" && (value["ok"] != true || (value["operation"] != "writeFile" && value["operation"] != "rename")) {
-						t.Fatal("rule completion", x)
-					}
-					guard = "complete acknowledged blocked policy replaces rule file"
+					guard = ruleProof[seq]
 				case "completion":
 					if seq == 0 || value["kind"] != trace.Entries[seq-1].Kind || checked[seq-1] == "" {
 						t.Fatal("unproved completion", x)
@@ -518,7 +524,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				guard := e.check
 				want := twoLineNativeConfig(map[string]string{})
 				want.Combine = combined
-				for seq, proof := range replayNativePolicySteps(t, c, e, clock, files, trace, cmp, []nativePolicyStep{{pos, end, settingsSeq, want}}) {
+				for seq, proof := range replayNativePolicySteps(t, c, e, clock, files, trace, cmp, fileCursor, []nativePolicyStep{{pos, end, settingsSeq, want}}) {
 					checked[seq] = proof
 				}
 				e.check = guard
@@ -531,24 +537,27 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 					_ = json.Unmarshal(x.Value, &value)
 					switch x.Kind {
 					case "file-completion":
+						if checked[seq] == revisionFileProof {
+							continue
+						}
 						matched, err := fileCursor.Observe(x)
 						if err != nil {
 							t.Fatal(err)
 						}
 						if !matched {
-							file, _ := value["file"].(string)
-							if value["ok"] != true || !(strings.Contains(file, "apps-") || strings.Contains(file, "share-") || strings.Contains(file, "cut-")) {
-								t.Fatal("unmapped policy file", x)
-							}
+							t.Fatal("unmapped policy file", x)
 						}
 						checked[seq] = "completed policy file or acknowledged native revision"
 					case "write":
+						if checked[seq] == revisionFileProof {
+							continue
+						}
 						file := filepath.Base(value["file"].(string))
 						if file == "settings.json" || file == "settings.json.bak" {
 							if err := fileCursor.Publication(file, []byte(value["text"].(string))); err != nil {
 								t.Fatal(err)
 							}
-						} else if !(strings.HasPrefix(file, "apps-") || strings.HasPrefix(file, "share-") || strings.HasPrefix(file, "cut-")) {
+						} else {
 							t.Fatal("unmapped policy publication", x)
 						}
 						checked[seq] = "durable setting or complete literal revision"

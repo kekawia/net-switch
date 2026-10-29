@@ -57,12 +57,12 @@ func TestNativePolicyScenarioClock(t *testing.T) {
 
 // Every transaction runs on the continuously started Core. Original file
 // callbacks remain owned by the startup driver's exactly-once file cursor.
-func replayNativeCombiningSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator) map[int]string {
+func replayNativeCombiningSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, fileCursor *startupFileCursor) map[int]string {
 	manual, strict := twoLineNativeConfig(map[string]string{}), twoLineNativeConfig(map[string]string{})
 	manual.Combine = true
 	manual.Shares = map[string]uint64{"a1": 250000, "b2": 750000}
 	strict.Shares = map[string]uint64{}
-	return replayNativePolicySteps(t, c, e, clock, files, trace, cmp, []nativePolicyStep{{129, 162, 152, manual}, {163, 194, 186, strict}, {195, 196, -1, strict}})
+	return replayNativePolicySteps(t, c, e, clock, files, trace, cmp, fileCursor, []nativePolicyStep{{129, 162, 152, manual}, {163, 194, 186, strict}, {195, 196, -1, strict}})
 }
 
 type nativePolicyStep struct {
@@ -70,10 +70,11 @@ type nativePolicyStep struct {
 	want                 policy.Config
 }
 
-func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, steps []nativePolicyStep) map[int]string {
+func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, fileCursor *startupFileCursor, steps []nativePolicyStep) map[int]string {
 	t.Helper()
 	checked := map[int]string{}
 	for _, step := range steps {
+		effectStart := cmp.effectNext
 		before := e.Snapshot()
 		applies, logs, events := e.applies, len(files.logs), len(files.events)
 		at, waits, probes := clock.Now(), clock.afterCalls.Load(), e.probes.Load()
@@ -157,6 +158,17 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 		}
 		if err := cmp.Effects(order...); err != nil {
 			t.Fatal(err)
+		}
+		var ruleFiles []string
+		if step.settings >= 0 {
+			ruleFiles = twoLineRevisionFiles()
+		}
+		proof, err := fileCursor.CheckRevision(trace.Entries[step.begin+1:step.end], ruleFiles, cmp, effectStart)
+		if err != nil {
+			t.Fatal("HTTP rule revision", err)
+		}
+		for seq, guard := range proof {
+			checked[seq] = guard
 		}
 		if clock.Now() != at || clock.afterCalls.Load() != waits || e.probes.Load() != probes || len(files.logs) != logs || len(files.events) != events {
 			t.Fatal("transaction timing or unexpected effects")

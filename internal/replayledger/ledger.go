@@ -370,6 +370,9 @@ func validateGroups(m Mapping, traces map[string]Trace, annotations map[string]m
 		// this trigger/response interval belong to the same atomic revision.
 		for seq := g.Begin + 1; seq < g.End; seq++ {
 			e := t.Entries[seq]
+			if g.Boundary == "response" && (e.Kind == "timer-completion" || e.Kind == "state-snapshot") {
+				return fmt.Errorf("incomplete group %s: response boundary contains recorded barrier %s at %d", g.Name, e.Kind, seq)
+			}
 			if e.Kind == "http" || e.Kind == "api" {
 				return fmt.Errorf("group %s crosses an unrelated HTTP boundary", g.Name)
 			}

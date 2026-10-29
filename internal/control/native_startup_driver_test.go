@@ -108,7 +108,10 @@ func replayNativeStartup(t *testing.T, name string) {
 	files := &memoryFiles{data: map[string][]byte{filepath.Join("/test", "settings.json"): initial.Settings}, observeAllWrites: true, observeReads: true}
 	clock := &fakeClock{at: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC), afterImmediate: true}
 	if trace.Scenario.Now != nil {
-		clock.at = time.UnixMilli(*trace.Scenario.Now)
+		clock.at = time.UnixMilli(*trace.Scenario.Now).UTC()
+	}
+	if clock.Now().Location() != time.UTC {
+		t.Fatal("scenario clock must not inherit machine location")
 	}
 	location, err := time.LoadLocation(trace.Scenario.Timezone)
 	if err != nil {
@@ -424,7 +427,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset")
 	var pinEvidence map[int]string
 	if name == "combining" {
-		pinEvidence = replayNativeCombiningSuffix(t, c, e, clock, files, trace, cmp)
+		pinEvidence = replayNativeCombiningSuffix(t, c, e, clock, files, trace, cmp, fileCursor)
 	}
 	if name == "appLine" {
 		var apiTrace recordedTrace
@@ -473,6 +476,10 @@ func replayNativeStartup(t *testing.T, name string) {
 				guard = checked[entry.Seq-1] + " completed"
 			}
 		case "file-completion":
+			if pinEvidence[entry.Seq] == revisionFileProof {
+				guard = revisionFileProof
+				break
+			}
 			if matched, err := fileCursor.Observe(entry); matched {
 				check("ordered file completion", err)
 				guard = "distinct completed native file operation"
@@ -497,6 +504,9 @@ func replayNativeStartup(t *testing.T, name string) {
 				}
 				guard = "complete revision replaces failed adapter directory cleanup"
 			case strings.HasPrefix(baseName, "apps-") || strings.HasPrefix(baseName, "share-") || strings.HasPrefix(baseName, "cut-") || baseName == "engine-config.json":
+				if name == "combining" && entry.Seq >= 129 {
+					t.Fatal("missing ordered HTTP rule-file evidence", entry.Seq)
+				}
 				if v["ok"] != true || (operation != "writeFile" && operation != "rename") {
 					t.Fatal("revision completion guard")
 				}
@@ -513,6 +523,10 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			guard = "physical counters remain unknown"
 		case "write":
+			if pinEvidence[entry.Seq] == revisionFileProof {
+				guard = revisionFileProof
+				break
+			}
 			file := filepath.Base(js.Text(v["file"]))
 			switch file {
 			case "server.json", "usage.json", "settings.json", "settings.json.bak":
@@ -520,6 +534,9 @@ func replayNativeStartup(t *testing.T, name string) {
 				guard = "actual atomic native publication"
 			default:
 				if strings.HasPrefix(file, "apps-") || strings.HasPrefix(file, "share-") || strings.HasPrefix(file, "cut-") || file == "engine-config.json" {
+					if name == "combining" && entry.Seq >= 129 {
+						t.Fatal("missing ordered HTTP rule-file evidence", entry.Seq)
+					}
 					guard = "complete acknowledged revision and pin decisions"
 				}
 			}

@@ -179,6 +179,45 @@ func TestResponseBoundedGroups(t *testing.T) {
 	}
 }
 
+func TestResponseGroupRejectsRecordedBarriers(t *testing.T) {
+	for _, kind := range []string{"timer-completion", "state-snapshot"} {
+		t.Run(kind, func(t *testing.T) {
+			m, traces := load(t)
+			found := false
+			for i := range m.Groups {
+				g := &m.Groups[i]
+				if g.Name != "combining-enable" {
+					continue
+				}
+				found = true
+				trace := traces[g.Hash]
+				// Keep the completion structurally valid: only the forbidden
+				// recorded barrier should invalidate the response-only group.
+				trace.Entries[g.Ack].Kind = kind
+				if kind == "state-snapshot" {
+					trace.Entries[g.Ack].Value = json.RawMessage(`{"now":1792411200000}`)
+				}
+				var completion map[string]any
+				if err := json.Unmarshal(trace.Entries[g.Ack+1].Value, &completion); err != nil {
+					t.Fatal(err)
+				}
+				completion["kind"] = kind
+				trace.Entries[g.Ack+1].Value, _ = json.Marshal(completion)
+				traces[g.Hash] = trace
+				g.Boundary, g.Ack = "response", -1
+			}
+			if !found {
+				t.Fatal("missing combining-enable group")
+			}
+			if _, err := Build(m, traces); err == nil {
+				t.Fatal("accepted response-only group containing", kind)
+			} else if !strings.Contains(err.Error(), "recorded barrier") {
+				t.Fatal("wrong rejection", err)
+			}
+		})
+	}
+}
+
 func TestLedgerFixtureHashAndSet(t *testing.T) {
 	m, _ := load(t)
 	for hash, f := range m.Fixtures {

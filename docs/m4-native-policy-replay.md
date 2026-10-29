@@ -184,3 +184,72 @@ comparisons and existing startup contracts remain the basis of every receipt.
 Frozen reference and oracle bytes remain unchanged. No engine process, service,
 TUN or route operation ran locally. Independent review and hosted checks remain
 outside this local validation; CI is not watched by this implementation task.
+
+## Review round 1: rule-file evidence
+
+The initial implementation proved native policy semantics but accepted obsolete
+rule-file callbacks by filename prefix. This allowed a rename in place of the
+first writeFile to earn a receipt. The pre-fix reproduction passed in midnightGap
+(176), combining (145), and capMoved (158); frozen fixture bytes were untouched.
+
+The shared file cursor now has an ordered revision projection, used for polling
+and HTTP transactions. Its independent plan is apps-a1.json, apps-b2.json,
+share-b2.json, cut-b2.json. Each file requires a distinct successful writeFile,
+publication, and matching temporary-file rename, in that order. All planned
+files must finish before settings publications or the transaction's end.
+Every plan binds to one distinct, already checked native apply/ack pair; the
+full native policy, durability and decisions are still checked by the caller.
+No fake native adapter file operations are introduced.
+
+Poll intervals covered are combiningNoOpenLine 208–272 (two complete ordered
+sets: its old share refresh and blocked-rule refresh become one native revision),
+capBlockedAndMainException 208–249, capReset 149–190 and 196–239, and midnightGap
+143–184. Other polls require zero rule files. These entries remain translated
+in the ledger: the ordered file-cursor alternative replaces adding a synthetic
+poll acknowledgement entry. HTTP transactions use the same cursor and their
+existing atomic groups. Prefix-only receipt fallbacks are removed for this slice.
+
+Permanent fixture-based mutations reject missing cut files, duplicate share
+files, rename-before-write, missing/duplicate publications, mismatched temporary
+paths, missing native acknowledgement and reused acknowledgement. The original
+three rename mutations now fail at those exact entries. Response-only groups
+also reject any recorded timer-completion or state-snapshot; both regressions
+failed before the validator fix on combining-enable.
+
+Validation after restoration: the full pure Control, control/engine and ledger
+suites plus the selected lifecycle contract report **1,922 / 7,894**, with
+producer/lifecycle/report exits 0/0/0. All 63 file-cursor leaf cases ran (seven
+valid intervals and 56 corruption cases), as did both barrier regressions.
+Temporary full-replay mutations for rename-before-write and replacing cut with
+a duplicate share file failed the aggregate with producer/report exits 1/1 in
+both polling and HTTP paths. Those edits were reverted; frozen bytes are unchanged.
+
+Scenario origins and polling instants now use UnixMilli(...).UTC(). The
+[Go time documentation](https://pkg.go.dev/time#UnixMilli) confirms UnixMilli
+otherwise attaches the machine's local location. Usage still receives the
+explicit scenario location, including America/Santiago.
+
+## Inputs for the next slice
+
+Checked against tests/oracle/traces.mjs and harness.mjs in this revision:
+
+- `input:probes` replaces the per-line probe-answer map. A number is a delay
+  in milliseconds (for example a1:25), not a boolean vote. `false` makes the
+  probe fail with status 503; an absent answer defaults to 18 ms. Drive native
+  probe results with the same delay/outcome and retain round/instance fencing.
+- `input:routes` replaces the explicit default-route list, whose entries have
+  `interfaceAddress`. Without an override, the oracle derives it from IPv4
+  interface addresses. Preserve route-read deadlines; changing the supplied
+  list is not itself a completed route observation or immediate health vote.
+- `input:interfaces` replaces the alias-to-address-list returned by
+  networkInterfaces. Each address keeps family, address and internal fields.
+  Emptying Ethernet removes its addresses; adding/removing IPv6 is separate
+  from adapter identity and the explicit routes override. Do not conflate this
+  input with helper-line physical byte counters.
+- `lostDefaultRoute` has `environment.realDirectoryList: true`. This makes the
+  legacy directory list succeed (the other path records its callback error),
+  and enables probe-vote and state-snapshot observations. Reuse the successful
+  cleanup replacement and preserve every enabled completion. The trace first
+  supplies only Wi-Fi's 192.0.2.2 route, then restores Ethernet's 192.0.2.1 too;
+  its recorded intermediate connected states and later no-default-route state
+  must follow the actual sampling deadlines, not a direct state assignment.
