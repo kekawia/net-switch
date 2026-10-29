@@ -200,6 +200,7 @@ SEC("raw_tracepoint/net_dev_start_xmit") int capture(struct raw_args *ctx) {
         __sync_fetch_and_add(&state->read_fail, 1);
     }
     if (!p.cookie) { p.status = 0; __sync_fetch_and_add(&state->cookie_missing, 1); }
+    if (inject(64, p.epoch, p.cpu, p.serial, address)) p.users = 2;
     if (p.users != 1) { p.status = 0; __sync_fetch_and_add(&state->shared, 1); }
     state->cookie = p.cookie;
     if (lookup(&packets, &address)) { fault(1); goto out; }
