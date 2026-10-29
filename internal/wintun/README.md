@@ -28,6 +28,41 @@ registration-lock conflict retries with bounded backoff. Recovery failures are
 terminal. Adapter removal returns `ErrAdapterRemoved`, logs once and does not
 count as failed recovery. Events are bounded hints; counters are authoritative.
 
+### Rejection evidence
+
+Send entry-size and packet-content failures capture evidence before releasing
+the rejected slot or requesting recovery. The error retains the original size,
+the failing reread, the acquired Tail and another Tail load. Two private copies
+are compared across at most 65,535 published bytes; each log includes at most
+256 bytes of hex per copy. Framing captures start at the entry header; content
+captures start at the packet. `CopyOffset` and `CopyLength` make that explicit.
+An invalid framing size is never used as a slice bound.
+
+For content failures, a failure-only explanation follows `validIP`'s predicate
+order and checksum helpers. A separate offset parser calculates checksums using
+its own byte-wise sum and pseudo-header construction. The recorded sums include
+the received checksum (65,535 is valid; -1 means not evaluated). Neither parser
+nor the second copy can accept a rejected packet. The ordinary `validIP` path
+is unchanged, and successful reads perform no additional capture work.
+
+Every rejection is logged before the ten-second recovery-warning throttle.
+`Stats.FirstRejection` also retains the first capture across recovery and close;
+`Stats.SessionID` identifies the counter lifetime. Session starts log the loaded
+kernel driver's raw version from `WintunGetRunningDriverVersion`, separately
+from the pinned DLL hash. A version-query failure is reported as unavailable.
+
+The integrity summary separates framing rejection, content rejection, delivered
+mismatch and timeout. Counter-only causes remain unknown. Recovery totals sum
+the maximum counter per session, rather than counting warnings or repeated
+snapshots. The signed DLL's `ERROR_INVALID_DATA` is framing evidence, never a
+delivered-byte mismatch.
+
+The nightly's normal `wintun_integrity` build includes this failure-path capture;
+it does not need `wintun_boundaries`. A manual `rejection_capture=true` dispatch
+runs two full-sequence ARM64 jobs with concurrency capped at two. The scheduled
+matrix is unchanged. Only dispatch this small capture after the PR checks pass;
+it is an investigation, not a replacement for the release integrity gate.
+
 ## Registration owner
 
 During removal the 0.14.1 driver itself closes the registering handle to its

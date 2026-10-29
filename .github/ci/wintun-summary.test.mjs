@@ -120,9 +120,9 @@ test('a ring rejection in one UDP mode is named and attributed without blaming t
  const s=fixture({scenario:'full'});ringIncident(s);
  const r=s.result(0);
  assert.equal(r.verdict,'integrity_failure');assert.equal(r.exit,1);
- assert.deepEqual(r.integrity_evidence_kinds,['ring_rejection']);
+ assert.deepEqual(r.integrity_evidence_kinds,['packet_content_rejection']);
  assert.equal(r.payload_mismatch_incidents,0);assert.equal(r.ring_rejection_incidents,1);
- assert.deepEqual(r.mode_results.ours.failure_kinds,['ring_rejection']);
+ assert.deepEqual(r.mode_results.ours.failure_kinds,['packet_content_rejection']);
  assert.equal(r.mode_results.ours.verdict,'integrity_failure');
  assert.deepEqual(r.mode_results.dll.failure_kinds,[]);
  assert.deepEqual(r.mode_results.inprocess.failure_kinds,[]);
@@ -151,4 +151,39 @@ test('a clean run names no evidence kind and keeps its clean exposure',()=>{
  assert.deepEqual(r.integrity_evidence_kinds,[]);
  assert.equal(r.payload_mismatch_incidents,0);assert.equal(r.ring_rejection_incidents,0);
  assert.ok(r.clean_exposure_connections>0);
+});
+
+test('DLL ERROR_INVALID_DATA is framing, including historical payload wrappers and nested samples',()=>{
+ for(const error of ['payload integrity failure: DLL receive ring: The data is invalid.','Wintun ring corruption: DLL Send ring framing rejection (ERROR_INVALID_DATA): The data is invalid.']) {
+  const s=fixture({scenario:'full'});
+  s.line('=== RUN TestWintunPerformance/pair3/udp_8_MBps/ours');
+  emit(s,{test:'performance_sample',test_path:'TestWintunPerformance/pair2/udp_8_MBps/dll',phase:'performance-dll',repeat:'2',mode:'dll',sample:{error}});
+  const r=s.result(1);
+  assert.equal(r.payload_mismatch_incidents,0);
+  assert.deepEqual(r.integrity_evidence_kinds,['ring_framing_rejection']);
+  assert.deepEqual(r.mode_results.ours.failure_kinds,[]);
+  assert.equal(r.evidence_events[0].test_path,'TestWintunPerformance/pair2/udp_8_MBps/dll');
+  assert.equal(r.evidence_events[0].repeat,'2');
+ }
+});
+
+test('recovery totals use each session maximum, not warning or snapshot counts',()=>{
+ const s=fixture({scenario:'full'});
+ const base={test:'integrity_session',test_path:'TestWintunPerformance/pair2/udp_8_MBps/ours',phase:'performance-dll',repeat:'1',mode:'ours',process_id:55};
+ for(const [id,corruptions,recoveries] of [['55-1',1,0],['55-1',5,4],['55-1',5,5],['55-1',5,5],['55-2',3,3]])
+  emit(s,{...base,stats:{SessionID:id,Corruptions:corruptions,Recoveries:recoveries,FirstRejection:{kind:'packet_content_rejection',FirstHex:'4500'}}});
+ const r=s.result(1);
+ assert.equal(r.ring_rejection_incidents,8);assert.equal(r.recoveries,8);assert.equal(r.session_counters.length,2);
+ assert.equal(r.payload_mismatch_incidents,0);
+ assert.ok(r.evidence_events.every(e=>e.test_path===base.test_path && e.session));
+});
+
+test('a raw rejection and later snapshots share a session and retain the detailed event',()=>{
+ const s=fixture({scenario:'full'});
+ s.line('INTEGRITY_PHASE_START repeat=1 phase=performance-dll');
+ s.line('=== RUN TestWintunPerformance/pair1/udp_8_MBps/ours');
+ s.line('WARN Wintun ring rejection session=55-1 error="Wintun ring corruption: Send packet failed validation" corruptions=1');
+ emit(s,{test:'integrity_session',test_path:'TestWintunPerformance/pair1/udp_8_MBps/ours',mode:'ours',phase:'performance-dll',repeat:'1',process_id:55,stats:{SessionID:'55-1',Corruptions:5,Recoveries:5}});
+ const r=s.result(1);assert.equal(r.ring_rejection_incidents,5);assert.equal(r.recoveries,5);
+ assert.ok(r.evidence_events.some(e=>e.detail.includes('packet failed validation')));
 });

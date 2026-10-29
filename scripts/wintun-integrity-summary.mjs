@@ -7,7 +7,8 @@ const boundaries = ['receive','ingress','echo','output','send','host'];
 // Stable shared marker plus old messages, including child-process errors nested
 // inside a JSON sample error. Do not treat "integrity-invalid comparison" alone
 // or deliberate ring fault injections as observed payload corruption.
-const payloadFailure = /payload integrity failure|\b(?:payload|packet|integrity)(?: hash)? mismatch\b|\b(?:payload|packet) corruption\b|UDP echo corruption|recovery lost packet integrity|damaged packet escaped|bad packet bounds|packet path failed:.*Wintun ring corruption/i;
+const payloadFailure = /payload integrity failure|\b(?:payload|packet|integrity)(?: hash)? mismatch\b|\b(?:payload|packet) corruption\b|UDP echo corruption|recovery lost packet integrity|damaged packet escaped|bad packet bounds/i;
+const dllFraming = /DLL (?:receive ring:.*(?:data is invalid|ERROR_INVALID_DATA)|Send ring framing rejection)/i;
 const naturalPhases = new Set(['proof','capture-proof','calibration','performance-dll','performance-inprocess','ping-pong','profile-dll','profile-ours']);
 export function ratioSpread(values) {
   if (!values.length) return null;
@@ -37,23 +38,45 @@ export class IntegritySummary {
   expectedPhases=new Map(); boundary=null; connectionIDs=new Set();
   phase=null; repeat=null; currentTest=null; currentTestPath=null; byMode=new Map();
   payloadIncidents=new Map(); ringIncidents=new Map();
+  sessions=new Map(); timeoutEvents=[];
   get hasIntegrityFailure() { return this.payloadIncidents.size>0 || this.ringIncidents.size>0; }
   attribution(record={}) {
     const testPath=record.test_path ?? this.currentTestPath ?? null;
     const mode=record.mode ?? (testPath ? /\/(ours|dll|inprocess)(?:\/|$)/.exec(testPath)?.[1] : undefined);
-    return {mode,testPath,phase:record.phase ?? this.phase ?? null,repeat:record.repeat ?? this.repeat ?? null};
+    return {mode,testPath,phase:record.phase ?? this.phase ?? null,repeat:record.repeat ?? this.repeat ?? null,
+      process_id:record.process_id??null,session:record.stats?.SessionID||record.session||null};
   }
   payload(record,detail) {
     const a=this.attribution(record);
     const key=['payload_mismatch',a.mode??'',a.testPath??'',a.phase??'',a.repeat??'',detail??''].join('|');
-    this.payloadIncidents.set(key,{kind:'payload_mismatch',mode:a.mode??null,test_path:a.testPath,phase:a.phase,detail:detail??null});
+    this.payloadIncidents.set(key,{kind:'payload_mismatch',mode:a.mode??null,test_path:a.testPath,phase:a.phase,repeat:a.repeat,process_id:a.process_id,session:a.session,detail:detail??null});
   }
   ring(record,counter,detail) {
     const a=this.attribution(record);
-    // A recovery warning and every later counter snapshot from the same
-    // session share the test path, phase, repeat and counter value.
-    const key=['ring_rejection',a.mode??'',a.testPath??'',a.phase??'',a.repeat??'',counter??''].join('|');
-    this.ringIncidents.set(key,{kind:'ring_rejection',mode:a.mode??null,test_path:a.testPath,phase:a.phase,counter:counter??null,detail:detail??null});
+    // New sessions have a process-qualified sequence ID; older logs use their
+    // process/session pointer, with a test-path fallback only when unavailable.
+    const sessionKey=[a.phase,a.repeat,a.session?(/^[0-9]+-[0-9]+$/.test(a.session)?a.session:`${a.process_id??''}/${a.session}`):`${a.mode}/${a.testPath}`].join('|');
+    const previous=this.sessions.get(sessionKey)??{corruptions:0,recoveries:0,...a};
+    previous.corruptions=Math.max(previous.corruptions,Number(counter)||0);
+    previous.recoveries=Math.max(previous.recoveries,Number(record.stats?.Recoveries)||0);
+    if (record.test_path) Object.assign(previous,a);
+    this.sessions.set(sessionKey,previous);
+    const first=record.stats?.FirstRejection;
+    if (first) {
+      const firstKey=sessionKey+'|1', oldFirst=this.ringIncidents.get(firstKey);
+      this.ringIncidents.set(firstKey,{kind:first.kind,mode:a.mode??null,test_path:a.testPath,phase:a.phase,repeat:a.repeat,process_id:a.process_id,session:a.session,counter:1,detail:oldFirst?.detail??'first rejection captured before recovery',evidence:first});
+    }
+    // A first capture does NOT establish the cause of later counter-only
+    // rejections. Those remain explicitly unknown, never invented packets.
+    const kind=dllFraming.test(detail??'')?'ring_framing_rejection':/packet failed validation/.test(detail??'')?'packet_content_rejection':/invalid entry|packet length changed|invalid cursor|head changed/.test(detail??'')?'ring_framing_rejection':'ring_rejection_unknown';
+    const key=[sessionKey,counter??''].join('|');
+    const old=this.ringIncidents.get(key);
+    // A counter snapshot must not replace the actual captured reason/bytes.
+    if (!old || (old.kind==='ring_rejection_unknown' && kind!=='ring_rejection_unknown'))
+      this.ringIncidents.set(key,{kind,mode:a.mode??null,test_path:a.testPath,phase:a.phase,repeat:a.repeat,process_id:a.process_id,session:a.session,counter:counter??null,detail:detail??null,evidence:Number(counter)===1?first??null:null});
+    if (record.test_path) {
+      for (const [k,event] of this.ringIncidents) if (k.startsWith(sessionKey+'|')) Object.assign(event,{mode:a.mode??null,test_path:a.testPath,process_id:a.process_id});
+    }
   }
   failureKindsFor(mode) {
     const kinds=new Set();
@@ -61,22 +84,31 @@ export class IntegritySummary {
     return [...kinds];
   }
   line(line) {
-    if (payloadFailure.test(line)) this.payload({phase:this.phase,repeat:this.repeat,test_path:this.currentTestPath}, line.trim());
     const phase=/INTEGRITY_PHASE_START .*?phase=([\w-]+)/.exec(line);
     if (phase) this.phase=phase[1];
     const phaseRepeat=/INTEGRITY_PHASE_START .*?\brepeat=(\d+)/.exec(line);
     if (phaseRepeat) this.repeat=phaseRepeat[1];
     if (/INTEGRITY_CALIBRATION_START/.test(line)) this.phase='calibration';
-    const running=/=== RUN\s+(\S+)/.exec(line);
+    const running=/^\s*=== (?:RUN|NAME|CONT)\s+(\S+)/.exec(line);
     if (running) { this.currentTestPath=running[1]; this.currentTest=running[1].split('/')[0]; }
+    const pos=line.indexOf('WINTUN_RESULT ');
+    let r;
+    if (pos>=0) {
+      try { r=JSON.parse(line.slice(pos+14)); } catch { this.incomplete++; return; }
+    }
+    const context=r??{session:/\bsession=([^\s]+)/.exec(line)?.[1]};
+    // Structured records carry their own test identity, even after another
+    // subtest starts. DLL framing wins over the old erroneous payload wrapper.
+    if (dllFraming.test(line)) this.ring({...context,mode:'dll'},1,line.trim());
+    else if (payloadFailure.test(line)) this.payload(context,line.trim());
     // Recovery/lifetime tests intentionally damage rings. Only natural traffic
     // paths use the raw ring error as evidence; actual payload failures above
     // remain fatal in EVERY test, including tests which inject delays/faults.
-    if ((naturalPhases.has(this.phase) || this.currentTest==='TestWintunParallelUDP') && /Wintun ring corruption(?: recovered|:)|packet failed validation|invalid entry/.test(line)) {
-      this.ring({phase:this.phase,repeat:this.repeat,test_path:this.currentTestPath}, /corruptions=(\d+)/.exec(line)?.[1] ?? 1, line.trim());
+    if (!dllFraming.test(line) && (naturalPhases.has(r?.phase??this.phase) || this.currentTest==='TestWintunParallelUDP' || r?.test==='word_boundary_ring_rejection') && /Wintun ring corruption(?: recovered|:)|packet failed validation|invalid entry/.test(line)) {
+      this.ring(context, /corruptions=(\d+)/.exec(line)?.[1] ?? 1, line.trim());
     }
     if (/INTEGRITY_JOB_COMPLETE/.test(line)) this.complete=true;
-    if (/INTEGRITY_PHASE_TIMEOUT/.test(line)) { this.timeouts++; this.notes.add(line.trim()); }
+    if (/INTEGRITY_PHASE_TIMEOUT/.test(line)) { this.timeouts++; this.notes.add(line.trim()); this.timeoutEvents.push({kind:'timeout',...this.attribution(context),detail:line.trim()}); }
     if (/INTEGRITY_RUN_FAILED.*diagnostic_incomplete/.test(line)) this.incomplete++;
     if (/--- FAIL:|INTEGRITY_PHASE_FAILED/.test(line) && this.failures.length<40) this.failures.push(line.trim());
     if (/body did not recover:|alignment did not recover:|throughput regression tcp_8_MBps:/.test(line)) this.notes.add(line.trim());
@@ -91,15 +123,12 @@ export class IntegritySummary {
         this.expectedPhases.set(key,new Set());
       }
     }
-    const pos=line.indexOf('WINTUN_RESULT ');
     if (pos<0) return;
-    let r;
-    try { r=JSON.parse(line.slice(pos+14)); } catch { this.incomplete++; return; }
     if (r.verdict==='diagnostic_incomplete') this.incomplete++;
     const ringCounters=(r.stats?.Corruptions??0)>0 || (r.stats?.Recoveries??0)>0;
-    const naturalRing=((naturalPhases.has(this.phase) && r.test==='integrity_session') || r.test==='parallel_udp') && ringCounters;
+    const naturalRing=((naturalPhases.has(r.phase??this.phase) && r.test==='integrity_session') || r.test==='parallel_udp') && ringCounters;
     if (naturalRing) this.ring(r, r.stats.Corruptions ?? r.stats.Recoveries, `${r.test} corruptions=${r.stats.Corruptions??0} recoveries=${r.stats.Recoveries??0}`);
-    if (!naturalRing && (r.verdict==='integrity_failure' || r.test==='tcp_integrity_first_failure' || r.test==='tcp_payload_difference')) this.payload(r, r.test ?? r.verdict ?? 'integrity_failure');
+    if (!naturalRing && !dllFraming.test(line) && !/Wintun ring corruption/.test(line) && (r.verdict==='integrity_failure' || r.test==='tcp_integrity_first_failure' || r.test==='tcp_payload_difference')) this.payload(r, r.test ?? r.verdict ?? 'integrity_failure');
     if (r.test==='parallel_udp' && r.invalid_delivered>0) this.payload(r, `invalid_delivered=${r.invalid_delivered}`);
     try {
       if (r.test==='integrity_overhead') {
@@ -182,13 +211,17 @@ export class IntegritySummary {
       return [mode,{verdict,failure_kinds:failureKinds,overhead,observed_exposure_connections:observed,calibration_connections:counts.calibration,clean_exposure_connections:clean}];
     }));
     const invalidModes=modes.filter(m=>modeResults[m].verdict==='diagnostic_invalid');
-    const evidenceKinds=[...(this.payloadIncidents.size?['payload_mismatch']:[]),...(this.ringIncidents.size?['ring_rejection']:[])];
+    const evidenceKinds=[...new Set([...this.payloadIncidents.values(),...this.ringIncidents.values(),...this.timeoutEvents].map(r=>r.kind))];
+    const totalCorruptions=[...this.sessions.values()].reduce((n,s)=>n+s.corruptions,0);
+    const totalRecoveries=[...this.sessions.values()].reduce((n,s)=>n+s.recoveries,0);
     const verdict=this.hasIntegrityFailure ? 'integrity_failure' : this.incomplete || this.timeouts || missing ? 'diagnostic_incomplete' : invalidModes.length ? 'diagnostic_invalid' : otherFailure ? 'test_failed' : 'no_corruption_observed';
     return {verdict, exit:['integrity_failure','diagnostic_incomplete'].includes(verdict)?1:0, original_exit:code,
       overhead:spread, qualification_scope:'per_mode', mode_results:modeResults, invalid_modes:invalidModes, minimum_ratio:.80, capture_overhead:Object.fromEntries(this.capture), capture_invalid:captureInvalid,
       diagnostic_connections:this.connections, calibration_connections:this.calibrationConnections, observed_exposure_connections:observedExposure,
       clean_exposure_connections:Object.values(modeResults).reduce((n,r)=>n+r.clean_exposure_connections,0),
-      integrity_evidence_kinds:evidenceKinds, payload_mismatch_incidents:this.payloadIncidents.size, ring_rejection_incidents:this.ringIncidents.size,
+      integrity_evidence_kinds:evidenceKinds, payload_mismatch_incidents:this.payloadIncidents.size, ring_rejection_incidents:totalCorruptions,
+      recoveries:totalRecoveries, session_counters:[...this.sessions.values()],
+      evidence_events:[...this.payloadIncidents.values(),...this.ringIncidents.values(),...this.timeoutEvents],
       integrity_evidence_records:this.payloadIncidents.size+this.ringIncidents.size, incomplete_records:this.incomplete, timeout_records:this.timeouts, incomplete_structure:Boolean(missing),
       notes:[...this.notes], failed_tests_and_phases:this.failures};
   }

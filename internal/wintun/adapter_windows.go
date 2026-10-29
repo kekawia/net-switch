@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -67,6 +68,7 @@ type library struct {
 	module                                  windows.Handle
 	file                                    *winhandle.File // Denies replacement/writes for the lifetime of the loaded DLL.
 	create, open, close, luid, deleteDriver uintptr
+	runningDriverVersion                    uintptr
 }
 
 type libraryCache struct {
@@ -139,7 +141,8 @@ func loadVerifiedLibrary() (*library, error) {
 	for name, dst := range map[string]*uintptr{
 		"WintunCreateAdapter": &l.create, "WintunOpenAdapter": &l.open,
 		"WintunCloseAdapter": &l.close, "WintunGetAdapterLUID": &l.luid,
-		"WintunDeleteDriver": &l.deleteDriver,
+		"WintunDeleteDriver":            &l.deleteDriver,
+		"WintunGetRunningDriverVersion": &l.runningDriverVersion,
 	} {
 		*dst, err = windows.GetProcAddress(module, name)
 		if err != nil {
@@ -150,6 +153,18 @@ func loadVerifiedLibrary() (*library, error) {
 	// Do not unload: the DLL queues asynchronous orphan cleanup callbacks.
 	ok = true
 	return l, nil
+}
+
+func (a *Adapter) logDriverVersion() {
+	if a.dll == nil || a.dll.runningDriverVersion == 0 {
+		return // synthetic fixtures
+	}
+	v, _, err := syscall.SyscallN(a.dll.runningDriverVersion)
+	if v == 0 {
+		slog.Warn("Wintun running driver version unavailable", "adapter", a.config.Name, "error", err)
+		return
+	}
+	slog.Info("Wintun running driver", "adapter", a.config.Name, "version", fmt.Sprintf("0x%08x", uint32(v)))
 }
 
 type Adapter struct {

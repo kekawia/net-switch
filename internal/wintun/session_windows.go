@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -33,6 +34,8 @@ type PacketSession interface {
 }
 
 type Stats struct {
+	SessionID        string
+	FirstRejection   *RejectionEvidence `json:",omitempty"`
 	ReadPackets      uint64
 	WrittenPackets   uint64
 	DroppedPackets   uint64
@@ -72,6 +75,8 @@ type Event struct {
 }
 
 type Session struct {
+	id                     string
+	firstRejection         atomic.Pointer[RejectionEvidence]
 	adapter                *Adapter
 	mu                     sync.RWMutex // keeps resources alive during native waits and packet copies
 	readMu, writeMu        sync.Mutex
@@ -101,6 +106,8 @@ type Session struct {
 	closeNanos                        atomic.Uint64
 	closeDetails                      atomic.Pointer[CloseDetails]
 }
+
+var sessionSequence atomic.Uint64
 
 // StartSession registers rings through a registrar process. There is no
 // in-process registration path in production code, and no fallback to one.
@@ -137,6 +144,8 @@ func (a *Adapter) startSession(open func() (*rings, error)) (*Session, error) {
 		return nil, errors.Join(err, wakeOwner.HandleClose("Wintun session setup failure close"), r.close())
 	}
 	s := &Session{adapter: a, rings: r, wake: wake, cancelEvent: cancelEvent, changed: make(chan struct{}), stop: make(chan struct{}), stopped: make(chan struct{}), repair: make(chan error, 1), events: make(chan Event, 8), open: open}
+	s.id = fmt.Sprintf("%d-%d", os.Getpid(), sessionSequence.Add(1))
+	a.logDriverVersion()
 	s.wakeOwner, s.cancelOwner = wakeOwner, winhandle.Open(cancelEvent, "Wintun cancellation event open")
 	s.noteRings(r)
 	a.session = s
@@ -173,6 +182,11 @@ func (*Session) RXChecksumVerified(p []byte) bool {
 }
 func (s *Session) Stats() Stats {
 	result := Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load(), CloseNanos: s.closeNanos.Load()}
+	result.SessionID = s.id
+	if evidence := s.firstRejection.Load(); evidence != nil {
+		copy := *evidence
+		result.FirstRejection = &copy
+	}
 	if details := s.closeDetails.Load(); details != nil {
 		result.CloseDetails = *details
 	}
@@ -214,6 +228,14 @@ func (s *Session) fail(err error) {
 	}
 	if errors.Is(err, ErrCorrupt) {
 		s.corruptions.Add(1)
+		var rejection *rejectionError
+		if errors.As(err, &rejection) {
+			evidence := rejection.evidence
+			s.firstRejection.CompareAndSwap(nil, &evidence)
+		}
+		// The reason was captured with Head held. Persist it before recovery
+		// and independently of the throttled recovery-success warning.
+		slog.Warn("Wintun ring rejection", "session", s.id, "error", err, "corruptions", s.corruptions.Load())
 	}
 	windows.SetEvent(s.wakeOwner.Handle("Wintun recovery wake"))
 	s.repair <- err
@@ -329,7 +351,7 @@ func (s *Session) maintain() {
 				s.recoveries.Add(1)
 				s.event("recovered", nil)
 				if time.Since(lastLog) >= 10*time.Second {
-					slog.Warn("Wintun ring corruption recovered", "adapter", s.adapter.config.Name, "error", cause, "corruptions", s.corruptions.Load())
+					slog.Warn("Wintun ring corruption recovered", "adapter", s.adapter.config.Name, "session", s.id, "error", cause, "corruptions", s.corruptions.Load())
 					lastLog = time.Now()
 				}
 			}
