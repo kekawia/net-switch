@@ -684,7 +684,11 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if err != nil {
 		t.Fatal("AF_PACKET socket:", err)
 	}
-	defer unix.Close(pktFD)
+	t.Cleanup(func() {
+		if pktFD >= 0 {
+			_ = unix.Close(pktFD)
+		}
+	})
 	if err := unix.SetsockoptInt(pktFD, unix.SOL_PACKET, unix.PACKET_VERSION, unix.TPACKET_V2); err != nil {
 		t.Fatal("PACKET_VERSION TPACKET_V2:", err)
 	}
@@ -701,7 +705,11 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if err != nil {
 		t.Fatal("mmap PACKET_TX_RING:", err)
 	}
-	defer unix.Munmap(ringMem)
+	t.Cleanup(func() {
+		if ringMem != nil {
+			_ = unix.Munmap(ringMem)
+		}
+	})
 	sll := &unix.SockaddrLinklayer{
 		Protocol: ethPIP,
 		Ifindex:  int(f.b.config.Ifindex),
@@ -732,7 +740,10 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if !errors.Is(noCookieErr, ErrEpochRebuild) || len(noCookieFrames) != 1 || noCookieFrames[0].Decision.Status != ReadInvalid || !noCookieFrames[0].Decision.Rebuild {
 		t.Fatalf("uninitialized AF_PACKET skb (cookie == 0) was not rejected with ReadInvalid+Rebuild: err=%v frames=%+v", noCookieErr, noCookieFrames)
 	}
+	_ = unix.Munmap(ringMem)
+	ringMem = nil
 	_ = unix.Close(pktFD)
+	pktFD = -1
 	reloadBridgeFixture(t, f, true)
 	s, _ = bridgeSocket(t, 0)
 
