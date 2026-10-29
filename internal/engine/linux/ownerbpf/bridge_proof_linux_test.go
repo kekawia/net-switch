@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -392,4 +393,61 @@ func TestBridgeInfoLayout(t *testing.T) {
 		}
 	}
 	t.Log(fmt.Sprintf("BRIDGE_COUNTERS programs=%d field_present=true", len(c)))
+}
+
+func TestBridgeRelocations(t *testing.T) {
+	for _, variable := range []string{"NS_BRIDGE_OBJECT", "NS_BRIDGE_FAULT_OBJECT"} {
+		path := os.Getenv(variable)
+		if path == "" {
+			t.Fatalf("required generated object: %s", variable)
+		}
+		spec, err := ebpf.LoadCollectionSpec(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := checkBridgeSpec(spec); err != nil {
+			t.Fatal(err)
+		}
+		kernelRelocations := 0
+		for _, ins := range spec.Programs["perf_consume"].Instructions {
+			if r := btf.CORERelocationMetadata(&ins); r != nil {
+				t.Logf("PERF_CORE object=%s relocation=%s", variable, r)
+				kernelRelocations++
+			}
+		}
+		if kernelRelocations == 0 {
+			t.Fatal("kernel field relocations disappeared along with context relocation")
+		}
+		t.Logf("PERF_CORE object=%s local_context_relocations=0 kernel_relocations=%d", variable, kernelRelocations)
+	}
+}
+
+func TestBridgePerfCounterBaseline(t *testing.T) {
+	f := newBridgeFixture(t, false)
+	counts := func() (uint64, uint64) {
+		var states []CPUState
+		if err := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); err != nil {
+			t.Fatal(err)
+		}
+		var raw, perf uint64
+		for _, state := range states {
+			raw += state.Consumes
+			perf += state.PerfConsumes
+		}
+		return raw, perf
+	}
+	beforeRaw, beforePerf := counts()
+	s, _ := bridgeSocket(t, 0)
+	for range 32 {
+		cookie := bridgeSend(t, s, []byte("perf-baseline"))
+		frame := bridgeRead(t, f, 1)[0]
+		if frame.Decision.Status != ReadCookie || frame.Decision.Packet.Cookie != cookie {
+			t.Fatal("baseline traffic did not have correct evidence", frame.Decision)
+		}
+	}
+	afterRaw, afterPerf := counts()
+	if afterRaw-beforeRaw != 32 || afterPerf-beforePerf != 32 {
+		t.Fatalf("unstressed counter baseline differs: raw=%d perf=%d want=32/32", afterRaw-beforeRaw, afterPerf-beforePerf)
+	}
+	t.Log("P2_PERF_BASELINE raw=32 perf=32 stressed_skip_control=not_yet_proved")
 }

@@ -66,7 +66,7 @@ func load(object, cgroup string, afterAttach func(string, *Probe) error) (_ *Pro
 	})
 	if err != nil {
 		// The concise error retains errno and the verifier's bounded tail.
-		return nil, fmt.Errorf("load owner proof programs/maps (BTF/helpers/verifier): %w", err)
+		return nil, loadError("load owner proof programs/maps (BTF/helpers/verifier)", err)
 	}
 	p := &Probe{Collection: collection}
 	defer func() {

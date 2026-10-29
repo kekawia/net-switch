@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/btf"
 	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
 )
@@ -68,9 +70,22 @@ func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
 	if err = checkBridgeSpec(spec); err != nil {
 		return nil, err
 	}
+	var format []byte
+	for _, root := range []string{"/sys/kernel/tracing", "/sys/kernel/debug/tracing"} {
+		format, err = os.ReadFile(root + "/events/skb/consume_skb/format")
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read consume_skb tracefs format: %w", err)
+	}
+	if err = checkConsumeFormat(string(format)); err != nil {
+		return nil, err
+	}
 	c, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{Programs: ebpf.ProgramOptions{LogSizeStart: 64 << 10}})
 	if err != nil {
-		return nil, fmt.Errorf("bridge verifier/load: %w", err)
+		return nil, loadError("bridge verifier/load", err)
 	}
 	b := &Bridge{Collection: c, config: cfg}
 	defer func() {
@@ -107,6 +122,13 @@ func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
 		return nil, fmt.Errorf("root cgroup link: %w", err)
 	}
 	b.links = append(b.links, l)
+	// Fixture-only skip control; its context was validated above. This counter
+	// never supplies read evidence. Attach before capture is enabled.
+	perf, err := link.Tracepoint("skb", "consume_skb", c.Programs["perf_consume"], nil)
+	if err != nil {
+		return nil, fmt.Errorf("perf tracepoint consume_skb counter: %w", err)
+	}
+	b.links = append(b.links, perf)
 	// Terminals precede capture. Reverse close detaches capture first.
 	for _, a := range [][2]string{{"consume", "consume_skb"}, {"freed", "kfree_skb"}, {"capture", "net_dev_start_xmit"}} {
 		l, e := link.AttachRawTracepoint(link.RawTracepointOptions{Name: a[1], Program: c.Programs[a[0]]})
@@ -144,6 +166,11 @@ func checkBridgeSpec(s *ebpf.CollectionSpec) error {
 		p := s.Programs[name]
 		if p == nil || p.Type != kind || p.License != "Dual MIT/GPL" {
 			return fmt.Errorf("bridge program mismatch: %s", name)
+		}
+	}
+	for _, ins := range s.Programs["perf_consume"].Instructions {
+		if r := btf.CORERelocationMetadata(&ins); r != nil && strings.Contains(r.String(), "consume_event") {
+			return fmt.Errorf("perf context incorrectly treated as kernel BTF: %s", r)
 		}
 	}
 	return nil

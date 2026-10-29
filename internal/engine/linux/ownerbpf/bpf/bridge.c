@@ -1,4 +1,3 @@
-/* UNVALIDATED WIP: not compiled, verifier-tested, or part of PR #109. */
 /* SPDX-License-Identifier: (MIT OR GPL-2.0-only)
  * Original isolated skb/read provenance experiment; no app identity authority.
  */
@@ -221,7 +220,11 @@ SEC("tracepoint/skb/consume_skb") int perf_consume(struct consume_event *ctx) {
     struct ns_config *cfg = lookup(&config, &zero);
     struct ns_cpu *state = lookup(&cpu_state, &zero);
     struct net_device *dev = 0;
-    if (cfg && state && !READ(dev, ctx->skbaddr->dev) && selected(dev, cfg))
+    /* The context is a checked tracefs ABI, not a kernel BTF type. Keeping
+     * this access outside preserve_access_index prevents a relocation for
+     * our private consume_event type. Only skb->dev is a kernel field. */
+    struct sk_buff *skb = ctx->skbaddr;
+    if (cfg && state && !READ(dev, skb->dev) && selected(dev, cfg))
         __sync_fetch_and_add(&state->perf_consumes, 1);
     return 0;
 }
