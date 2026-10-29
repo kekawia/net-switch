@@ -48,11 +48,12 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
+	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute"
 	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException" || name == "combiningNoOpenLine"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
 	ownerLine := secondLine
-	if name == "appLine" || name == "combining" || usageSlice {
+	if name == "appLine" || name == "combining" || usageSlice || healthSlice {
 		pins = map[string]string{}
 		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
 		ownerLine = firstLine
@@ -424,7 +425,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	// Compare external observations in trace order and associate each callback
 	// with its checked native operation. No default handler can earn a receipt.
 	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
-	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset")
+	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute")
 	var pinEvidence map[int]string
 	if name == "combining" {
 		pinEvidence = replayNativeCombiningSuffix(t, c, e, clock, files, trace, cmp, fileCursor)
@@ -442,6 +443,17 @@ func replayNativeStartup(t *testing.T, name string) {
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		if healthSlice && entry.Kind == "clock-tick" {
+			check("startup counterpart exhaustion", counterparts.Finish())
+			if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 {
+				t.Fatal("startup observation leftovers")
+			}
+			for seq, guard := range replayNativeHealthSuffix(t, c, e, clock, files, trace, cmp, fileCursor, entry.Seq) {
+				checked[seq] = guard
+			}
+			logIndex = len(files.logs)
+			break
+		}
 		if usageSlice && entry.Kind == "helper-line" {
 			check("startup counterpart exhaustion", counterparts.Finish())
 			if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 {
@@ -499,7 +511,7 @@ func replayNativeStartup(t *testing.T, name string) {
 				}
 				guard = "constructed native stores replace adapter directory setup"
 			case operation == "readdir":
-				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset") && v["ok"] == true) {
+				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset" || name == "lostDefaultRoute") && v["ok"] == true) {
 					t.Fatal("recorded cleanup failure guard")
 				}
 				guard = "complete revision replaces failed adapter directory cleanup"
@@ -633,7 +645,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			guard = "completed and published physical probe vote"
 		case "directory-list":
-			if (name != "appLine" && name != "capReset") || v["directory"] != "/oracle/data" {
+			if (name != "appLine" && name != "capReset" && name != "lostDefaultRoute") || v["directory"] != "/oracle/data" {
 				t.Fatal("unknown directory replacement", v)
 			}
 			guard = "complete revision cleanup contract"
@@ -662,7 +674,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			checked[entry.Seq] = guard
 		}
 	}
-	if logIndex != len(files.logs) || len(pendingLogs) != 0 || (!usageSlice && len(files.events) != 0) || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || (!usageSlice && !clock.Now().Equal(origin)) {
+	if logIndex != len(files.logs) || len(pendingLogs) != 0 || (!usageSlice && !healthSlice && len(files.events) != 0) || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || (!usageSlice && !healthSlice && !clock.Now().Equal(origin)) {
 		t.Fatal("startup leftover/timing guard")
 	}
 	check("file exhaustion", fileCursor.Finish())
