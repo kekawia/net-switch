@@ -124,4 +124,24 @@ checked against the response time. Reset event mappings are
 0f0f0f0f0f0f → 000000000010 and 101010101010 → 000000000011; exhaustion mappings
 match the Santiago trace. The journal accounts for the different ID sequence.
 
-The remaining three traces are not yet registered.
+## Moved-cap checkpoint
+
+capMoved's 222 entries are registered; aggregate **1,349 / 7,894**, producer
+and report exit 0. Its response-bounded cap transaction checks the same real
+handler and durability order as combining. Exhaustion moves b2 to a1 and then
+closes its physical flow using the acknowledged, durably saved cutoff.
+0f0f0f0f0f0f maps to native event 00000000000f. phone-flow maps to
+test-engine:1; owner, physical line, start and bytes stay in the supplied native
+observation. The oracle keeps returning that supplied snapshot after DELETE;
+the replay preserves that observation input, not a claim of socket resurrection.
+
+The named `checkNativePhysicalClosure` replacement also executes the real
+in-memory flow table: establish historical physical flows, apply the complete
+new policy, then close by physical line at its apply point. A later policy
+reopening b2 admits a new b2 flow; it and a new main flow survive the old cutoff.
+The table's point is its own ordered apply point, separate from the Control
+fixture's point, whose exact request and durable intent are checked at closure.
+No real sockets or engine process are used. This replaces the redundant second
+GET and DELETE under §§3.3/4.6; it is not an extra native observation request.
+
+The remaining two traces are not yet registered.

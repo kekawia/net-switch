@@ -108,6 +108,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("capMoved", func(t *testing.T) { replayNativeStartup(t, "capMoved") })
 	t.Run("capReset", func(t *testing.T) { replayNativeStartup(t, "capReset") })
 	t.Run("midnightGap", func(t *testing.T) { replayNativeStartup(t, "midnightGap") })
 	t.Run("combining", func(t *testing.T) { replayNativeStartup(t, "combining") })

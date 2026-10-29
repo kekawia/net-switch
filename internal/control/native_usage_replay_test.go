@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
+	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/replayledger"
 )
 
@@ -43,32 +46,63 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 	ids, reverse := map[string]string{}, map[string]string{}
 	polls, reads := 0, 0
 	resetTrace := trace.Name == "capReset"
+	movedTrace := trace.Name == "capMoved"
+	var supplied []engine.Connection
+	wireConnections := any([]any{})
+	flowIDs := map[string]string{}
+	stableSettings := replayJSON(t, files.data[filepath.Join("/test", "settings.json")])
 	var exhaustedPoint uint64
 	closes := 0
 	base := e.fakeEngine
 	base.readConnections = func(context.Context) ([]engine.Connection, error) {
 		reads++
 		files.recordOrder("native:connections")
-		return []engine.Connection{}, nil
+		return append([]engine.Connection{}, supplied...), nil
 	}
 	e.closeCheck = func(r engine.CloseRequest) (engine.CloseResult, error) {
-		if !resetTrace || polls != 3 || r.Line != "b2" || r.Instance != e.Snapshot().Instance || r.StartedBeforePoint != exhaustedPoint || r.ConnectionIDs != nil || r.OperationID == "" || !generated[r.OperationID] {
+		wantPoll := 3
+		if movedTrace {
+			wantPoll = 2
+			exhaustedPoint = e.Snapshot().AppliedPoint
+		}
+		if (!resetTrace && !movedTrace) || polls != wantPoll || r.Line != "b2" || r.Instance != e.Snapshot().Instance || r.StartedBeforePoint != exhaustedPoint || r.ConnectionIDs != nil || r.OperationID == "" || !generated[r.OperationID] {
 			return engine.CloseResult{}, fmt.Errorf("unfenced reset closure: %+v", r)
 		}
 		files.recordOrder("native:close")
-		closes++
-		return engine.CloseResult{}, nil
-	}
-	lastPoll := origin.UnixMilli()
-	startupCheck := e.check
-	e.check = func(r engine.Revision) error {
-		if err := startupCheck(r); err != nil {
-			return err
-		}
 		for _, name := range []string{"control-journal.json", "control-journal.json.bak"} {
 			var j struct{ Closures []closureIntent }
 			if err := json.Unmarshal(files.data[filepath.Join("/test", name)], &j); err != nil {
+				t.Fatal(err)
+			}
+			if len(j.Closures) != 1 || !reflect.DeepEqual(j.Closures[0].Request, r) {
+				t.Fatal("closure lacks durable acknowledged cutoff", name, j.Closures, r)
+			}
+		}
+		closes++
+		if movedTrace {
+			return engine.CloseResult{Closed: checkNativePhysicalClosure(t, supplied, r, e.want)}, nil
+		}
+		return engine.CloseResult{}, nil
+	}
+	lastPoll := origin.UnixMilli()
+	e.check = func(r engine.Revision) error {
+		for _, name := range []string{"control-journal.json", "control-journal.json.bak"} {
+			var j struct {
+				Closures []closureIntent
+				Desired  engine.Revision
+				Settings any
+				Wanted   bool
+			}
+			if err := json.Unmarshal(files.data[filepath.Join("/test", name)], &j); err != nil {
 				return err
+			}
+			if !j.Wanted || !reflect.DeepEqual(j.Desired, r) || !reflect.DeepEqual(replayJSON(t, files.data[filepath.Join("/test", "settings.json")]), stableSettings) {
+				return fmt.Errorf("%s changed usage settings or lacks desired revision", name)
+			}
+			for key, value := range stableSettings.(map[string]any) {
+				if !reflect.DeepEqual(j.Settings.(map[string]any)[key], value) {
+					return fmt.Errorf("%s changed saved setting %s", name, key)
+				}
 			}
 			if len(j.Closures) != 1 {
 				return fmt.Errorf("%s missing cap intent", name)
@@ -87,10 +121,29 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 	for pos := start; pos < len(trace.Entries); {
 		entry := trace.Entries[pos]
 		var v map[string]any
-		if err := json.Unmarshal(entry.Value, &v); err != nil {
+		if err := json.Unmarshal(entry.Value, &v); err != nil && entry.Kind != "connections" {
 			t.Fatal(err)
 		}
 		switch entry.Kind {
+		case "connections":
+			if len(supplied) != 0 || polls != 1 {
+				t.Fatal("flow fixture starting state")
+			}
+			if err := json.Unmarshal(entry.Value, &supplied); err != nil {
+				t.Fatal(err)
+			}
+			wireConnections = replayJSON(t, entry.Value)
+			for i := range supplied {
+				old := supplied[i].ID
+				native := fmt.Sprintf("%s:%d", e.Snapshot().Instance, i+1)
+				if old == "" || flowIDs[old] != "" {
+					t.Fatal("duplicate flow identity")
+				}
+				flowIDs[old] = native
+				supplied[i].ID = native
+			}
+			checked[pos] = "instance-scoped flow input bijection"
+			pos++
 		case "helper-line":
 			var input struct{ Line string }
 			_ = json.Unmarshal(entry.Value, &input)
@@ -144,9 +197,14 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			logsAt, eventsAt, effectAt := len(files.logs), len(files.events), len(files.order)
 			before := e.Snapshot()
 			want := twoLineNativeConfig(map[string]string{})
-			if polls == 2 {
+			if polls >= 2 && !resetTrace || polls == 2 {
 				want.Blocked = []string{"b2"}
 				want.Shares = map[string]uint64{"a1": 500000}
+				if movedTrace {
+					want.Blocked = []string{}
+					want.Shares = map[string]uint64{"a1": 500000, "b2": 500000}
+					want.Lanes["b2"] = "a1"
+				}
 			}
 			e.want = want
 			// Startup's journal/settings guard remains installed: physical usage
@@ -171,6 +229,9 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			if resetTrace && polls == 3 {
 				order = []string{"event", "log", "event", "log", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "native:connections", "native:close", "write:control-journal.json", "write:control-journal.json.bak"}
 			}
+			if movedTrace && polls == 2 {
+				order = []string{"event", "log", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "write:control-journal.json", "write:control-journal.json.bak", "lane-log", "native:connections", "platform:app-info", "native:close", "log", "write:control-journal.json", "write:control-journal.json.bak"}
+			}
 			if err := cmp.Effects(order...); err != nil {
 				t.Fatal("poll native ordering", err, files.order[effectAt:])
 			}
@@ -185,7 +246,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 			// Independent physical totals: the first sample is a baseline.
 			bytes := float64(0)
-			if polls == 2 {
+			if polls == 2 || movedTrace && polls > 2 {
 				bytes = 200
 			}
 			for _, line := range []string{"a1", "b2"} {
@@ -204,7 +265,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 			logSources := []int{}
 			for i := effectAt; i < len(files.order); i++ {
-				if files.order[i] == "log" || files.order[i] == "blocked-log" {
+				if files.order[i] == "log" || files.order[i] == "blocked-log" || files.order[i] == "lane-log" {
 					logSources = append(logSources, i)
 				}
 			}
@@ -212,24 +273,38 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				counterparts.want = append(counterparts.want, startupCounterpart{kind, id, source})
 			}
 			if polls == 2 || resetTrace && polls == 3 {
-				for i := 0; i < 2; i++ {
+				n := 2
+				if movedTrace {
+					n = 1
+				}
+				for i := 0; i < n; i++ {
 					add("log", "", logSources[i])
 				}
-				for i := 0; i < 2; i++ {
+				for i := 0; i < n; i++ {
 					add("async-result", "log.append", logSources[i])
 				}
 			}
+			if movedTrace && polls == 2 {
+				add("engine", "PUT /proxies/lane-b2", find("native:ack"))
+				add("engine-reply", "/proxies/lane-b2", find("native:ack"))
+				add("log", "", logSources[1])
+				add("async-result", "log.append", logSources[1])
+			}
 			add("engine", "GET /connections", find("native:connections"))
 			add("engine-reply", "/connections", find("native:connections"))
-			if resetTrace && polls == 3 {
+			if resetTrace && polls == 3 || movedTrace && polls == 2 {
 				add("engine", "GET /connections", find("native:close"))
 				add("engine-reply", "/connections", find("native:close"))
 			}
 			add("async-result", "engine./connections.json", find("native:connections"))
-			if resetTrace && polls == 3 {
+			if resetTrace && polls == 3 || movedTrace && polls == 2 {
 				add("async-result", "engine./connections.json", find("native:close"))
 			}
 			if polls == 2 {
+				if movedTrace {
+					add("engine", "DELETE /connections/phone-flow", find("native:close"))
+					add("engine-reply", "/connections/phone-flow", find("native:close"))
+				}
 				add("log", "", logSources[2])
 				add("async-result", "log.append", logSources[2])
 			}
@@ -288,7 +363,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 						}
 						pending = pending[1:]
 					case "engine./connections.json":
-						if value["undefined"] != false || !reflect.DeepEqual(value["args"], []any{}) || !reflect.DeepEqual(value["value"], map[string]any{"connections": []any{}}) {
+						if value["undefined"] != false || !reflect.DeepEqual(value["args"], []any{}) || !reflect.DeepEqual(value["value"], map[string]any{"connections": wireConnections}) {
 							t.Fatal("empty flow observation", value)
 						}
 					default:
@@ -296,12 +371,24 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 					}
 					guard = "completed ordered native counterpart"
 				case "engine":
+					if movedTrace && polls == 2 && value["route"] == "/proxies/lane-b2" && value["method"] == "PUT" && reflect.DeepEqual(value["body"], map[string]any{"name": "line-a1"}) {
+						guard = "acknowledged moved lane"
+						break
+					}
+					if movedTrace && polls == 2 && value["route"] == "/connections/phone-flow" && value["method"] == "DELETE" && closes == 1 && flowIDs["phone-flow"] != "" {
+						guard = "physical line and apply-point closure selected exact flow"
+						break
+					}
 					if value["route"] != "/connections" || value["method"] != "GET" {
 						t.Fatal("unmapped engine operation", x)
 					}
 					guard = "actual native connection observation"
 				case "engine-reply":
-					if value["route"] != "/connections" || value["status"] != float64(200) || !reflect.DeepEqual(value["body"], map[string]any{"connections": []any{}}) {
+					if movedTrace && polls == 2 && (value["route"] == "/proxies/lane-b2" || value["route"] == "/connections/phone-flow") && value["status"] == float64(200) && reflect.DeepEqual(value["body"], map[string]any{}) {
+						guard = "completed native apply or closure"
+						break
+					}
+					if value["route"] != "/connections" || value["status"] != float64(200) || !reflect.DeepEqual(value["body"], map[string]any{"connections": wireConnections}) {
 						t.Fatal("connection result", value)
 					}
 					guard = "actual empty native connection result"
@@ -357,6 +444,71 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			if end == len(trace.Entries) {
 				t.Fatal("missing response")
 			}
+			if v["method"] == "POST" {
+				if v["route"] != "/api/lines/update" {
+					t.Fatal("unexpected policy route")
+				}
+				settingsSeq := -1
+				for seq := pos + 1; seq < end; seq++ {
+					if trace.Entries[seq].Kind == "write" {
+						var w struct{ File string }
+						_ = json.Unmarshal(trace.Entries[seq].Value, &w)
+						if filepath.Base(w.File) == "settings.json" {
+							settingsSeq = seq
+						}
+					}
+				}
+				if settingsSeq < 0 {
+					t.Fatal("missing durable cap settings")
+				}
+				guard := e.check
+				want := twoLineNativeConfig(map[string]string{})
+				for seq, proof := range replayNativePolicySteps(t, c, e, clock, files, trace, cmp, []nativePolicyStep{{pos, end, settingsSeq, want}}) {
+					checked[seq] = proof
+				}
+				e.check = guard
+				var write struct{ Text string }
+				_ = json.Unmarshal(trace.Entries[settingsSeq].Value, &write)
+				stableSettings = replayJSON(t, []byte(write.Text))
+				for seq := pos + 1; seq < end; seq++ {
+					x := trace.Entries[seq]
+					var value map[string]any
+					_ = json.Unmarshal(x.Value, &value)
+					switch x.Kind {
+					case "file-completion":
+						matched, err := fileCursor.Observe(x)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if !matched {
+							file, _ := value["file"].(string)
+							if value["ok"] != true || !(strings.Contains(file, "apps-") || strings.Contains(file, "share-") || strings.Contains(file, "cut-")) {
+								t.Fatal("unmapped policy file", x)
+							}
+						}
+						checked[seq] = "completed policy file or acknowledged native revision"
+					case "write":
+						file := filepath.Base(value["file"].(string))
+						if file == "settings.json" || file == "settings.json.bak" {
+							if err := fileCursor.Publication(file, []byte(value["text"].(string))); err != nil {
+								t.Fatal(err)
+							}
+						} else if !(strings.HasPrefix(file, "apps-") || strings.HasPrefix(file, "share-") || strings.HasPrefix(file, "cut-")) {
+							t.Fatal("unmapped policy publication", x)
+						}
+						checked[seq] = "durable setting or complete literal revision"
+					case "completion":
+						if value["kind"] != trace.Entries[seq-1].Kind || checked[seq-1] == "" {
+							t.Fatal("unproved policy completion", x)
+						}
+						checked[seq] = checked[seq-1] + " completed"
+					default:
+						t.Fatal("unmapped policy observation", x)
+					}
+				}
+				pos = end + 1
+				continue
+			}
 			guard := replayStartupHTTP(t, c, entry, trace.Entries[end], cmp)
 			checked[pos], checked[end] = guard, guard
 			for seq := pos + 1; seq < end; seq++ {
@@ -383,6 +535,9 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 	if resetTrace {
 		wantPolls, wantEvents, wantCloses = 4, 4, 1
 	}
+	if movedTrace {
+		wantPolls, wantEvents, wantCloses = 3, 1, 1
+	}
 	if polls != wantPolls || reads != wantPolls || clock.Now().Sub(origin) != time.Duration(wantPolls)*time.Second || len(ids) != wantEvents || closes != wantCloses {
 		t.Fatal("usage replay cardinality", polls, reads, len(ids))
 	}
@@ -398,4 +553,93 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 		t.Fatal(err)
 	}
 	return checked
+}
+
+// A real flow-table counterpart for the physical selector. Historical flows
+// may have been admitted under earlier pins, independently of today's policy.
+// The fixture's repeated connection inputs remain observation snapshots; they
+// do not assert that a closed socket came back to life.
+func checkNativePhysicalClosure(t *testing.T, input []engine.Connection, request engine.CloseRequest, current policy.Config) int {
+	t.Helper()
+	table := flows.New(flows.Defaults(), nil)
+	t.Cleanup(table.CloseAll)
+	var revision uint64
+	apply := func(config policy.Config) policy.Applied {
+		revision++
+		a, err := table.Apply(policy.Revision{N: revision, Hash: policy.Hash(config), Config: config})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	for i, connection := range input {
+		if len(connection.Chains) != 1 {
+			t.Fatal("physical flow input", connection)
+		}
+		line := strings.TrimPrefix(connection.Chains[0], "line-")
+		config := twoLineNativeConfig(map[string]string{connection.Metadata.ProcessPath: line})
+		apply(config)
+		ticket, err := table.Begin("tcp", platform.Tuple{Source: netip.MustParseAddrPort(fmt.Sprintf("198.18.0.2:%d", 40000+i)), Destination: netip.MustParseAddrPort("203.0.113.9:443")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := ticket.Resolve(platform.Owner{AppID: connection.Metadata.ProcessPath, Path: connection.Metadata.ProcessPath}); err != nil {
+			t.Fatal(err)
+		}
+		ticket.Add(uint64(connection.Upload), uint64(connection.Download))
+		ticket.SetCancel(ticket.Close)
+	}
+	before, err := table.Page("")
+	if err != nil || len(before.Flows) != len(input) {
+		t.Fatal("closure starting flows", before, err)
+	}
+	for i, flow := range before.Flows {
+		if flow.Line != strings.TrimPrefix(input[i].Chains[0], "line-") || flow.Owner.Path != input[i].Metadata.ProcessPath || flow.Up != uint64(input[i].Upload) || flow.Down != uint64(input[i].Download) {
+			t.Fatal("native flow bijection", flow, input[i])
+		}
+	}
+	cutoff := apply(current).Point
+	// A later reset can reopen b2 before a delayed closure is delivered. The
+	// old cutoff must spare that new b2 flow, not merely spare another line.
+	apply(twoLineNativeConfig(map[string]string{"new-b2": "b2"}))
+	newLine, err := table.Begin("tcp", platform.Tuple{Source: netip.MustParseAddrPort("198.18.0.2:41001"), Destination: netip.MustParseAddrPort("203.0.113.11:443")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newLine.Resolve(platform.Owner{AppID: "new-b2"}); err != nil {
+		t.Fatal(err)
+	}
+	newLine.SetCancel(newLine.Close)
+	// A newer main flow must survive, as must every old unrelated main flow.
+	newer, err := table.Begin("tcp", platform.Tuple{Source: netip.MustParseAddrPort("198.18.0.2:41000"), Destination: netip.MustParseAddrPort("203.0.113.10:443")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newer.Resolve(platform.Owner{AppID: "new-main"}); err != nil {
+		t.Fatal(err)
+	}
+	newer.SetCancel(newer.Close)
+	result, err := table.CloseFlows(flows.Selector{Line: request.Line}, cutoff)
+	if err != nil || result.Failed != 0 || result.Gone != 0 {
+		t.Fatal("native physical closure", result, err)
+	}
+	want := 0
+	for _, flow := range before.Flows {
+		if flow.Line == request.Line {
+			want++
+		}
+	}
+	if want == 0 || result.Closed != want {
+		t.Fatal("exact selected native flows", result, want)
+	}
+	after, err := table.Page("")
+	if err != nil || len(after.Flows) != len(input)-want+2 {
+		t.Fatal("native closure survivors", after, err)
+	}
+	for _, flow := range after.Flows {
+		if flow.Line == request.Line && flow.Point < cutoff {
+			t.Fatal("old physical flow survived", flow)
+		}
+	}
+	return result.Closed
 }

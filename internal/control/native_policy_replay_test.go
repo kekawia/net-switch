@@ -12,6 +12,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/replayledger"
 )
 
@@ -57,22 +58,26 @@ func TestNativePolicyScenarioClock(t *testing.T) {
 // Every transaction runs on the continuously started Core. Original file
 // callbacks remain owned by the startup driver's exactly-once file cursor.
 func replayNativeCombiningSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator) map[int]string {
+	manual, strict := twoLineNativeConfig(map[string]string{}), twoLineNativeConfig(map[string]string{})
+	manual.Combine = true
+	manual.Shares = map[string]uint64{"a1": 250000, "b2": 750000}
+	strict.Shares = map[string]uint64{}
+	return replayNativePolicySteps(t, c, e, clock, files, trace, cmp, []nativePolicyStep{{129, 162, 152, manual}, {163, 194, 186, strict}, {195, 196, -1, strict}})
+}
+
+type nativePolicyStep struct {
+	begin, end, settings int
+	want                 policy.Config
+}
+
+func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, steps []nativePolicyStep) map[int]string {
 	t.Helper()
 	checked := map[int]string{}
-	steps := []struct{ begin, end, settings int }{{129, 162, 152}, {163, 194, 186}, {195, 196, -1}}
-	for i, step := range steps {
+	for _, step := range steps {
 		before := e.Snapshot()
 		applies, logs, events := e.applies, len(files.logs), len(files.events)
 		at, waits, probes := clock.Now(), clock.afterCalls.Load(), e.probes.Load()
-		want := twoLineNativeConfig(map[string]string{})
-		if i == 0 {
-			want.Combine = true
-			want.Shares = map[string]uint64{"a1": 250000, "b2": 750000}
-		} else {
-			// With fewer than two eligible lines, sharing is disabled entirely.
-			want.Shares = map[string]uint64{}
-		}
-		e.want = want
+		e.want = step.want
 		e.check = nil
 		if step.settings >= 0 {
 			var write struct{ Text string }
@@ -165,8 +170,11 @@ func replayNativeCombiningSuffix(t *testing.T, c *Core, e *nativeStartupEngine, 
 			counts[d.Line]++
 		}
 		expectedCounts := map[string]int{"a1": 400}
-		if i == 0 {
+		if step.want.Combine {
 			expectedCounts = map[string]int{"a1": 100, "b2": 300}
+			if step.want.Shares["a1"] == 500000 {
+				expectedCounts = map[string]int{"a1": 200, "b2": 200}
+			}
 		}
 		if !reflect.DeepEqual(counts, expectedCounts) {
 			t.Fatal("per-flow combining replacement", counts, expectedCounts)
