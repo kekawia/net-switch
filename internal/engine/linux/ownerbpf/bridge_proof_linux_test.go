@@ -9,12 +9,14 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -154,6 +156,14 @@ func newBridgeFixture(t *testing.T, fault bool, receiveFlags ...uint16) *bridgeF
 		t.Fatal(e)
 	}
 	t.Logf("BRIDGE kernel=%s arch=%s epoch=%d queue=500 cpu=%d offloads=0 abi=3 mode=raw_tracepoint", unix.ByteSliceToString(uts.Release[:]), runtime.GOARCH, f.epoch, cpu)
+	var programs []string
+	for name := range f.b.VerifierStats {
+		programs = append(programs, name)
+	}
+	slices.Sort(programs)
+	for _, name := range programs {
+		t.Logf("VERIFIER fault=%t program=%s %s", fault, name, f.b.VerifierStats[name])
+	}
 	return f
 }
 
@@ -455,6 +465,22 @@ func TestBridgeRelocations(t *testing.T) {
 		}
 		if err := checkBridgeSpec(spec); err != nil {
 			t.Fatal(err)
+		}
+		for _, name := range []string{"consume", "freed"} {
+			clockCalls := 0
+			for _, ins := range spec.Programs[name].Instructions {
+				if ins.IsBuiltinCall() && ins.Constant == int64(asm.FnKtimeGetNs) {
+					clockCalls++
+				}
+			}
+			want := 0
+			if variable == "NS_BRIDGE_FAULT_OBJECT" {
+				want = 17
+			}
+			if clockCalls != want {
+				t.Fatalf("%s %s compiled hold shape: clock sites=%d want=%d", variable, name, clockCalls, want)
+			}
+			t.Logf("HOLD_SHAPE object=%s program=%s clock_call_sites=%d", variable, name, clockCalls)
 		}
 		kernelRelocations := 0
 		for _, ins := range spec.Programs["perf_consume"].Instructions {

@@ -213,7 +213,9 @@ INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
      * evidence/counters: the kernel recursion guard must cause the refusal.
      * reserved = {active pid_tgid, release, ended}; mode 8 holds consume,
      * mode 16 holds free. Neither path is present in the normal object.
-     * 20k iterations bounds the verifier and runtime work even if control dies. */
+     * Keep 20k clock calls, but poll the data-dependent exits only between
+     * 16-call straight-line quanta. A branchy 20k loop exhausted the verifier's
+     * pending-jump stack. Both loops have static bounds; no new helper needed. */
     u32 zero = 0;
     struct ns_faults *f = lookup(&faults, &zero);
     struct ns_config *cfg = lookup(&config, &zero);
@@ -224,9 +226,14 @@ INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
         __sync_fetch_and_add(&f->hits, 1);
         f->reserved[0] = pid_tgid();
         u64 start = ktime_ns();
-        for (u32 i = 0; i < 20000; i++) {
-            if (*(volatile u64 *)&f->reserved[1] || ktime_ns() - start >= 20000000)
+        u64 now = start;
+#pragma clang loop unroll(disable)
+        for (u32 quantum = 0; quantum < 1250; quantum++) {
+            if (*(volatile u64 *)&f->reserved[1] || now - start >= 20000000)
                 break;
+#pragma unroll
+            for (u32 tick = 0; tick < 16; tick++)
+                now = ktime_ns();
         }
         f->reserved[2] = 1;
     }

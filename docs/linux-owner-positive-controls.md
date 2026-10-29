@@ -94,7 +94,8 @@ Inspected upstream v7.0
 [TUN NAPI path](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/net/tun.c?h=v7.0)
 and [sysfs namespace binding](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/sysfs/mount.c?h=v7.0).
 The distro kernel version alone does not prove the control; actual counters and
-hold state do. The hold is bounded by 20,000 iterations and 20 ms; insufficient
+hold state do. The hold has a 20,000-clock-call work ceiling and checks its
+20 ms deadline between 16-call quanta (see the verifier-complexity report); insufficient
 overlap fails. No arbitrary extension/retry is a passing result.
 
 Still outstanding: successful execution of these new controls, the real stale-

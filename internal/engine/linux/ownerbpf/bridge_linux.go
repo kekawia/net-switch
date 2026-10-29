@@ -46,6 +46,7 @@ type BridgeFault struct {
 // Bridge is an isolated proof collection. Close requires all readers joined
 // and the fixture's TUN closed/drained; it cannot destroy a caller-owned fd.
 type Bridge struct {
+	VerifierStats                                             map[string]string
 	Collection                                                *ebpf.Collection
 	config                                                    BridgeConfig
 	links                                                     []link.Link
@@ -85,16 +86,31 @@ func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
 	if err = checkConsumeFormat(string(format)); err != nil {
 		return nil, err
 	}
-	c, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{Programs: ebpf.ProgramOptions{LogSizeStart: 64 << 10}})
+	c, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{Programs: ebpf.ProgramOptions{
+		LogLevel: ebpf.LogLevelBranch | ebpf.LogLevelStats, LogSizeStart: 64 << 10,
+	}})
 	if err != nil {
 		return nil, loadError("bridge verifier/load", err)
 	}
-	b := &Bridge{Collection: c, config: cfg}
+	b := &Bridge{Collection: c, config: cfg, VerifierStats: make(map[string]string)}
 	defer func() {
 		if err != nil {
 			_ = b.closeObjects()
 		}
 	}()
+	for name, program := range c.Programs {
+		for _, line := range strings.Split(program.VerifierLog, "\n") {
+			if line = strings.TrimSpace(line); strings.HasPrefix(line, "processed ") {
+				b.VerifierStats[name] = strings.Clone(line)
+			}
+		}
+		if b.VerifierStats[name] == "" {
+			return nil, fmt.Errorf("verifier statistics missing for %s", name)
+		}
+		// Successful instruction traces can be large; retain the measured
+		// summary only. Failed loads still expose the complete verifier log.
+		program.VerifierLog = ""
+	}
 	if err = c.Maps["config"].Update(uint32(0), cfg, ebpf.UpdateAny); err != nil {
 		return nil, err
 	}
