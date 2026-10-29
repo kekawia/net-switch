@@ -141,6 +141,16 @@ func newBridgeFixture(t *testing.T, fault bool, receiveFlags ...uint16) *bridgeF
 	if e != nil {
 		t.Fatal(e)
 	}
+	if f.b.Faults() != 0 || f.b.stopped {
+		t.Fatal("new collection started unhealthy", f.epoch, f.b.Faults(), f.b.stopped)
+	}
+	var initialKey uint64
+	var initialPacket PacketRecord
+	initial := f.b.Collection.Maps["packets"].Iterate()
+	if initial.Next(&initialKey, &initialPacket) || initial.Err() != nil {
+		t.Fatal("new collection packet map is not empty", initial.Err())
+	}
+	t.Logf("P2_START epoch=%d fresh_collection=true health=0 packet_map_empty=true", f.epoch)
 	f.r, e = f.b.Register()
 	if e != nil {
 		t.Fatal(e)
@@ -523,5 +533,5 @@ func TestBridgePerfCounterBaseline(t *testing.T) {
 	if afterRaw-beforeRaw != 32 || afterPerf-beforePerf != 32 {
 		t.Fatalf("unstressed counter baseline differs: raw=%d perf=%d want=32/32", afterRaw-beforeRaw, afterPerf-beforePerf)
 	}
-	t.Log("P2_PERF_BASELINE raw=32 perf=32 stressed_skip_control=not_yet_proved")
+	t.Log("P2_PERF_BASELINE raw=32 perf=32 scope=unstressed stress_control=TestBridgePerfSkippedConsumes")
 }

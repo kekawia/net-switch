@@ -4,6 +4,7 @@ package ownerbpf
 
 import (
 	"errors"
+	"fmt"
 	"runtime"
 	"testing"
 	"time"
@@ -134,6 +135,104 @@ func setProofPriority(priority int32) error {
 	return nil
 }
 
+func verifyProofThread(cpu int, priority uint32) error {
+	a, err := unix.SchedGetAttr(0, 0)
+	if err != nil {
+		return err
+	}
+	want := uint32(unix.SCHED_NORMAL)
+	if priority != 0 {
+		want = unix.SCHED_FIFO
+	}
+	var mask unix.CPUSet
+	if err := unix.SchedGetaffinity(0, &mask); err != nil {
+		return err
+	}
+	if a.Policy != want || a.Priority != priority || mask.Count() != 1 || !mask.IsSet(cpu) {
+		return fmt.Errorf("scheduler readback tid=%d policy=%d priority=%d cpu=%d mask=%v", unix.Gettid(), a.Policy, a.Priority, cpu, mask)
+	}
+	return nil
+}
+
+// Complete controller setup before the holder can enter the bounded BPF
+// window. Starting a goroutine is not evidence it has run, pinned, or polled.
+func readyHoldController(t *testing.T, f *bridgeFixture, trigger func()) <-chan error {
+	t.Helper()
+	ready := make(chan error, 1)
+	result := make(chan error, 1)
+	cancel := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		var old unix.CPUSet
+		if err := unix.SchedGetaffinity(0, &old); err != nil {
+			ready <- err
+			return
+		}
+		var mask unix.CPUSet
+		cpu := (f.cpu + 1) % 2
+		mask.Set(cpu)
+		if err := unix.SchedSetaffinity(0, &mask); err != nil {
+			ready <- err
+			return
+		}
+		defer func() {
+			if err := unix.SchedSetaffinity(0, &old); err != nil {
+				t.Error(err)
+			}
+		}()
+		if err := setProofPriority(30); err != nil {
+			ready <- err
+			return
+		}
+		defer func() {
+			if err := setProofPriority(0); err != nil {
+				t.Error(err)
+			}
+		}()
+		if err := verifyProofThread(cpu, 30); err != nil {
+			ready <- err
+			return
+		}
+		t.Logf("P2_CONTROLLER ready=true tid=%d cpu=%d policy=FIFO priority=30", unix.Gettid(), cpu)
+		ready <- nil
+		deadline := time.Now().Add(time.Second)
+		for time.Now().Before(deadline) {
+			select {
+			case <-cancel:
+				return
+			default:
+			}
+			var active BridgeFault
+			if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &active); err != nil {
+				result <- err
+				return
+			}
+			if active.Reserved[0] != 0 {
+				if active.Reserved[2] != 0 {
+					result <- fmt.Errorf("hold ended before ready controller observed it: holder=%d hits=%d", active.Reserved[0], active.Hits)
+					return
+				}
+				trigger()
+				result <- nil
+				// Park here to hand the Go execution token to the waiting
+				// actor. Restoring affinity now could move this controller
+				// behind the held FIFO task before that handoff completed.
+				<-cancel
+				return
+			}
+		}
+		result <- errors.New("ready controller never observed the armed hold")
+	}()
+	t.Cleanup(func() { close(cancel); <-done })
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func TestBridgePreemptedReader(t *testing.T) {
 	f := newBridgeFixture(t, true)
 	if runtime.NumCPU() < 2 {
@@ -183,6 +282,11 @@ func TestBridgePreemptedReader(t *testing.T) {
 				t.Error(err)
 			}
 		}()
+		if err := verifyProofThread(f.cpu, 20); err != nil {
+			ready <- err
+			return
+		}
+		t.Logf("P2_READER ready=true tid=%d cpu=%d policy=FIFO priority=20", unix.Gettid(), f.cpu)
 		ready <- nil
 		select {
 		case <-start:
@@ -219,36 +323,23 @@ func TestBridgePreemptedReader(t *testing.T) {
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
-	controller := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		var affinity unix.CPUSet
-		affinity.Set((f.cpu + 1) % 2)
-		if err := unix.SchedSetaffinity(0, &affinity); err != nil {
-			controller <- err
-			return
+	controller := readyHoldController(t, f, func() { close(start) })
+	if err := setProofPriority(10); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := setProofPriority(0); err != nil {
+			t.Error(err)
 		}
-		deadline := time.Now().Add(time.Second)
-		for time.Now().Before(deadline) {
-			var active BridgeFault
-			if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &active); err != nil {
-				controller <- err
-				return
-			}
-			if active.Reserved[0] != 0 {
-				if active.Reserved[2] != 0 {
-					controller <- errors.New("bounded hold ended before preemption stimulus")
-					return
-				}
-				close(start)
-				controller <- nil
-				return
-			}
-		}
-		controller <- errors.New("consume hold was never observed")
 	}()
+	if err := verifyProofThread(f.cpu, 10); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("P2_HOLDER ready=true tid=%d cpu=%d policy=FIFO priority=10", unix.Gettid(), f.cpu)
 	a, aerr := f.r.ReadBurst(f.fd, 1)
+	if err := setProofPriority(0); err != nil {
+		t.Fatal(err)
+	}
 	if err := <-controller; err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +380,24 @@ func TestBridgePreemptedReader(t *testing.T) {
 
 func TestBridgeNestedFreeSkip(t *testing.T) {
 	f := newBridgeFixture(t, true)
+	if runtime.NumCPU() < 2 {
+		t.Fatal("two CPUs required for ready nested-free stimulus")
+	}
+	assertHealthy := func(stage string) {
+		f.b.mu.Lock()
+		stopped := f.b.stopped
+		f.b.mu.Unlock()
+		health := f.b.Faults()
+		var reasons [8]uint64
+		if err := f.b.Collection.Maps["health"].Lookup(uint32(0), &reasons); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("P2_STAGE epoch=%d stage=%s health=%d stopped=%t fault_reasons_capture_existing_update_delete_stamp=%v", f.epoch, stage, health, stopped, reasons[3:])
+		if health != 0 || stopped {
+			t.Fatalf("nested-free starting condition failed at %s; no reset performed", stage)
+		}
+	}
+	assertHealthy("fresh")
 	s, _ := bridgeSocket(t, 0)
 	for range 500 {
 		bridgeSend(t, s, []byte("fill-ring"))
@@ -304,6 +413,7 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 	if err := it.Err(); err != nil || occupied != 500 {
 		t.Fatal("full ring precondition", occupied, err)
 	}
+	assertHealthy("ring-filled")
 	l, err := netlink.LinkByName("nsbridge0")
 	if err != nil || l.Attrs().Statistics == nil {
 		t.Fatal(err)
@@ -313,6 +423,7 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 	if err := netlink.QdiscReplace(q); err != nil {
 		t.Fatal("netem positive-control prerequisite", err)
 	}
+	assertHealthy("qdisc-installed")
 	before, err := f.b.Sample()
 	if err != nil {
 		t.Fatal(err)
@@ -321,20 +432,108 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
-	for range 8 {
-		bridgeSend(t, s, []byte("timer-drop"))
+	ready := make(chan error, 1)
+	start := make(chan struct{})
+	cancel := make(chan struct{})
+	sent := make(chan error, 1)
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		var old unix.CPUSet
+		if err := unix.SchedGetaffinity(0, &old); err != nil {
+			ready <- err
+			return
+		}
+		var mask unix.CPUSet
+		mask.Set(f.cpu)
+		if err := unix.SchedSetaffinity(0, &mask); err != nil {
+			ready <- err
+			return
+		}
+		defer func() {
+			if err := unix.SchedSetaffinity(0, &old); err != nil {
+				t.Error(err)
+			}
+		}()
+		if err := setProofPriority(20); err != nil {
+			ready <- err
+			return
+		}
+		defer func() {
+			if err := setProofPriority(0); err != nil {
+				t.Error(err)
+			}
+		}()
+		if err := verifyProofThread(f.cpu, 20); err != nil {
+			ready <- err
+			return
+		}
+		t.Logf("P2_SENDER ready=true tid=%d cpu=%d policy=FIFO priority=20", unix.Gettid(), f.cpu)
+		ready <- nil
+		select {
+		case <-start:
+		case <-cancel:
+			return
+		}
+		for range 8 {
+			if err := unix.Sendto(s, []byte("timer-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
+				sent <- err
+				return
+			}
+		}
+		sent <- nil
+		// Park the higher-priority sender so the held FIFO-10 task resumes
+		// before the queued timer traffic arrives on this same CPU.
+		<-cancel
+	}()
+	t.Cleanup(func() { close(cancel); <-joined })
+	if err := <-ready; err != nil {
+		t.Fatal(err)
+	}
+	controller := readyHoldController(t, f, func() { close(start) })
+	assertHealthy("stimulus-ready")
+	if err := setProofPriority(10); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := setProofPriority(0); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := verifyProofThread(f.cpu, 10); err != nil {
+		t.Fatal(err)
 	}
 	// A real copy fault frees the reader's packet in task context. The netem
 	// timer must interrupt that held free callback and drop from the full ring.
+	called := false
 	_, readErr := f.r.readBurst(f.fd, 1, func(fd int, _ []byte) (int, error) {
+		called = true
 		_, _, errno := unix.Syscall(unix.SYS_READ, uintptr(fd), 1, 64)
 		if errno == 0 {
 			return 0, errors.New("invalid destination did not fault")
 		}
 		return -1, errno
 	})
+	if err := setProofPriority(0); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-controller; err != nil {
+		var reasons [8]uint64
+		lookupErr := f.b.Collection.Maps["health"].Lookup(uint32(0), &reasons)
+		t.Fatalf("nested-free stimulus: syscall_entered=%t health=%d reasons=%v lookup=%v: %v", called, f.b.Faults(), reasons[3:], lookupErr, err)
+	}
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ready sender did not finish")
+	}
 	if !errors.Is(readErr, unix.EFAULT) || !errors.Is(readErr, ErrEpochRebuild) {
-		t.Fatal("copy-fault precondition", readErr)
+		t.Fatalf("copy-fault precondition: syscall_entered=%t health=%d: %v", called, f.b.Faults(), readErr)
 	}
 	if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &ctl); err != nil {
 		t.Fatal(err)

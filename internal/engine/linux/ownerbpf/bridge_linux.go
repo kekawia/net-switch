@@ -347,14 +347,14 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 	}
 	b.mu.Unlock()
 	if stopped {
-		return nil, ErrEpochRebuild
+		return nil, fmt.Errorf("%w: reader publication gate already stopped", ErrEpochRebuild)
 	}
 	defer b.activeReads.Done()
 	frames := make([]ReadFrame, 0, limit)
 	var readFailure error
 	for len(frames) < limit {
-		if b.Faults() != 0 || r.sequence == ^uint64(0) {
-			readFailure = ErrEpochRebuild
+		if health := b.Faults(); health != 0 || r.sequence == ^uint64(0) {
+			readFailure = fmt.Errorf("%w: before syscall health=%d sequence=%d", ErrEpochRebuild, health, r.sequence)
 			break
 		}
 		r.sequence++

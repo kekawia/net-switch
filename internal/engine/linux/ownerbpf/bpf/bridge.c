@@ -28,7 +28,10 @@ struct ns_config {
     u64 background_cookie;
     u64 reserved[3];
 };
-struct ns_health { u64 epoch_faults, init_calls, init_zero, reserved[5]; };
+struct ns_health {
+    u64 epoch_faults, init_calls, init_zero;
+    u64 capture_fault, existing_key, update_failure, delete_failure, stamp_failure;
+};
 struct ns_cpu {
     u64 serial, depth, captures, guard_miss, cookie_missing, shared, read_fail;
     u64 consumes, frees, perf_consumes, deleted;
@@ -71,10 +74,18 @@ MAP(cpu_state, 6, 1, u32, struct ns_cpu, 0);
 MAP(faults, 2, 1, u32, struct ns_faults, 0);
 #endif
 
-INLINE void fault(void) {
+INLINE void fault(u32 reason) {
     u32 zero = 0;
     struct ns_health *h = lookup(&health, &zero);
-    if (h) __sync_fetch_and_add(&h->epoch_faults, 1);
+    if (!h) return;
+    __sync_fetch_and_add(&h->epoch_faults, 1);
+    /* Same 64-byte map ABI; previously reserved words explain the first fault
+     * without resetting the sticky epoch or changing attribution decisions. */
+    if (reason == 1) __sync_fetch_and_add(&h->existing_key, 1);
+    else if (reason == 2) __sync_fetch_and_add(&h->update_failure, 1);
+    else if (reason == 3) __sync_fetch_and_add(&h->delete_failure, 1);
+    else if (reason == 4) __sync_fetch_and_add(&h->stamp_failure, 1);
+    else __sync_fetch_and_add(&h->capture_fault, 1);
 }
 
 INLINE int selected(struct net_device *dev, struct ns_config *cfg) {
@@ -115,13 +126,13 @@ SEC("raw_tracepoint/net_dev_start_xmit") int capture(struct raw_args *ctx) {
     struct net_device *dev = (void *)ctx->args[1];
     if (!selected(dev, cfg)) return 0;
     struct ns_cpu *state = lookup(&cpu_state, &zero);
-    if (!state) { fault(); return 0; }
+    if (!state) { fault(0); return 0; }
     __sync_fetch_and_add(&state->depth, 1);
     if (*(volatile u64 *)&state->depth != 1) {
         __sync_fetch_and_add(&state->guard_miss, 1);
         goto out;
     }
-    if (state->serial == ~0ULL) { fault(); goto out; }
+    if (state->serial == ~0ULL) { fault(0); goto out; }
     state->serial++;
     struct sk_buff *skb = (void *)ctx->args[0];
     u64 address = (u64)skb;
@@ -144,8 +155,8 @@ SEC("raw_tracepoint/net_dev_start_xmit") int capture(struct raw_args *ctx) {
     if (!p.cookie) { p.status = 0; __sync_fetch_and_add(&state->cookie_missing, 1); }
     if (p.users != 1) { p.status = 0; __sync_fetch_and_add(&state->shared, 1); }
     state->cookie = p.cookie;
-    if (lookup(&packets, &address)) { fault(); goto out; }
-    if (update(&packets, &address, &p, 0)) fault();
+    if (lookup(&packets, &address)) { fault(1); goto out; }
+    if (update(&packets, &address, &p, 0)) fault(2);
     else __sync_fetch_and_add(&state->captures, 1);
 out:
     __sync_fetch_and_add(&state->depth, -1);
@@ -167,8 +178,8 @@ INLINE int terminal(struct sk_buff *skb, u32 kind) {
     if (!found) return 0;
     struct ns_packet_record p = *found;
     /* Retirement is independent of reader matching and publication faults. */
-    if (inject(4, p.epoch, p.cpu, p.serial, address)) { p.status = 0; fault(); }
-    else if (erase(&packets, &address)) { p.status = 0; fault(); }
+    if (inject(4, p.epoch, p.cpu, p.serial, address)) { p.status = 0; fault(3); }
+    else if (erase(&packets, &address)) { p.status = 0; fault(3); }
     else __sync_fetch_and_add(&state->deleted, 1);
     if (inject(2, p.epoch, p.cpu, p.serial, address)) return 0;
     u64 id = pid_tgid();
@@ -187,7 +198,7 @@ INLINE int terminal(struct sk_buff *skb, u32 kind) {
         __sync_fetch_and_add(&state->nested, 1);
     u64 start = 0;
     struct task_struct *task = current_task();
-    if (READ(start, task->start_boottime) || !start) { fault(); return 0; }
+    if (READ(start, task->start_boottime) || !start) { fault(4); return 0; }
     __sync_fetch_and_add(&r->stamp_guard, 1);
     if (*(volatile u64 *)&r->stamp_guard != 1) {
         __sync_fetch_and_add(&r->stamp_guard, -1);
@@ -199,7 +210,7 @@ INLINE int terminal(struct sk_buff *skb, u32 kind) {
     }
     int valid = r->start_boottime == start;
     __sync_fetch_and_add(&r->stamp_guard, -1);
-    if (!valid) { fault(); return 0; }
+    if (!valid) { fault(4); return 0; }
     s->completion.sequence = s->control.sequence;
     s->completion.registration = r->generation;
     s->completion.terminal = kind;
@@ -223,6 +234,18 @@ INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
     if (f && cfg && f->mode == mode && f->epoch == cfg->epoch &&
         f->cpu == cpu_id() && !f->hits &&
         !READ(dev, skb->dev) && selected(dev, cfg)) {
+        /* Only the armed read may open the hold. A queue drop during setup
+         * must not consume this one-shot control before the intended read. */
+        u64 id = pid_tgid();
+        struct ns_reader_key key = { .tgid = id >> 32, .tid = (u32)id };
+        struct ns_reader_registration *r = lookup(&readers, &key);
+        if (!r || r->slot >= NS_READER_LIMIT || r->epoch != cfg->epoch)
+            return;
+        u32 slot = r->slot;
+        struct ns_reader_slot *s = lookup(&read_slots, &slot);
+        if (!s || s->control.armed != 1 || s->control.epoch != cfg->epoch ||
+            s->control.registration != r->generation)
+            return;
         __sync_fetch_and_add(&f->hits, 1);
         f->reserved[0] = pid_tgid();
         u64 start = ktime_ns();
