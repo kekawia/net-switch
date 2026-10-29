@@ -1,0 +1,306 @@
+{
+  "schemaVersion": 1,
+  "abiVersion": 3,
+  "generator": {
+    "script": "scripts/generate-owner-bpf.mjs",
+    "compiler": "clang 18.1.3-1",
+    "loader": "github.com/cilium/ebpf@v0.22.0",
+    "sources": {
+      "internal/engine/linux/ownerbpf/bpf/abi.h": "6fc35a531affc0e1576969f1f78992f9ccf443916148c2979484d8e162125f29",
+      "internal/engine/linux/ownerbpf/bpf/attribution.c": "529ba7fa6eeef7be3c2649fcd5d7890a70a5575047a68300bebb9143f87029f5",
+      "internal/engine/linux/ownerbpf/bpf/provenance.h": "96d2f1becbf0a89ef6394c8eeb6435ce04cfd8eab47be69b16c951b3e6e159b4",
+      "internal/engine/linux/ownerbpf/bpf/bridge.c": "6a8cbe7323a0eec3f6377bc7f5bcff3b72cdcc8f0b4a98d7aac2e9a1fdfad892"
+    },
+    "objects": {
+      "internal/engine/linux/ownerbpf/testdata/bridge_x86_bpfel.o": {
+        "architecture": "amd64",
+        "faultBuild": false,
+        "sha256": "e57c006c804b453c7f5554865ff93dd42b462be6123495a627da4907fff9e217"
+      },
+      "internal/engine/linux/ownerbpf/testdata/bridge_arm64_bpfel.o": {
+        "architecture": "arm64",
+        "faultBuild": false,
+        "sha256": "e57c006c804b453c7f5554865ff93dd42b462be6123495a627da4907fff9e217"
+      },
+      "internal/engine/linux/ownerbpf/testdata/fault_x86_bpfel.o": {
+        "architecture": "amd64",
+        "faultBuild": true,
+        "compileDefine": "NS_OWNER_PROOF_FAULTS=1",
+        "sha256": "e88c98d439782800ed9f7cf93f933a4dfa6d3747aa6ce2c905499cf18ab6b529"
+      },
+      "internal/engine/linux/ownerbpf/testdata/fault_arm64_bpfel.o": {
+        "architecture": "arm64",
+        "faultBuild": true,
+        "compileDefine": "NS_OWNER_PROOF_FAULTS=1",
+        "sha256": "e88c98d439782800ed9f7cf93f933a4dfa6d3747aa6ce2c905499cf18ab6b529"
+      },
+      "internal/engine/linux/ownerbpf/testdata/proof_x86_bpfel.o": {
+        "architecture": "amd64",
+        "faultBuild": false,
+        "sha256": "8642e21dca4d75a865a727dc12ffc055ce64c7c6b9f1a2fd6ccf36fa095125a6"
+      },
+      "internal/engine/linux/ownerbpf/testdata/proof_arm64_bpfel.o": {
+        "architecture": "arm64",
+        "faultBuild": false,
+        "sha256": "29c2995dec7b62f54d4dfca3c13e6ebc2be5d902d1c1a25752c517679fb904cd"
+      }
+    }
+  },
+  "kernels": [
+    {
+      "tag": "v5.8",
+      "sourceCommit": "bcf876870b95592b52519ed4aafcf9d95999bc9c",
+      "architectures": ["amd64", "arm64"],
+      "rawRecursionGuard": false,
+      "recursionMissesField": false
+    },
+    {
+      "tag": "v7.0",
+      "sourceCommit": "028ef9c96e96197026887c0f092424679298aae8",
+      "hostedRelease": "7.0.0-1017-azure",
+      "architectures": ["amd64", "arm64"],
+      "rawRecursionGuard": true,
+      "recursionMissesField": true
+    }
+  ],
+  "maps": [
+    {
+      "name": "packets",
+      "type": "BPF_MAP_TYPE_HASH",
+      "maxEntries": 2048,
+      "productionMaxEntries": 32768,
+      "keySize": 8,
+      "valueSize": 128,
+      "flags": 0,
+      "preallocated": true
+    },
+    {
+      "name": "readers",
+      "type": "BPF_MAP_TYPE_HASH",
+      "maxEntries": 4,
+      "keySize": 8,
+      "valueSize": 48,
+      "flags": 0,
+      "preallocated": true
+    },
+    {
+      "name": "read_slots",
+      "type": "BPF_MAP_TYPE_ARRAY",
+      "maxEntries": 4,
+      "keySize": 4,
+      "valueSize": 256,
+      "flags": 1024,
+      "flagNames": ["BPF_F_MMAPABLE"],
+      "preallocated": true
+    },
+    {
+      "name": "config",
+      "type": "BPF_MAP_TYPE_ARRAY",
+      "maxEntries": 1,
+      "keySize": 4,
+      "valueSize": 64,
+      "flags": 0,
+      "preallocated": true
+    },
+    {
+      "name": "health",
+      "type": "BPF_MAP_TYPE_ARRAY",
+      "maxEntries": 1,
+      "keySize": 4,
+      "valueSize": 64,
+      "flags": 1024,
+      "flagNames": ["BPF_F_MMAPABLE"],
+      "preallocated": true
+    },
+    {
+      "name": "cpu_state",
+      "type": "BPF_MAP_TYPE_PERCPU_ARRAY",
+      "maxEntries": 1,
+      "keySize": 4,
+      "valueSize": 128,
+      "flags": 0,
+      "preallocated": true
+    },
+    {
+      "name": "faults",
+      "type": "BPF_MAP_TYPE_ARRAY",
+      "maxEntries": 1,
+      "keySize": 4,
+      "valueSize": 64,
+      "flags": 0,
+      "faultBuildOnly": true,
+      "preallocated": true
+    }
+  ],
+  "adapters": [
+    {
+      "programName": "init_egress_cookie",
+      "section": "cgroup_skb/egress",
+      "programType": "BPF_PROG_TYPE_CGROUP_SKB",
+      "attachType": "BPF_CGROUP_INET_EGRESS",
+      "attachmentAPI": "link.AttachCgroup(BPF_CGROUP_INET_EGRESS, BPF_F_ALLOW_MULTI)",
+      "attachmentName": "/sys/fs/cgroup",
+      "owningFDClass": "bpf_link (or prog_attach_fd)",
+      "rawArguments": [
+        { "index": 0, "cType": "struct __sk_buff *", "role": "skb_context" }
+      ],
+      "coreFields": [],
+      "helpers": [
+        { "id": 1, "name": "bpf_map_lookup_elem" },
+        { "id": 46, "name": "bpf_get_socket_cookie" }
+      ],
+      "maps": ["health"],
+      "lockdownRequirement": "none or integrity (confidentiality selects degraded fallback)",
+      "teardownOrder": 4,
+      "fixtureIDs": ["P1_PAIR", "P1_PRE_LOADER", "P1_DROP"]
+    },
+    {
+      "programName": "capture",
+      "section": "raw_tracepoint/net_dev_start_xmit",
+      "programType": "BPF_PROG_TYPE_RAW_TRACEPOINT",
+      "attachmentAPI": "link.AttachRawTracepoint(BPF_RAW_TRACEPOINT_OPEN)",
+      "attachmentName": "net_dev_start_xmit",
+      "owningFDClass": "raw_tracepoint_fd",
+      "rawArguments": [
+        { "index": 0, "cType": "struct sk_buff *", "role": "skb" },
+        { "index": 1, "cType": "struct net_device *", "role": "dev" }
+      ],
+      "coreFields": [
+        "sk_buff.dev",
+        "sk_buff.len",
+        "sk_buff.users.refs.counter",
+        "sk_buff.sk",
+        "sock.__sk_common.skc_cookie.counter",
+        "net_device.ifindex",
+        "net_device.nd_net.net",
+        "net.ns.inum"
+      ],
+      "helpers": [
+        { "id": 1, "name": "bpf_map_lookup_elem" },
+        { "id": 2, "name": "bpf_map_update_elem" },
+        { "id": 5, "name": "bpf_ktime_get_ns", "faultBuildOnly": true },
+        { "id": 8, "name": "bpf_get_smp_processor_id" },
+        { "id": 113, "name": "bpf_probe_read_kernel" }
+      ],
+      "maps": ["config", "health", "cpu_state", "packets", "faults"],
+      "lockdownRequirement": "none or integrity (confidentiality blocks bpf_probe_read_kernel and selects degraded fallback)",
+      "teardownOrder": 1,
+      "fixtureIDs": ["P1_PAIR", "P1_DROP", "P2_REUSE", "P2_LIFETIMES", "P2_STALE_MUTATION"]
+    },
+    {
+      "programName": "consume",
+      "section": "raw_tracepoint/consume_skb",
+      "programType": "BPF_PROG_TYPE_RAW_TRACEPOINT",
+      "attachmentAPI": "link.AttachRawTracepoint(BPF_RAW_TRACEPOINT_OPEN)",
+      "attachmentName": "consume_skb",
+      "owningFDClass": "raw_tracepoint_fd",
+      "rawArguments": [
+        { "index": 0, "cType": "struct sk_buff *", "role": "skb" }
+      ],
+      "coreFields": [
+        "sk_buff.dev",
+        "net_device.ifindex",
+        "net_device.nd_net.net",
+        "net.ns.inum",
+        "task_struct.start_boottime"
+      ],
+      "helpers": [
+        { "id": 1, "name": "bpf_map_lookup_elem" },
+        { "id": 3, "name": "bpf_map_delete_elem" },
+        { "id": 5, "name": "bpf_ktime_get_ns", "faultBuildOnly": true },
+        { "id": 8, "name": "bpf_get_smp_processor_id" },
+        { "id": 14, "name": "bpf_get_current_pid_tgid" },
+        { "id": 35, "name": "bpf_get_current_task" },
+        { "id": 113, "name": "bpf_probe_read_kernel" }
+      ],
+      "maps": ["config", "health", "cpu_state", "packets", "readers", "read_slots", "faults"],
+      "lockdownRequirement": "none or integrity (confidentiality blocks bpf_probe_read_kernel and selects degraded fallback)",
+      "teardownOrder": 2,
+      "fixtureIDs": ["P1_PAIR", "P1_DROP", "P2_REUSE", "P2_PREEMPT_SKIP", "P2_LIFETIMES"]
+    },
+    {
+      "programName": "freed",
+      "section": "raw_tracepoint/kfree_skb",
+      "programType": "BPF_PROG_TYPE_RAW_TRACEPOINT",
+      "attachmentAPI": "link.AttachRawTracepoint(BPF_RAW_TRACEPOINT_OPEN)",
+      "attachmentName": "kfree_skb",
+      "owningFDClass": "raw_tracepoint_fd",
+      "rawArguments": [
+        { "index": 0, "cType": "struct sk_buff *", "role": "skb" }
+      ],
+      "coreFields": [
+        "sk_buff.dev",
+        "net_device.ifindex",
+        "net_device.nd_net.net",
+        "net.ns.inum",
+        "task_struct.start_boottime"
+      ],
+      "helpers": [
+        { "id": 1, "name": "bpf_map_lookup_elem" },
+        { "id": 3, "name": "bpf_map_delete_elem" },
+        { "id": 5, "name": "bpf_ktime_get_ns", "faultBuildOnly": true },
+        { "id": 8, "name": "bpf_get_smp_processor_id" },
+        { "id": 14, "name": "bpf_get_current_pid_tgid" },
+        { "id": 35, "name": "bpf_get_current_task" },
+        { "id": 113, "name": "bpf_probe_read_kernel" }
+      ],
+      "maps": ["config", "health", "cpu_state", "packets", "readers", "read_slots", "faults"],
+      "lockdownRequirement": "none or integrity (confidentiality blocks bpf_probe_read_kernel and selects degraded fallback)",
+      "teardownOrder": 3,
+      "fixtureIDs": ["P1_DROP", "P2_DELETE", "P2_EFAULT", "P2_NESTED_FREE_SKIP", "P2_STALE_MUTATION", "P2_LIFETIMES"]
+    },
+    {
+      "programName": "observe_nested_free",
+      "section": "raw_tracepoint/kfree_skb",
+      "programType": "BPF_PROG_TYPE_RAW_TRACEPOINT",
+      "attachmentAPI": "link.AttachRawTracepoint(BPF_RAW_TRACEPOINT_OPEN)",
+      "attachmentName": "kfree_skb",
+      "owningFDClass": "raw_tracepoint_fd",
+      "faultBuildOnly": true,
+      "rawArguments": [
+        { "index": 0, "cType": "struct sk_buff *", "role": "skb" }
+      ],
+      "coreFields": [
+        "sk_buff.dev",
+        "net_device.ifindex",
+        "net_device.nd_net.net",
+        "net.ns.inum"
+      ],
+      "helpers": [
+        { "id": 1, "name": "bpf_map_lookup_elem" },
+        { "id": 14, "name": "bpf_get_current_pid_tgid" },
+        { "id": 113, "name": "bpf_probe_read_kernel" }
+      ],
+      "maps": ["faults", "config"],
+      "lockdownRequirement": "none or integrity",
+      "teardownOrder": 5,
+      "fixtureIDs": ["P2_NESTED_FREE_SKIP"]
+    },
+    {
+      "programName": "perf_consume",
+      "section": "tracepoint/skb/consume_skb",
+      "programType": "BPF_PROG_TYPE_TRACEPOINT",
+      "attachmentAPI": "link.Tracepoint(perf_event_open + PERF_EVENT_IOC_SET_BPF)",
+      "attachmentName": "skb/consume_skb",
+      "owningFDClass": "perf_event_fd",
+      "fixtureControlOnly": true,
+      "rawArguments": [
+        { "index": 0, "cType": "struct consume_event *", "role": "trace_entry_plus_skbaddr_at_offset_8" }
+      ],
+      "coreFields": [
+        "sk_buff.dev",
+        "net_device.ifindex",
+        "net_device.nd_net.net",
+        "net.ns.inum"
+      ],
+      "helpers": [
+        { "id": 1, "name": "bpf_map_lookup_elem" },
+        { "id": 113, "name": "bpf_probe_read_kernel" }
+      ],
+      "maps": ["config", "cpu_state"],
+      "lockdownRequirement": "none or integrity",
+      "teardownOrder": 6,
+      "fixtureIDs": ["P2_PERF_BASELINE", "P2_PERF_SKIP"]
+    }
+  ]
+}

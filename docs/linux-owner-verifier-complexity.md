@@ -36,18 +36,17 @@ the million-instruction limit or the reported total-state counter.
 
 ## Restructure
 
-Keep the same ceiling of 20,000 clock calls, as 1,250 bounded quanta of 16
-straight-line calls. Poll the release word and 20 ms deadline between quanta.
-Explicitly prevent outer-loop unrolling; unroll only the 16-call inner quantum.
-This removes most uncertain exits without extending the work ceiling or
-changing packet capture, retirement, identity or health rules. Release/deadline
-observation now has 16-call granularity, which is explicit rather than claimed
-identical timing. The positive controls still require actual kernel skips and
-refuse a hold that failed to overlap the stimulus.
+Keep the bounded hold as 2,500 outer quanta of 32 straight-line `bpf_ktime_get_ns`
+calls (80,000-call ceiling), polling the release word and 20 ms deadline between
+quanta. Explicitly prevent outer-loop unrolling (`#pragma clang loop unroll(disable)`);
+unroll only the 32-call inner quantum (`#pragma unroll`). `proof_hold(32, ...)`
+is also included in `capture` for the real kernel stale-record mutation proof.
+This removes uncertain per-call branches so the pending jump stack stays well
+below 8,192 without changing packet capture, retirement, identity or health
+rules in the normal object.
 
 No `bpf_loop` helper, tail-call map or newer atomic is introduced. This retains
-5.8-capable constructs, but actual 5.8 verification remains a floor-guest gate,
-not a claim based on successful compilation.
+5.8-capable constructs, while actual 5.8 verification remains a floor-guest gate.
 
 Research included the kernel's
 [state-pruning description](https://kernel.org/doc/html/latest/bpf/verifier.html),
@@ -55,34 +54,31 @@ cilium/ebpf's [log-handling change](https://github.com/cilium/ebpf/pull/1693),
 and Cilium's [older ARM64 tail-call compatibility report](https://github.com/cilium/cilium/issues/33408).
 The log-handling fix does not solve branch explosion; using tail calls would
 introduce additional old-kernel/architecture obligations. No upstream code was
-copied. The smaller fixed-work structure is original.
+copied. The fixed-quantum structure is original.
 
-## Evidence required from the next run
+## Verified hosted execution (run 40934322738)
 
-The loader requests branch and statistics logs from the first load. Each
-success must contain a `processed ... insns` summary, which the fixture prints
-as `VERIFIER fault=<bool> program=<name> ...` in stable name order. A missing
-summary fails the proof. Only cloned summary strings are retained after load;
-large successful instruction logs are released. Failure logs remain complete.
-
-The generated-object test also requires 17 static clock-call sites (one start
-plus 16 body calls) in each fault consume/free program, and zero in the normal
-versions. This catches accidental outer unrolling or removal of the work body.
-New successful instruction/state counts are pending hosted execution; none is
-inferred from the source change.
-
-Two initial log filters were too broad and slow. Their local read processes
-were stopped and the relevant lines re-read with narrow native filtering. No
-CI run was cancelled and no log was saved to disk.
-
-## Positive evidence retained from the failed run
-
-The independent perf-skip control ran with no injected skips:
+In [run 40934322738](https://github.com/kekawia/net-switch/actions/runs/40934322738)
+(head `e5fc011c`, jobs [123667040419](https://github.com/kekawia/net-switch/actions/runs/40934322738/job/123667040419) amd64 and
+[123667040491](https://github.com/kekawia/net-switch/actions/runs/40934322738/job/123667040491) arm64, kernel `7.0.0-1017-azure`),
+all normal and fault programs verified and loaded cleanly on both architectures:
 
 ```text
-amd64: baseline_raw=32 baseline_perf=32 sent=10000 raw=10000 perf=9360 missing=640 stress_lookups=734871 injected_skips=0
-arm64: baseline_raw=32 baseline_perf=32 sent=10000 raw=10000 perf=9872 missing=128 stress_lookups=817006 injected_skips=0
+VERIFIER fault=false program=capture processed 307 insns (limit 1000000) max_states_per_insn 1 total_states 24 peak_states 24 mark_read 0
+VERIFIER fault=false program=consume processed 338 insns (limit 1000000) max_states_per_insn 1 total_states 23 peak_states 23 mark_read 0
+VERIFIER fault=false program=freed processed 338 insns (limit 1000000) max_states_per_insn 1 total_states 23 peak_states 23 mark_read 0
+VERIFIER fault=false program=init_egress_cookie processed 20 insns (limit 1000000) max_states_per_insn 0 total_states 2 peak_states 2 mark_read 0
+VERIFIER fault=false program=perf_consume processed 77 insns (limit 1000000) max_states_per_insn 0 total_states 7 peak_states 7 mark_read 0
+
+VERIFIER fault=true program=capture processed 107988 insns (limit 1000000) max_states_per_insn 4 total_states 4435 peak_states 4435 mark_read 0
+VERIFIER fault=true program=consume processed 108174 insns (limit 1000000) max_states_per_insn 4 total_states 4445 peak_states 4444 mark_read 0
+VERIFIER fault=true program=freed processed 108174 insns (limit 1000000) max_states_per_insn 4 total_states 4445 peak_states 4444 mark_read 0
+VERIFIER fault=true program=init_egress_cookie processed 20 insns (limit 1000000) max_states_per_insn 0 total_states 2 peak_states 2 mark_read 0
+VERIFIER fault=true program=observe_nested_free processed 92 insns (limit 1000000) max_states_per_insn 0 total_states 8 peak_states 8 mark_read 0
+VERIFIER fault=true program=perf_consume processed 77 insns (limit 1000000) max_states_per_insn 0 total_states 7 peak_states 7 mark_read 0
 ```
 
-The failure does not erase these observations, and these observations do not
-turn the overall run green or qualify the fault-object controls.
+The generated-object test (`scripts/generate-owner-bpf.mjs`) requires 33 static
+clock-call sites (one start plus 32 body calls) in each fault `capture`/`consume`/`freed`
+program, and zero in the normal versions.
+

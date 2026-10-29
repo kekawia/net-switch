@@ -110,3 +110,29 @@ reporting three-call total latency, hold time from first read to batch release,
 CPU/throughput, possible CPU count, burst occupancy and refusals. Include the
 barrier cost. Do not claim negligible overhead or tune thresholds before data;
 99.5%, p95 <10 ms, internal 8 ms headroom and the 10% regression rule stay fixed.
+
+### Verified hosted execution (`40934322738` on `e5fc011c`, kernel `7.0.0-1017-azure`)
+
+In [run 40934322738](https://github.com/kekawia/net-switch/actions/runs/40934322738)
+([amd64 job 123667040419](https://github.com/kekawia/net-switch/actions/runs/40934322738/job/123667040419),
+[arm64 job 123667040491](https://github.com/kekawia/net-switch/actions/runs/40934322738/job/123667040491)):
+
+1. **Real kernel stale-record mutation (`TestBridgeStaleRecordMutation`):**
+   - `amd64`:
+     - `P2_STALE_MUTATION skip_post_check=false address=ffff89f7480e6d00 stale_cookie=13 sender_cookie=14 free_recursion_delta=8 decision=attribution_unknown_recursion result=refused`
+     - `P2_STALE_MUTATION skip_post_check=true address=ffff89f743df0600 stale_cookie=16 sender_cookie=17 accepted_cookie=16 free_recursion_delta=8 result=stale_accepted`
+   - `arm64`:
+     - `P2_STALE_MUTATION skip_post_check=false address=ffff0001069c1900 stale_cookie=13 sender_cookie=14 free_recursion_delta=8 decision=attribution_unknown_recursion result=refused`
+     - `P2_STALE_MUTATION skip_post_check=true address=ffff000101057300 stale_cookie=16 sender_cookie=17 accepted_cookie=16 free_recursion_delta=8 result=stale_accepted`
+
+2. **Three-call-plus-barrier burst cost (`TestBridgeBurstCost`, 4,096 datagrams in 64 concurrent 2-CPU waves, `possible_cpus=4`):**
+
+| Architecture | Burst limit `N` | Bursts | `BPF_OBJ_GET_INFO_BY_FD` calls | 3-call + barrier `p50` (ns) | 3-call + barrier `p95` (ns) | Burst hold upper `p95` (ns) | Wall time (ns) | Process CPU (µs) | Peak RSS (KiB) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `amd64` | 1 | 4,096 | 12,288 | 2,946 | 8,015 | 41,167 | 90,705,737 | 117,043 | 21,248 |
+| `amd64` | 8 | 512 | 1,536 | 3,817 | 7,844 | 330,656 | 91,134,863 | 116,468 | 22,300 |
+| `amd64` | 32 | 128 | 384 | 4,970 | 10,629 | 3,203,263 | 114,763,319 | 141,486 | 22,536 |
+| `arm64` | 1 | 4,096 | 12,288 | 1,648 | 3,888 | 35,375 | 87,185,855 | 100,641 | 20,392 |
+| `arm64` | 8 | 512 | 1,536 | 2,952 | 6,184 | 346,339 | 75,111,062 | 89,655 | 21,628 |
+| `arm64` | 32 | 128 | 384 | 6,048 | 38,392 | 2,783,243 | 84,684,553 | 103,634 | 21,864 |
+

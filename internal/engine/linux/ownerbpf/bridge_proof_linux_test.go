@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
@@ -577,13 +578,22 @@ func TestBridgePreLoaderSocket(t *testing.T) {
 }
 
 func TestBridgeReadLifetimes(t *testing.T) {
+	if runtime.NumCPU() < 2 {
+		t.Fatal("two CPUs required for cross-CPU capture and nested-terminal controls")
+	}
 	f := newBridgeFixture(t, true)
 	s, _ := bridgeSocket(t, 0)
 
-	// 1. Empty read (EAGAIN) and zero-length read do not dequeue or fault.
+	// 1. Empty read (EAGAIN), EINTR and zero-length read do not dequeue or fault.
 	emptyFrames, err := f.r.ReadBurst(f.fd, 4)
 	if err != nil || len(emptyFrames) != 0 || f.b.Faults() != 0 {
 		t.Fatalf("empty EAGAIN burst failed: frames=%d err=%v faults=%d", len(emptyFrames), err, f.b.Faults())
+	}
+	eintrFrames, eintrErr := f.r.readBurst(f.fd, 1, func(int, []byte) (int, error) {
+		return -1, unix.EINTR
+	})
+	if !errors.Is(eintrErr, unix.EINTR) || len(eintrFrames) != 0 || f.b.Faults() != 0 {
+		t.Fatalf("EINTR burst failed or poisoned epoch: frames=%d err=%v faults=%d", len(eintrFrames), eintrErr, f.b.Faults())
 	}
 	c1 := bridgeSend(t, s, []byte("queued-for-zero-read"))
 	zeroFrames, err := f.r.readBurst(f.fd, 1, func(fd int, _ []byte) (int, error) {
@@ -606,38 +616,246 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		t.Fatalf("truncated read failed: len=%d err=%v decision=%+v", len(truncFrames), err, truncFrames)
 	}
 
-	// 3. Publication suppression (mode 2) retires the packet record from the map
-	// while refusing the read with delivered_without_record and requesting reload.
-	c3 := bridgeSend(t, s, []byte("suppress-publication"))
+	// 3. Cross-CPU capture and one-read cross-CPU health observation bound:
+	// sender pinned to otherCPU, reader on f.cpu.
+	otherCPU := (f.cpu + 1) % 2
+	sendCrossCPU := func(payload []byte) uint64 {
+		type sendRes struct {
+			cookie uint64
+			err    error
+		}
+		ch := make(chan sendRes, 1)
+		go func() {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			var mask unix.CPUSet
+			mask.Set(otherCPU)
+			if err := unix.SchedSetaffinity(0, &mask); err != nil {
+				ch <- sendRes{err: err}
+				return
+			}
+			if err := unix.Sendto(s, payload, 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
+				ch <- sendRes{err: err}
+				return
+			}
+			c, err := unix.GetsockoptUint64(s, unix.SOL_SOCKET, unix.SO_COOKIE)
+			ch <- sendRes{cookie: c, err: err}
+		}()
+		res := <-ch
+		if res.err != nil || res.cookie == 0 {
+			t.Fatal("cross-CPU send failed:", res.err)
+		}
+		return res.cookie
+	}
+	cCross := sendCrossCPU([]byte("cross-cpu-packet"))
+	frCross := bridgeRead(t, f, 1)[0]
+	if frCross.Decision.Status != ReadCookie || frCross.Decision.Packet.Cookie != cCross || int(frCross.Decision.Packet.CPU) != otherCPU {
+		t.Fatalf("cross-CPU capture failed: got=%+v want_cpu=%d", frCross.Decision, otherCPU)
+	}
+
+	// 3b. One-read cross-CPU health observation bound: a capture fault raised on
+	// otherCPU updates shared health.epoch_faults and must cause the very next read
+	// on f.cpu to return ReadEpochFault with Rebuild=true.
+	_ = bridgeSend(t, s, []byte("queued-before-cross-cpu-fault"))
 	var states []CPUState
 	if err := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); err != nil {
 		t.Fatal(err)
 	}
+	states[otherCPU].Serial = ^uint64(0)
+	if err := f.b.Collection.Maps["cpu_state"].Update(uint32(0), states, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	_ = sendCrossCPU([]byte("cross-cpu-serial-overflow-fault"))
+	if f.b.Faults() == 0 {
+		t.Fatal("cross-CPU capture fault did not increment shared health.epoch_faults")
+	}
+	crossHealthFrames, crossHealthErr := f.r.ReadBurst(f.fd, 1)
+	if !errors.Is(crossHealthErr, ErrEpochRebuild) || len(crossHealthFrames) != 1 || crossHealthFrames[0].Decision.Status != ReadEpochFault || !crossHealthFrames[0].Decision.Rebuild {
+		t.Fatalf("one-read cross-CPU health bound failed on reader CPU %d: err=%v frames=%+v", f.cpu, crossHealthErr, crossHealthFrames)
+	}
+	reloadBridgeFixture(t, f, true)
+
+	// 3c. Shared-skb rejection (users != 1): AF_PACKET TPACKET_V2 TX_RING without TPACKET_CMSG
+	// calls skb_get(skb) in tpacket_fill_skb before po->xmit(skb), so net_dev_start_xmit
+	// observes skb->users == 2, increments state->shared, sets p.status = 0, and CheckRead
+	// refuses the read with ReadInvalid and Rebuild=true.
+	ethPIP := binary.BigEndian.Uint16([]byte{byte(unix.ETH_P_IP >> 8), byte(unix.ETH_P_IP & 0xff)})
+	pktFD, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM, int(ethPIP))
+	if err != nil {
+		t.Fatal("AF_PACKET socket:", err)
+	}
+	defer unix.Close(pktFD)
+	if err := unix.SetsockoptInt(pktFD, unix.SOL_PACKET, unix.PACKET_VERSION, unix.TPACKET_V2); err != nil {
+		t.Fatal("PACKET_VERSION TPACKET_V2:", err)
+	}
+	req := unix.TpacketReq{
+		Block_size: 4096,
+		Block_nr:   1,
+		Frame_size: 2048,
+		Frame_nr:   2,
+	}
+	if err := unix.SetsockoptTpacketReq(pktFD, unix.SOL_PACKET, unix.PACKET_TX_RING, &req); err != nil {
+		t.Fatal("PACKET_TX_RING:", err)
+	}
+	ringMem, err := unix.Mmap(pktFD, 0, int(req.Block_size*req.Block_nr), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		t.Fatal("mmap PACKET_TX_RING:", err)
+	}
+	defer unix.Munmap(ringMem)
+	sll := &unix.SockaddrLinklayer{
+		Protocol: ethPIP,
+		Ifindex:  int(f.b.config.Ifindex),
+	}
+	if err := unix.Bind(pktFD, sll); err != nil {
+		t.Fatal("bind AF_PACKET:", err)
+	}
+	// TPACKET2_HDRLEN is TPACKET_ALIGN(sizeof(struct tpacket2_hdr)=32) + sizeof(struct sockaddr_ll)=20 = 52;
+	// payload starts at offset 52 (or 32 + 16 = 48? Let's compute TPACKET2_HDRLEN exact kernel formula:
+	// TPACKET_ALIGN(32) = 32; + sizeof(struct sockaddr_ll) (20) = 52).
+	// Write a minimal 28-byte IPv4 UDP packet at offset 52 and set tp_len=28, tp_snaplen=28, tp_status=TP_STATUS_SEND_REQUEST (1).
+	const tpacket2HdrLen = 52
+	ipUDP := []byte{
+		0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00,
+		198, 18, 0, 1, 198, 18, 0, 2,
+		0x23, 0x28, 0x23, 0x28, 0x00, 0x08, 0x00, 0x00,
+	}
+	copy(ringMem[tpacket2HdrLen:], ipUDP)
+	*(*uint32)(unsafe.Pointer(&ringMem[0])) = unix.TP_STATUS_SEND_REQUEST
+	*(*uint32)(unsafe.Pointer(&ringMem[4])) = uint32(len(ipUDP))
+	*(*uint32)(unsafe.Pointer(&ringMem[8])) = uint32(len(ipUDP))
+	if err := unix.Sendto(pktFD, nil, 0, nil); err != nil {
+		t.Fatal("AF_PACKET TX_RING send:", err)
+	}
+	if err := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); err != nil {
+		t.Fatal(err)
+	}
+	sharedCount := states[f.cpu].Shared
+	if sharedCount == 0 {
+		t.Fatalf("AF_PACKET TPACKET_V2 TX_RING did not record shared skb (users != 1) on CPU %d: state=%+v", f.cpu, states[f.cpu])
+	}
+	sharedFrames, sharedErr := f.r.ReadBurst(f.fd, 1)
+	if !errors.Is(sharedErr, ErrEpochRebuild) || len(sharedFrames) != 1 || (sharedFrames[0].Decision.Status != ReadMissing && sharedFrames[0].Decision.Status != ReadInvalid) || !sharedFrames[0].Decision.Rebuild {
+		t.Fatalf("shared skb (users != 1) was not rejected with ReadMissing/ReadInvalid+Rebuild: err=%v frames=%+v", sharedErr, sharedFrames)
+	}
+	reloadBridgeFixture(t, f, true)
+	s, _ = bridgeSocket(t, 0)
+
+	// 4. Publication suppression (mode 2) on a multi-packet burst (4 datagrams):
+	// retires all dequeued packet records while refusing the whole 4-packet burst,
+	// stopping the epoch and fencing another reader's uncommitted batch at Publish.
+	f.b.config.Enabled = 0
+	if err := f.b.Collection.Maps["config"].Update(uint32(0), f.b.config, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	r2Ready := make(chan error, 1)
+	r2Done := make(chan struct{})
+	r2Close := make(chan struct{})
+	go func() {
+		defer close(r2Done)
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		r2, err := f.b.Register()
+		if err != nil {
+			r2Ready <- err
+			return
+		}
+		r2Ready <- nil
+		<-r2Close
+		if err := r2.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := <-r2Ready; err != nil {
+		t.Fatal(err)
+	}
+	if err := f.b.Enable(500); err != nil {
+		t.Fatal(err)
+	}
+	var c3 uint64
+	for idx := range 4 {
+		c3 = bridgeSend(t, s, []byte(fmt.Sprintf("multi-burst-%d", idx)))
+	}
+	if err := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); err != nil {
+		t.Fatal(err)
+	}
 	st := states[f.cpu]
+	// Arm publication suppression on the 4th packet (st.Address, st.SeenSerial)
+	// so the first 3 reads in the burst succeed and the 4th triggers ReadMissing + Rebuild,
+	// invalidating all 4 frames in the burst at the post-burst gate.
 	ctl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 2, Address: st.Address, Serial: st.SeenSerial}
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
-	pubFrames, pubErr := f.r.ReadBurst(f.fd, 1)
-	if !errors.Is(pubErr, ErrEpochRebuild) || len(pubFrames) != 1 || pubFrames[0].Decision.Status != ReadMissing || f.b.DeliveredWithoutRecord.Load() != 1 {
-		t.Fatalf("publication fault accepted or misclassified: err=%v frames=%+v", pubErr, pubFrames)
+	oldEpoch := f.epoch
+	pubFrames, pubErr := f.r.ReadBurst(f.fd, 4)
+	if !errors.Is(pubErr, ErrEpochRebuild) || len(pubFrames) != 4 || f.b.DeliveredWithoutRecord.Load() != 1 {
+		t.Fatalf("multi-packet burst fault misclassified: err=%v len=%d missing=%d frames=%+v", pubErr, len(pubFrames), f.b.DeliveredWithoutRecord.Load(), pubFrames)
+	}
+	for idx, pf := range pubFrames {
+		if pf.Decision.Status == ReadCookie || !pf.Decision.Rebuild {
+			t.Fatalf("frame %d in faulted multi-packet burst was not invalidated: %+v", idx, pf.Decision)
+		}
+	}
+	published := false
+	if err := f.b.Publish(oldEpoch, func() { published = true }); !errors.Is(err, ErrEpochRebuild) || published {
+		t.Fatalf("uncommitted second-reader batch was not fenced by stopped epoch: err=%v published=%t", err, published)
 	}
 	var retired PacketRecord
 	if err := f.b.Collection.Maps["packets"].Lookup(st.Address, &retired); !errors.Is(err, ebpf.ErrKeyNotExist) {
 		t.Fatalf("publication fault did not retire packet record: %v", err)
 	}
+	close(r2Close)
+	<-r2Done
 	reloadBridgeFixture(t, f, true)
 
-	// 5. Queue resize and link-down/close retirement: queued packets are freed by
-	// the kernel and retired by the kfree_skb raw tracepoint leaving packets empty.
-	sAfter, _ := bridgeSocket(t, 0)
-	for range 16 {
-		bridgeSend(t, sAfter, []byte("purge-retirement"))
+	// 5. Positive control: nested_terminal > 0 during an armed read on f.cpu.
+	// While f.r is armed in consume_skb (held via mode 8), netem's pinned hrtimer
+	// fires on f.cpu and drops queued background packets into the full ring,
+	// invoking terminal(skb, NS_TERMINAL_FREE) in softirq on the same armed task
+	// and incrementing s->completion.count > 1 (ReadAmbiguous) and state->nested > 0.
+	sRead, _ := bridgeSocket(t, 0)
+	sBg, _ := bridgeSocket(t, 0)
+	bgCookie := bridgeSend(t, sBg, []byte("bg-init"))
+	_ = bridgeRead(t, f, 1)
+	f.b.config.BackgroundCookie = bgCookie
+	if err := f.b.Collection.Maps["config"].Update(uint32(0), f.b.config, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	for range 500 {
+		bridgeSend(t, sRead, []byte("fill-for-nested-terminal"))
 	}
 	l, err := netlink.LinkByName("nsbridge0")
 	if err != nil {
 		t.Fatal(err)
 	}
+	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 500, Limit: 100})
+	if err := netlink.QdiscReplace(q); err != nil {
+		t.Fatal(err)
+	}
+	holdCtl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 8}
+	if err := f.b.Collection.Maps["faults"].Update(uint32(0), holdCtl, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	for range 8 {
+		if err := unix.Sendto(sBg, []byte("bg-nested-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	nestedFrames, nestedErr := f.r.ReadBurst(f.fd, 1)
+	_ = netlink.QdiscDel(netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{}))
+	if len(nestedFrames) != 1 || nestedFrames[0].Decision.Status != ReadAmbiguous || nestedErr != nil {
+		t.Fatalf("nested terminal during armed read did not produce ReadAmbiguous: err=%v frames=%+v", nestedErr, nestedFrames)
+	}
+	if err := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); err != nil {
+		t.Fatal(err)
+	}
+	nestedCount := states[f.cpu].Nested
+	if nestedCount == 0 {
+		t.Fatalf("positive control nested_terminal was 0 on reader CPU %d", f.cpu)
+	}
+
+	// 6. Queue resize and link-down/close retirement: remaining 499 queued packets
+	// are freed by the kernel and retired by the kfree_skb raw tracepoint leaving packets empty.
 	if err := netlink.LinkSetTxQLen(l, 250); err != nil {
 		t.Fatal(err)
 	}
@@ -668,9 +886,10 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	for _, cpuState := range states {
 		deleted += cpuState.Deleted
 	}
-	if deleted < 16 {
-		t.Fatalf("expected >=16 deleted records after close purge, got %d", deleted)
+	if deleted < 500 {
+		t.Fatalf("expected >=500 deleted records after close purge, got %d", deleted)
 	}
-	t.Logf("P2_LIFETIMES empty=pass zero_read=pass eintr=pass truncated=%d pub_fault_cookie=%d purge_deleted=%d packet_map_empty=true", truncFrames[0].Decision.Packet.Length, c3, deleted)
+	t.Logf("P2_LIFETIMES empty=pass zero_read=pass eintr=pass truncated=%d cross_cpu=%d cross_cpu_health_bound=1_read shared_skb_rejected=%d multi_burst_refused=4 nested_terminal=%d ambiguous_reads=1 pub_fault_cookie=%d purge_deleted=%d packet_map_empty=true", truncFrames[0].Decision.Packet.Length, otherCPU, sharedCount, nestedCount, c3, deleted)
 }
+
 

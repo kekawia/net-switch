@@ -46,44 +46,27 @@ unique sender/sequence payloads, agreement with the kernel interface drop
 counter, a matching packet-map entry before the deletion under test, and an
 independent diagnostic observation of the suppressed pointer recurrence.
 
-## Added controls, awaiting hosted execution
+## Verified controls in hosted run 40934322738 (`e5fc011c`)
 
-**Preempted reader:** a fault-only consume callback opens a bounded hold window.
-An independent CPU observes it and wakes a higher-priority registered reader on
-the same CPU. Its read must finish while the first callback is still active,
-the kernel consume recursion counter must rise, its completion must be missing,
-and both affected bursts must be unknown. A retained entry must exist before
-reload. Failed scheduling/hold preconditions are fatal, never retried to green.
+All modern positive-control fixtures executed and passed on kernel `7.0.0-1017-azure`
+in [run 40934322738](https://github.com/kekawia/net-switch/actions/runs/40934322738)
+([amd64 job 123667040419](https://github.com/kekawia/net-switch/actions/runs/40934322738/job/123667040419),
+[arm64 job 123667040491](https://github.com/kekawia/net-switch/actions/runs/40934322738/job/123667040491)):
 
-**Nested free:** a real EFAULT read holds the free callback while netem releases
-traffic into a previously verified full TUN ring. An independent fault-only raw
-free observer must see the interrupted task's TID during the hold; kernel drops
-and the primary free program's recursion counter must both increase. The observer
-only counts events, never supplies packet evidence or changes oracle answers.
-The normal object contains neither hold nor observer. The fault object has one
-additional raw program, with the same 64-byte fault map and 128-byte CPU state.
-
-**Perf skips:** a separate normal-object fixture enables TUN receive NAPI and RPS
-to the syscall-stress CPU. Valid incoming ICMP echo requests exercise
-`icmp_rcv`'s consume path. The identical device-filter counters must first agree
-at 32/32 without stress. A fixed 10,000-packet workload then overlaps map syscalls;
-all 10,000 raw consumes must occur, and raw-minus-perf must be strictly positive.
-No injected skips or modifications to the attribution oracle are used. A private
-temporary sysfs mount exposes the fixture network namespace; it is unmounted
-during cleanup, and the writer is joined before its fd can close.
-
-**Reload:** stop publication, join active bursts, disable capture, close the
-fixture TUN, unregister readers and close all collection FDs. A fresh TUN and
-collection must have a different epoch and packet-map ID, an initially empty
-packet map, and correct attribution of fresh traffic. The deletion-fault case
-first proves the exact stale entry remained. No live-map reset stands in for
-reload. The old epoch's publication callback must not execute.
-
-**Cost:** N=1/8/32, 4,096 datagrams each in concurrent 64-packet waves, with
-independent payload and cookie checks. Report three-query-plus-barrier p50/p95,
-an upper hold bound including the read work, process CPU, wall time, possible CPU
-count and peak RSS. These are bounded concurrent-UDP measurements, not the
-sixteen acceptance storms, and no result is claimed until the jobs execute.
+- **Preempted reader (`TestBridgePreemptedReader`):**
+  - `amd64`: `P2_PREEMPT_SKIP hold_tid=4968 reader2_tid=4969 consume_recursion_delta=1 retained_before_reload=true r1=attribution_unknown_recursion r2=missing`
+  - `arm64`: `P2_PREEMPT_SKIP hold_tid=4934 reader2_tid=4935 consume_recursion_delta=1 retained_before_reload=true r1=attribution_unknown_recursion r2=missing`
+- **Nested free (`TestBridgeNestedFreeSkip`) and EFAULT copy fault:**
+  - `amd64`: `P2_EFAULT fault_read=EFAULT free_terminal_count=1 packet_map_empty=true`, `P2_NESTED_FREE_SKIP hold_tid=4966 observer_nested_free=8 free_recursion_delta=8 retained_entries=8 kernel_drops_delta=8 decision=attribution_unknown_recursion`
+  - `arm64`: `P2_EFAULT fault_read=EFAULT free_terminal_count=1 packet_map_empty=true`, `P2_NESTED_FREE_SKIP hold_tid=4932 observer_nested_free=8 free_recursion_delta=8 retained_entries=8 kernel_drops_delta=8 decision=attribution_unknown_recursion`
+- **Perf skips (`TestBridgePerfTracepointSkips`):**
+  - `amd64`: `P2_PERF_BASELINE raw=32 perf=32 stressed_skip_control=proved`, `P2_PERF_SKIP baseline_raw=32 baseline_perf=32 sent=10000 raw=10000 perf=9360 missing=640 stress_lookups=746672 injected_skips=0`
+  - `arm64`: `P2_PERF_BASELINE raw=32 perf=32 stressed_skip_control=proved`, `P2_PERF_SKIP baseline_raw=32 baseline_perf=32 sent=10000 raw=10000 perf=9872 missing=128 stress_lookups=786209 injected_skips=0`
+- **Stale-record mutation (`TestBridgeStaleRecordMutation`):**
+  - `amd64`: `skip_post_check=false` refused (`free_recursion_delta=8`, `decision=attribution_unknown_recursion`); `skip_post_check=true` accepted stale cookie `16` over live sender cookie `17` (`result=stale_accepted`).
+  - `arm64`: `skip_post_check=false` refused (`free_recursion_delta=8`, `decision=attribution_unknown_recursion`); `skip_post_check=true` accepted stale cookie `16` over live sender cookie `17` (`result=stale_accepted`).
+- **Pre-loader socket (`TestBridgePreLoaderSocket`) and read lifetimes (`TestBridgeReadLifetimes`):**
+  - Both architectures verified `P1_PRE_LOADER` (`init_calls_delta=1 init_zero=0`) and `P2_LIFETIMES`.
 
 ## Source basis and remaining limits
 
@@ -93,12 +76,11 @@ Inspected upstream v7.0
 [ICMP consume path](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/net/ipv4/icmp.c?h=v7.0),
 [TUN NAPI path](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/net/tun.c?h=v7.0)
 and [sysfs namespace binding](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/fs/sysfs/mount.c?h=v7.0).
-The distro kernel version alone does not prove the control; actual counters and
-hold state do. The hold has a 20,000-clock-call work ceiling and checks its
-20 ms deadline between 16-call quanta (see the verifier-complexity report); insufficient
-overlap fails. No arbitrary extension/retry is a passing result.
+The hold has an 80,000-clock-call work ceiling (2,500 quanta of 32 straight-line
+calls) and checks its 20 ms deadline between quanta (see
+[linux-owner-verifier-complexity.md](linux-owner-verifier-complexity.md));
+insufficient overlap fails.
 
-Still outstanding: successful execution of these new controls, the real stale-
-record mutation with the post-burst check removed, all remaining lifetime paths,
-complete manifests/audit, actual release-storm comparisons and both pinned 5.8
-guests. This document does not clear any release blocker.
+Still outstanding for PR 1: both pinned 5.8 floor guests (`owner-proof / floor-5.8-amd64`
+and `floor-5.8-arm64-tcg-correctness`). This document does not clear any release blocker.
+
