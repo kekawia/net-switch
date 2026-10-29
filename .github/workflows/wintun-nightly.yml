@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
+    inputs:
+      rejection_capture:
+        description: 'Two ARM64 full-sequence jobs only (no full nightly matrix)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -25,13 +30,13 @@ jobs:
     timeout-minutes: 75
     strategy:
       fail-fast: false
-      max-parallel: 10
+      max-parallel: ${{ inputs.rejection_capture && 2 || 10 }}
       matrix:
         # Interleave scenario/architecture per shard so every kind starts in
         # the first wave. A hunt is ONE matrix, not two independent caps.
-        shard: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18]
-        scenario: [isolated, full]
-        runner: [windows-latest, windows-11-arm]
+        shard: ${{ fromJSON(inputs.rejection_capture && '[1,2]' || '[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18]') }}
+        scenario: ${{ fromJSON(inputs.rejection_capture && '["full"]' || '["isolated","full"]') }}
+        runner: ${{ fromJSON(inputs.rejection_capture && '["windows-11-arm"]' || '["windows-latest","windows-11-arm"]') }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '4'

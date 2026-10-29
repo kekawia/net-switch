@@ -48,10 +48,16 @@ test('nightly uses the qualified sequence with one shared cap and no ordinary CI
   const nightly = readWorkflow(text);
   assert.deepEqual([...nightly.jobs.keys()], ['wintun-integrity']);
   assert.match(text, /cron: '17 3 \* \* \*'/);
-  assert.match(text, /max-parallel: 10/);
-  assert.match(text, /scenario: \[isolated, full\]/);
-  assert.match(text, /runner: \[windows-latest, windows-11-arm\]/);
-  assert.match(text, /shard: \[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18\]/);
+  assert.match(text, /max-parallel: \$\{\{ inputs.rejection_capture && 2 \|\| 10 \}\}/);
+  const matrix={};
+  for (const field of ['scenario','runner','shard']) {
+    const expression=new RegExp(`        ${field}: \\$\\{\\{ (.*) \\}\\}`).exec(text)[1];
+    matrix[field]=[false,true].map(rejection_capture=>evaluate(expression,{inputs:{rejection_capture},functions:{fromJSON:JSON.parse}}));
+  }
+  assert.deepEqual(matrix.scenario,[['isolated','full'],['full']]);
+  assert.deepEqual(matrix.runner,[['windows-latest','windows-11-arm'],['windows-11-arm']]);
+  assert.deepEqual(matrix.shard,[Array.from({length:18},(_,i)=>i+1),[1,2]]);
+  assert.match(text,/go test -tags=wintun_integrity -c/);
   assert.match(text, /INTEGRITY_REPEATS: '2'/);
   assert.match(text, /NETSWITCH_WINTUN_INTEGRITY_BOUNDARY: rotate/);
   assert.deepEqual(nightly.jobs.get('wintun-integrity').steps, readWorkflow(workflowText).jobs.get('wintun-integrity').steps);

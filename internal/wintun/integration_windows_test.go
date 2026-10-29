@@ -49,6 +49,10 @@ func must(t *testing.T, err error) {
 }
 func report(t *testing.T, value any) {
 	t.Helper()
+	if fields, ok := value.(map[string]any); ok {
+		fields["test_path"] = t.Name()
+		fields["process_id"] = os.Getpid()
+	}
 	if integrityHooksEnabled && os.Getenv("NETSWITCH_WINTUN_INTEGRITY_TRACE") == "1" {
 		integrityReportContext(t, value)
 	}
@@ -327,6 +331,7 @@ func startDLL(t *testing.T, a *Adapter) *dllSession {
 		t.Fatal(e)
 	}
 	s.h = h
+	a.logDriverVersion()
 	get, err := windows.GetProcAddress(a.dll.module, "WintunGetReadWaitEvent")
 	must(t, err)
 	event, _, _ := syscall.SyscallN(get, h)
@@ -367,7 +372,7 @@ func (s *dllSession) ReadBatch(ctx context.Context, buffers [][]byte, sizes []in
 			p, _, e := syscall.SyscallN(s.receive, s.h, uintptr(unsafe.Pointer(&size)))
 			if p == 0 {
 				if e == windows.ERROR_INVALID_DATA {
-					return i, fmt.Errorf("%w: DLL receive ring: %w", errPayloadIntegrity, e)
+					return i, fmt.Errorf("%w: DLL Send ring framing rejection (ERROR_INVALID_DATA): %w", ErrCorrupt, e)
 				}
 				if e != windows.ERROR_NO_MORE_ITEMS {
 					return i, e

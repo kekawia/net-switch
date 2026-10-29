@@ -39,6 +39,13 @@ var ErrRegistrarExited = fmt.Errorf("Wintun registrar exited: %w", ErrDisconnect
 var errRegistrationHeld = errors.New("Wintun registrar ended without the driver's release markers")
 var errRingsRetained = errors.New("Wintun teardown incomplete; ring memory retained until process exit")
 
+// entryRejection preserves the value used by the framing decision, not a later
+// read from driver memory. It is allocated only on rejection.
+type entryRejection struct{ size uint32 }
+
+func (e *entryRejection) Error() string { return ErrCorrupt.Error() }
+func (e *entryRejection) Unwrap() error { return ErrCorrupt }
+
 func corrupt(r ring, direction, reason string, head, tail uint32) error {
 	var size uint32
 	if head < r.capacity {
@@ -65,7 +72,7 @@ func entry(data []byte, capacity, head, tail uint32) ([]byte, uint32, error) {
 	}
 	size := binary.LittleEndian.Uint32(data[head : head+4])
 	if size == 0 || size > MaxPacketSize || aligned(size+4) > available {
-		return nil, head, ErrCorrupt
+		return nil, head, &entryRejection{size: size}
 	}
 	return data[head+4 : head+4+size], (head + aligned(size+4)) & (capacity - 1), nil
 }
@@ -309,6 +316,10 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 			return i, nil
 		}
 		if err != nil {
+			var rejected *entryRejection
+			if errors.As(err, &rejected) {
+				return i, captureRejection(r.send, "invalid entry", head, tail, rejected.size, nil)
+			}
 			return i, corrupt(r.send, "Send", "invalid entry", head, tail)
 		}
 		if len(buffers[i]) < len(packet) {
@@ -323,14 +334,15 @@ func (r *rings) read(buffers [][]byte, sizes []int) (int, error) {
 			if integrityHooksEnabled {
 				observeRingReceive(packet, p)
 			}
-			if binary.LittleEndian.Uint32(r.send.data()[head:head+4]) != uint32(len(packet)) {
-				return i, corrupt(r.send, "Send", "packet length changed", head, tail)
+			sizeAgain := binary.LittleEndian.Uint32(r.send.data()[head : head+4])
+			if sizeAgain != uint32(len(packet)) {
+				return i, captureRejection(r.send, "packet length changed", head, tail, uint32(len(packet)), p, sizeAgain)
 			}
 			if allZero(p) {
 				// NdisGetDataBuffer failure leaves a sized zero placeholder.
 				r.placeholders++
 			} else if !validIP(p) {
-				return i, corrupt(r.send, "Send", "packet failed validation", head, tail)
+				return i, captureRejection(r.send, "packet failed validation", head, tail, uint32(len(packet)), p)
 			} else {
 				sizes[i] = len(packet)
 				i++
