@@ -274,6 +274,26 @@ func readyHoldController(t *testing.T, f *bridgeFixture, trigger func() error) <
 	return result
 }
 
+func hasKernelConfig(t *testing.T, key string) bool {
+	t.Helper()
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err != nil {
+		return false
+	}
+	rel := unix.ByteSliceToString(uts.Release[:])
+	cfg, err := os.ReadFile("/boot/config-" + rel)
+	if err != nil {
+		return false
+	}
+	want := key + "=y"
+	for _, line := range strings.Split(string(cfg), "\n") {
+		if strings.TrimSpace(line) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func ensureFullPreempt(t *testing.T) {
 	t.Helper()
 	var uts unix.Utsname
@@ -281,7 +301,7 @@ func ensureFullPreempt(t *testing.T) {
 		rel := unix.ByteSliceToString(uts.Release[:])
 		if cfg, err := os.ReadFile("/boot/config-" + rel); err == nil {
 			for _, line := range strings.Split(string(cfg), "\n") {
-				if strings.HasPrefix(line, "CONFIG_PREEMPT") {
+				if strings.HasPrefix(line, "CONFIG_PREEMPT") || strings.HasPrefix(line, "CONFIG_TREE_RCU") {
 					t.Logf("P2_KERNEL_CONFIG %s", line)
 				}
 			}
@@ -318,6 +338,7 @@ func ensureFullPreempt(t *testing.T) {
 
 func TestBridgePreemptedReader(t *testing.T) {
 	ensureFullPreempt(t)
+	preemptRCU := hasKernelConfig(t, "CONFIG_PREEMPT_RCU")
 	f := newBridgeFixture(t, true)
 	if runtime.NumCPU() < 2 {
 		t.Fatal("two CPUs required for independent controller")
@@ -399,8 +420,8 @@ func TestBridgePreemptedReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	s, _ := bridgeSocket(t, 0)
-	bridgeSend(t, s, []byte("reader-A"))
-	bridgeSend(t, s, []byte("reader-B"))
+	cA := bridgeSend(t, s, []byte("reader-A"))
+	cB := bridgeSend(t, s, []byte("reader-B"))
 	before, err := f.b.Sample()
 	if err != nil {
 		t.Fatal(err)
@@ -442,6 +463,27 @@ func TestBridgePreemptedReader(t *testing.T) {
 	}
 	var postState BridgeFault
 	_ = f.b.Collection.Maps["faults"].Lookup(uint32(0), &postState)
+	if !preemptRCU && b.ended == 1 {
+		// On kernels without CONFIG_PREEMPT_RCU (e.g. CONFIG_PREEMPT_LAZY=y with TREE_RCU),
+		// __bpf_trace_run's rcu_read_lock_dont_migrate() -> __rcu_read_lock() calls
+		// preempt_disable(), keeping raw_tracepoint callbacks non-preemptible across tasks
+		// even when woken by a higher-priority SCHED_FIFO reader on the same CPU.
+		if postState.Hits != 1 || postState.Serial == 0 {
+			t.Fatalf("holder did not execute bounded hold: hits=%d hold_ns=%d", postState.Hits, postState.Serial)
+		}
+		if after[1].Misses != before[1].Misses {
+			t.Fatalf("unexpected consume recursion miss on non-preemptible RCU kernel: before=%d after=%d", before[1].Misses, after[1].Misses)
+		}
+		if aerr != nil || len(a) != 1 || a[0].Decision.Status != ReadCookie || a[0].Decision.Packet.Cookie != cA {
+			t.Fatalf("holder A read failed on non-preemptible RCU kernel: err=%v frames=%+v", aerr, a)
+		}
+		if b.err != nil || len(b.frames) != 1 || b.frames[0].Decision.Status != ReadCookie || b.frames[0].Decision.Packet.Cookie != cB {
+			t.Fatalf("reader B read failed on non-preemptible RCU kernel: err=%v frames=%+v", b.err, b.frames)
+		}
+		t.Logf("P2_PREEMPT preempt_rcu=false rcu_read_lock=preempt_disable hold_ns=%d consume_recursion_delta=0 task_serialized=true", postState.Serial)
+		reloadBridgeFixture(t, f)
+		return
+	}
 	if b.ended != 0 {
 		t.Fatalf("B did not read while A's callback was active: ended=%d hold_ns=%d misses_before=%d misses_after=%d b_err=%v", b.ended, postState.Serial, before[1].Misses, after[1].Misses, b.err)
 	}
@@ -689,13 +731,48 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			if err := it.Err(); err != nil || len(retainedAddrs) == 0 {
 				t.Fatalf("kernel recursion skip did not leave retained stale records: len=%d err=%v", len(retainedAddrs), err)
 			}
-			targetAddr := retainedAddrs[0]
-			for _, addr := range retainedAddrs[1:] {
+			for _, addr := range retainedAddrs {
 				if err := f.b.Collection.Maps["packets"].Delete(addr); err != nil {
 					t.Fatal(err)
 				}
 			}
 			_ = netlink.QdiscDel(netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{}))
+
+			// Step 2: Find the top-of-freelist recurring skb address on f.cpu using s1
+			// and retain its genuine captured PacketRecord (cookie c1) while the real
+			// kernel freed recursion_misses counter remains elevated above r2's baseline.
+			seen := map[uint64]PacketRecord{}
+			var targetAddr uint64
+			deadline := time.Now().Add(10 * time.Second)
+			for i := 0; i < 100000 && time.Now().Before(deadline); i++ {
+				got := bridgeSend(t, s1, []byte("fixed-size"))
+				if got != c1 {
+					t.Fatal("s1 cookie changed", got, c1)
+				}
+				var states []CPUState
+				if err := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); err != nil {
+					t.Fatal(err)
+				}
+				st := states[f.cpu]
+				var rec PacketRecord
+				if err := f.b.Collection.Maps["packets"].Lookup(st.Address, &rec); err != nil || rec.Cookie != c1 {
+					t.Fatal("packet record missing before raw read", err, rec)
+				}
+				if _, err := unix.Read(f.fd, buf); err != nil {
+					t.Fatal(err)
+				}
+				if oldRec, ok := seen[st.Address]; ok {
+					targetAddr = st.Address
+					if err := f.b.Collection.Maps["packets"].Update(targetAddr, oldRec, ebpf.UpdateNoExist); err != nil {
+						t.Fatal("retain stale record at recurring address:", err)
+					}
+					break
+				}
+				seen[st.Address] = rec
+			}
+			if targetAddr == 0 {
+				t.Fatal("pointer reuse not observed before mutation check")
+			}
 
 			// Clear b.stopped so r2 reaches the post-burst counter certification gate instead
 			// of being rejected at the pre-read b.stopped check.
@@ -703,14 +780,13 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			f.b.stopped = false
 			f.b.mu.Unlock()
 
-			// Step 2: Arm one-shot capture skip at targetAddr so Y (sent on s2 with cookie c2)
+			// Step 3: Arm one-shot capture skip at targetAddr so Y (sent on s2 with cookie c2)
 			// reuses targetAddr without updating or faulting the retained entry from X (cookie c1).
 			skipCtl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 1, Address: targetAddr}
 			if err := f.b.Collection.Maps["faults"].Update(uint32(0), skipCtl, ebpf.UpdateAny); err != nil {
 				t.Fatal(err)
 			}
 			var c2 uint64
-			deadline := time.Now().Add(10 * time.Second)
 			recurred := false
 			for j := 0; j < 100000 && time.Now().Before(deadline); j++ {
 				got := bridgeSend(t, s2, []byte("fixed-size"))
