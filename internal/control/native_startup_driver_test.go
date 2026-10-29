@@ -48,10 +48,11 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
+	usageSlice := name == "midnightGap"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
 	ownerLine := secondLine
-	if name == "appLine" || name == "combining" {
+	if name == "appLine" || name == "combining" || usageSlice {
 		pins = map[string]string{}
 		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
 		ownerLine = firstLine
@@ -427,6 +428,17 @@ func replayNativeStartup(t *testing.T, name string) {
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		if usageSlice && entry.Kind == "helper-line" {
+			check("startup counterpart exhaustion", counterparts.Finish())
+			if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 {
+				t.Fatal("startup observation leftovers")
+			}
+			for seq, guard := range replayNativeUsageSuffix(t, c, e, clock, files, trace, cmp, fileCursor, entry.Seq) {
+				checked[seq] = guard
+			}
+			logIndex = len(files.logs)
+			break
+		}
 		if name == "combining" && entry.Seq >= 129 && pinEvidence[entry.Seq] != "" {
 			checked[entry.Seq] = pinEvidence[entry.Seq]
 			// The shared file cursor still checks each distinct settings call.
@@ -622,7 +634,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			checked[entry.Seq] = guard
 		}
 	}
-	if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || !clock.Now().Equal(origin) {
+	if logIndex != len(files.logs) || len(pendingLogs) != 0 || (!usageSlice && len(files.events) != 0) || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || (!usageSlice && !clock.Now().Equal(origin)) {
 		t.Fatal("startup leftover/timing guard")
 	}
 	check("file exhaustion", fileCursor.Finish())

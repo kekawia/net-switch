@@ -100,5 +100,17 @@ the ordered counterpart cursor. The latter three had producer/report exit 1.
 Response-group regressions additionally reject a fabricated ack, v1 use,
 unknown boundary, reordered/omitted member and crossing the next HTTP request.
 
-The remaining five traces are not yet registered. The clock metadata and
-location-aware fixture setup are shared foundations, not receipts for them.
+## Santiago checkpoint
+
+midnightGap's 188 entries are registered. The aggregate reports **871 / 7,894**,
+producer and report exit 0. The pinned runtime's timezone regression verifies
+both sides of the gap. Two one-second polls ingest the physical baseline and
+200-byte delta; duplicate clock ticks consume completed-poll barriers without
+additional reads. Full events, diagnostics and API output match, with explicit
+event bijection 090909090909 → 000000000009 and
+0a0a0a0a0a0a → 00000000000a. Both native IDs must have come from the generator.
+The blocked revision persists its fenced b2 closure intent before Apply;
+closure is deferred to the next poll, beyond this trace's end. Main remains
+usable. No suffix usage or recovery file is written.
+
+The remaining four traces are not yet registered.
