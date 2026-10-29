@@ -104,6 +104,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("combining", func(t *testing.T) { replayNativeStartup(t, "combining") })
 	t.Run("savedVersionOrder", func(t *testing.T) { replayNativeStartup(t, "savedVersionOrder") })
 	t.Run("legacyCaseOrder", func(t *testing.T) { replayNativeStartup(t, "legacyCaseOrder") })
 	t.Run("appLine", func(t *testing.T) { replayNativeStartup(t, "appLine") })

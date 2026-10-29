@@ -51,7 +51,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
 	ownerLine := secondLine
-	if name == "appLine" {
+	if name == "appLine" || name == "combining" {
 		pins = map[string]string{}
 		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
 		ownerLine = firstLine
@@ -103,6 +103,14 @@ func replayNativeStartup(t *testing.T, name string) {
 	}
 	files := &memoryFiles{data: map[string][]byte{filepath.Join("/test", "settings.json"): initial.Settings}, observeAllWrites: true, observeReads: true}
 	clock := &fakeClock{at: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC), afterImmediate: true}
+	if trace.Scenario.Now != nil {
+		clock.at = time.UnixMilli(*trace.Scenario.Now)
+	}
+	location, err := time.LoadLocation(trace.Scenario.Timezone)
+	if err != nil {
+		t.Fatal("scenario timezone", err)
+	}
+	origin := clock.Now()
 	cmp := &nativeTraceComparator{effects: &files.order}
 	for _, entry := range trace.Entries {
 		if entry.Kind != "http" && entry.Kind != "api" {
@@ -137,7 +145,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			t.Fatal("initial absence guard", file)
 		}
 	}
-	c, base, _, _ := testCoreWithFilesMode(t, files, clock, true)
+	c, base, _, _ := testCoreWithFilesLocation(t, files, clock, true, location)
 	base.ackPoint = 1
 	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfigIDs(firstLine, secondLine, pins)}
 	c.op.Engine = e
@@ -403,6 +411,9 @@ func replayNativeStartup(t *testing.T, name string) {
 	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
 	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine")
 	var pinEvidence map[int]string
+	if name == "combining" {
+		pinEvidence = replayNativeCombiningSuffix(t, c, e, clock, files, trace, cmp)
+	}
 	if name == "appLine" {
 		var apiTrace recordedTrace
 		check("shared API trace", json.Unmarshal(mustStartupJSON(t, trace), &apiTrace))
@@ -416,6 +427,13 @@ func replayNativeStartup(t *testing.T, name string) {
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		if name == "combining" && entry.Seq >= 129 && pinEvidence[entry.Seq] != "" {
+			checked[entry.Seq] = pinEvidence[entry.Seq]
+			// The shared file cursor still checks each distinct settings call.
+			if entry.Kind != "file-completion" && entry.Kind != "write" && entry.Kind != "completion" {
+				continue
+			}
+		}
 		check("ordered native counterpart", counterparts.Observe(entry))
 		var v map[string]any
 		_ = json.Unmarshal(entry.Value, &v)
@@ -604,7 +622,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			checked[entry.Seq] = guard
 		}
 	}
-	if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || clock.Now().UnixMilli() != 1792411200000 {
+	if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || !clock.Now().Equal(origin) {
 		t.Fatal("startup leftover/timing guard")
 	}
 	check("file exhaustion", fileCursor.Finish())

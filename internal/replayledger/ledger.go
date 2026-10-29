@@ -57,6 +57,9 @@ type Group struct {
 	Begin   int    `json:"begin"`
 	End     int    `json:"end"`
 	Ack     int    `json:"ack"`
+	// response means the original trace has no separate acknowledgement.
+	// Its native owner proves acknowledgement before the actual HTTP return.
+	Boundary string `json:"boundary,omitempty"`
 }
 
 type Evidence struct {
@@ -83,9 +86,13 @@ type Entry struct {
 }
 
 type Trace struct {
-	Version int     `json:"version"`
-	Name    string  `json:"name"`
-	Entries []Entry `json:"entries"`
+	Version  int     `json:"version"`
+	Name     string  `json:"name"`
+	Entries  []Entry `json:"entries"`
+	Scenario struct {
+		Now      *int64 `json:"now"`
+		Timezone string `json:"timezone"`
+	} `json:"scenario"`
 }
 
 // Row is a disposition in original sequence order, never a sorted effect list.
@@ -220,7 +227,7 @@ func Build(m Mapping, traces map[string]Trace) (Report, error) {
 		ByKind:        map[string]int{}, ByTrace: map[string]int{},
 		Pending: map[string]int{},
 	}}
-	if m.Version != 1 || m.Total != 7894 || len(m.Fixtures) != 25 || len(traces) != 25 {
+	if (m.Version != 1 && m.Version != 2) || m.Total != 7894 || len(m.Fixtures) != 25 || len(traces) != 25 {
 		return r, fmt.Errorf("unsupported mapping version or fixture inventory")
 	}
 	rules := map[string]Rule{}
@@ -325,16 +332,30 @@ func validateGroups(m Mapping, traces map[string]Trace, annotations map[string]m
 			return fmt.Errorf("duplicate or unnamed group %q", g.Name)
 		}
 		t, ok := traces[g.Hash]
-		if !ok || len(g.Members) == 0 || g.Begin < 0 || g.End >= len(t.Entries) || g.Begin >= g.Ack || g.Ack >= g.End {
+		if !ok || len(g.Members) == 0 || g.Begin < 0 || g.End >= len(t.Entries) || g.Begin >= g.End {
 			return fmt.Errorf("incomplete group %s: invalid boundaries", g.Name)
 		}
-		if t.Entries[g.Begin].Kind != "http" || t.Entries[g.End].Kind != "api" || t.Entries[g.Ack].Kind != "timer-completion" {
+		limit := g.Ack
+		switch g.Boundary {
+		case "":
+			if g.Begin >= g.Ack || g.Ack >= g.End || t.Entries[g.Ack].Kind != "timer-completion" {
+				return fmt.Errorf("incomplete group %s: missing acknowledgement", g.Name)
+			}
+		case "response":
+			if m.Version != 2 || g.Ack != -1 {
+				return fmt.Errorf("incomplete group %s: response boundary requires v2 and no ack", g.Name)
+			}
+			limit = g.End
+		default:
+			return fmt.Errorf("incomplete group %s: unknown boundary", g.Name)
+		}
+		if t.Entries[g.Begin].Kind != "http" || t.Entries[g.End].Kind != "api" {
 			return fmt.Errorf("incomplete group %s: missing trigger, acknowledgement or publication", g.Name)
 		}
 		previous := g.Begin
 		groupOS := annotations[g.Hash][g.Members[0]].OS
 		for _, seq := range g.Members {
-			if seq <= previous || seq >= g.Ack {
+			if seq <= previous || seq >= limit {
 				return fmt.Errorf("incomplete group %s: unordered members", g.Name)
 			}
 			a, ok := annotations[g.Hash][seq]

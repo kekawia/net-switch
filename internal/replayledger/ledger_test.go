@@ -126,6 +126,36 @@ func TestLedgerRejectsMutations(t *testing.T) {
 	}
 }
 
+func TestResponseBoundedGroups(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Mapping)
+	}{
+		{"v1", func(m *Mapping) { m.Version = 1 }},
+		{"fake-ack", func(m *Mapping) { m.Groups[len(m.Groups)-1].Ack = 192 }},
+		{"unknown-boundary", func(m *Mapping) { m.Groups[len(m.Groups)-1].Boundary = "implicit" }},
+		{"reorder", func(m *Mapping) {
+			g := &m.Groups[len(m.Groups)-1]
+			g.Members[0], g.Members[1] = g.Members[1], g.Members[0]
+		}},
+		{"drop-member", func(m *Mapping) { g := &m.Groups[len(m.Groups)-1]; g.Members = g.Members[1:] }},
+		{"cross-http", func(m *Mapping) { m.Groups[len(m.Groups)-1].End = 196 }},
+	}
+	m, traces := load(t)
+	if _, err := Build(m, traces); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, traces := load(t)
+			tc.mutate(&m)
+			if _, err := Build(m, traces); err == nil {
+				t.Fatal("accepted invalid response-bounded transaction")
+			}
+		})
+	}
+}
+
 func TestLedgerFixtureHashAndSet(t *testing.T) {
 	m, _ := load(t)
 	for hash, f := range m.Fixtures {
