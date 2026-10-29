@@ -1,5 +1,20 @@
 # Health replay checkpoint
 
+All four traces are now registered: 2,063 additional entries, with a passing
+local aggregate of `covered 3985 / 7,894; uncovered 3909; pending map[]` and
+producer/lifecycle/report exits 0/0/0. The historical checkpoints below retain
+their original scope; the remaining slice work is the four reverted mutations.
+
+lostDefaultRoute adds 395 entries. Its successful directory cleanup, startup
+votes and response snapshot markers use the existing replacements. The route
+input is staged without a health vote. Explicit per-poll assertions require
+route-miss counts of 0 before 5 s, 1 from 5–9 s, 2 from 10–14 s, and 0 after
+the restored route is sampled at 15 s. Only the 11 s poll fails over; only the
+16 s poll recovers. Each line's routeReadAt remains on five-second boundaries.
+
+All health traces also assert inside each probe-result hook that no vote has
+been published yet: the complete operator round must join before health changes.
+
 ## Resumed work
 
 The CI race in job 123709836811 was in the generated-ID recording hook:

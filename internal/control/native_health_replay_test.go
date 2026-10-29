@@ -18,7 +18,7 @@ import (
 // probe kinds/operators, counts completed rounds and publishes lane revisions.
 func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, fileCursor *startupFileCursor, start int) map[int]string {
 	t.Helper()
-	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" && trace.Name != "probeFailover" {
+	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" && trace.Name != "probeFailover" && trace.Name != "lostDefaultRoute" {
 		t.Fatal("health trace not yet implemented", trace.Name)
 	}
 	checked := map[int]string{}
@@ -54,6 +54,10 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 	seen := map[string]bool{}
 	var mu sync.Mutex
 	var probeErr error
+	// These baselines are installed before Poll and remain read-only until
+	// all operator goroutines join. Even the first completed full check must
+	// not publish a partial-round vote.
+	roundFails, roundPasses := map[string]int{}, map[string]int{}
 	e.probeBegin = func(r engine.ProbeRequest) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -82,6 +86,12 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 	e.probeCheck = func(r engine.ProbeRequest, result engine.ProbeResult) {
 		mu.Lock()
 		defer mu.Unlock()
+		c.mu.Lock()
+		h := c.lanes[r.Line].health
+		if h.ProbeFails != roundFails[r.Line] || h.ProbePasses != roundPasses[r.Line] {
+			probeErr = fmt.Errorf("partial operator round published a vote: %s", r.Line)
+		}
+		c.mu.Unlock()
 		answers[r.Line] = append(answers[r.Line], answer{r, result})
 		if err := cmp.Reply(r.OperationID); err != nil {
 			probeErr = err
@@ -259,6 +269,13 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				passes[id] = l.health.ProbePasses
 			}
 			answers = map[string][]answer{}
+			for _, id := range []string{"a1", "b2"} {
+				roundFails[id], roundPasses[id] = fails[id], passes[id]
+			}
+			if trace.Name == "failoverFailback" && elapsed == 4000 {
+				// Address recovery resets the history before dispatching checks.
+				roundFails["a1"], roundPasses["a1"] = 0, 0
+			}
 			files.recordOrder("native:poll")
 			if err := c.Poll(context.Background()); err != nil {
 				t.Fatal(err)
@@ -271,6 +288,25 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 			}
 			if reads != polls {
 				t.Fatal("poll duplicated/missing connection read", reads, polls)
+			}
+			if trace.Name == "lostDefaultRoute" {
+				misses := 0
+				if elapsed >= 5000 && elapsed < 10000 {
+					misses = 1
+				}
+				if elapsed >= 10000 && elapsed < 15000 {
+					misses = 2
+				}
+				for _, id := range []string{"a1", "b2"} {
+					l := c.lanes[id]
+					wantMisses := 0
+					if id == "a1" {
+						wantMisses = misses
+					}
+					if l.health.RouteMisses != wantMisses || l.routeReadAt == nil || *l.routeReadAt != origin+(elapsed/5000)*5000 {
+						t.Fatal("route observation grace/cadence", elapsed, id, l.health.RouteMisses, l.routeReadAt)
+					}
+				}
 			}
 			changed := before.StartedWith.Lanes["a1"] != want.Lanes["a1"]
 			if (e.Snapshot().AppliedRevision != before.AppliedRevision) != changed {
