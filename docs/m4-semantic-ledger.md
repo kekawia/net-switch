@@ -7,11 +7,12 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
-Paused health checkpoint, 2026-10-29: failoverFailback adds 232 entries, bringing
-the passing local aggregate to **2,154 / 7,894** (5,740 uncovered). The four
-requested slice-specific gate mutations and the other three health traces remain
-unfinished. See [health replay checkpoint](m4-native-health-replay.md). The policy
-slice totals below describe the preceding checkpoint.
+Completed health slice, 2026-10-30: failoverFailback, busyFailedChecks,
+probeFailover and lostDefaultRoute add 2,063 entries, bringing the passing local
+aggregate to **3,985 / 7,894** (3,909 uncovered). All four requested gate mutations
+failed and were reverted. Hosted race checks and independent review remain.
+See [health replay evidence](m4-native-health-replay.md). The policy slice totals
+below describe the preceding checkpoint.
 
 Updated 2026-10-29 by the six-trace policy/physical-usage slice in PR #112.
 The pure Control, control/engine and ledger suites plus the selected native
