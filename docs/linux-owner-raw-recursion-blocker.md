@@ -4,6 +4,12 @@
 the unfinished bridge or dispatching privileged tests. This is a source-backed
 design gap, **not an executed TUN reproduction or a measured failure rate**.
 
+**Proposed counter-check resolution reviewed, 29 October:** the counter ABI
+is real, but the proposal is not adopted. Step 1 does not hold on the latest
+stable preemptible kernels, and step 3's first-UDP-datagram scope differs from
+the retained per-datagram contract. Details below. This does not prove that a
+revised counter-check design is impossible.
+
 ## Finding
 
 The attribution design's 5.8 observation is correct: `__bpf_trace_run` does not
@@ -86,3 +92,128 @@ and this finding are published. All sixteen Linux blockers remain unchanged.
 P1/P2 runtime proof, modern kernel manifest/lifetime audit, both 5.8 guests,
 and identity PR 2 remain outstanding. Earlier CI evidence belongs to the
 pre-rebase commit and does not qualify this rebased head.
+
+## Verification of the proposed recursion-counter resolution
+
+### Confirmed: introduction and observable counter
+
+The upstream raw-program guard is absent from the original v6.0 source and
+present in v6.1. Change 05b24ff9b2cf has author date 16 September 2022 and
+committer date 22 September; the earlier date in this report was the commit
+date, not the patch's author date. Original upstream 5.8 through 6.0 precedes
+this guard. These statements do not classify every downstream backport.
+
+`recursion_misses` is absent from the
+[v5.11 UAPI](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/linux/bpf.h?h=v5.11)
+and present in the
+[v5.12 UAPI](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/linux/bpf.h?h=v5.12).
+In the checked v6.1, v6.12 and v7.2.13 raw dispatchers, the recursion-refusal
+branch calls `bpf_prog_inc_misses_counter`. Their program-info path sums the
+per-CPU misses and exports the total through `bpf_prog_info.recursion_misses`.
+This read does not require enabling runtime-duration statistics.
+
+Field absence must be distinguished from a present counter containing zero.
+The returned info length can establish ABI field availability; a downstream
+kernel's version string or absent field alone does not prove the absence of
+a privately backported guard. Only audited no-guard profiles have that proof.
+
+### Step 1: valid in the checked older dispatchers, false as a general rule
+
+In [v6.1 tracepoint.h](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/linux/tracepoint.h?h=v6.1)
+and [v6.12 tracepoint.h](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/linux/tracepoint.h?h=v6.12),
+`__DO_TRACE` disables preemption around the callback. The synchronous
+`tun_chr_read_iter` -> `tun_do_read` -> consume/free path remains in the calling
+task. A different task cannot run that callback on the CPU while an outer
+non-preemptible invocation is active. Our selected helpers do not recursively
+perform a TUN read. Interrupt nesting remains possible in the other direction.
+
+**PREEMPT_RT distinction:** the explicit `preempt_disable_notrace` in those
+two upstream versions still increments the preemption count; it is not
+converted to migration-only exclusion by RT. I found no RT-specific break
+of that particular older tracepoint-call argument. This is not a blanket RT
+qualification or an audit of every vendor RT patch set.
+
+For the latest stable examined, **v7.2.13** (kernel.org's stable listing on
+29 October), the argument changes even without RT:
+
+- [tracepoint.h:315](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/linux/tracepoint.h?h=v7.2.13#n315)
+  wraps ordinary callbacks in SRCU-fast, without the former preemption guard.
+- [bpf_trace.c:2116](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/trace/bpf_trace.c?h=v7.2.13#n2116)
+  uses `rcu_read_lock_dont_migrate` for the non-sleepable raw program.
+- [rcupdate.h:977](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/linux/rcupdate.h?h=v7.2.13#n977)
+  disables migration with CONFIG_PREEMPT_RCU, then takes the preemptible RCU
+  read lock. Staying on one CPU is not the same as keeping another task off it.
+- [bpf.h:2185](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/include/linux/bpf.h?h=v7.2.13#n2185)
+  still guards the active program per CPU. ARM64 briefly disables preemption
+  to update its context bytes, then re-enables it before the BPF body.
+
+An upstream confirmation independent of this reading is
+[cc337974cd10](https://github.com/torvalds/linux/commit/cc337974cd1084f9821179eb66f4e470d9fd2ed8):
+it fixes another tracepoint consumer after a46023d5616e removed the implicit
+preemption exclusion. SRCU-fast's read-side primitive also contains no
+whole-callback preemption disable.
+
+Consequently, task A may be preempted while this raw program remains active;
+the reader task B may then run on the same CPU and have its own terminal
+invocation refused. This is a source-permitted schedule, not an executed
+reproduction. Treating only RT as unsupported/unknown would not cover it:
+ordinary preemptible non-RT builds also use this path. No new product exclusion
+has been adopted.
+
+### Step 2: useful conditional argument, with a contract correction
+
+For the stated stale-X/reused-address-Y case, if Y's own terminal runs, a
+post-read counter sample can observe the completed skipped callbacks in that
+history. The nested-skip counter is incremented synchronously before the
+skipped invocation returns. This is a useful candidate proof for a checked
+read, not proof of the complete proposed protocol on every kernel/config.
+
+The existing design does **not** silently overwrite an unexpected existing
+pointer record: it raises sticky health and invalidates the affected result.
+A successful capture therefore detects the stale key rather than repairing it
+by overwriting it. The proposal must preserve that fault rule.
+
+With a preemptible dispatcher, the reader-terminal premise must be handled
+explicitly instead of assumed. A missing completion already refuses evidence,
+so disproving step 1 alone does not disprove all possible counter-based fixes.
+
+### Step 3: first-packet-only and one-call claims do not match the contract
+
+The design's reader section explicitly requires an envelope per UDP datagram,
+and its conflict section requires current ownership/version validation at
+**both forwarding paths**, including already queued datagrams. First admission
+is not the only point at which UDP ownership evidence matters. A check scoped
+only to a new UDP session does not validate later envelopes or provide the
+specified retirement/health observation bound when only established traffic
+continues. Changing that scope needs a revised proof, not just an optimization.
+
+Current production code still uses periodic identity reconciliation, with
+freshness checks in `internal/engine/udp/nat.go` and `readiness.go`; the future
+per-datagram provenance/conflict layer is not implemented there yet. Existing
+production behavior must not be cited as evidence that the new contract is met.
+
+[v7.2.13 syscall.c:5616](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/bpf/syscall.c?h=v7.2.13#n5616)
+accepts **one FD per get-info syscall**. Checking capture plus a terminal
+program takes at least two calls, not one. The saved design has separate
+consume and free programs, hence three program counters if all are checked.
+[The stats reader at line 2548](https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/kernel/bpf/syscall.c?h=v7.2.13#n2548)
+walks all possible CPUs. Cost is unmeasured and depends on that count; no
+storm-cost number or harmless-overhead claim is available.
+
+An eventual protocol must also specify per-reader versus shared baselines,
+in-flight envelopes during a detected miss, and the quiesced reload barrier.
+A shared baseline must not consume a miss on behalf of another reader and
+leave that reader's old envelope accepted. The existing one-read sticky-health
+bound cannot silently become an unbounded wait for the next new flow.
+
+### Step 4 and disposition
+
+`attribution_unknown_recursion` and never inventing an owner are consistent
+with the existing refusal policy, but no such metric or runtime check was
+implemented because the prerequisite argument failed verification.
+
+As requested, implementation stops rather than selecting a replacement design.
+The authoritative design is not changed to claim this resolution. No positive
+control, mutation result, guest boot, or cost measurement is claimed. A revised
+proposal must cover preemptible raw dispatch, the actual UDP evidence consumers,
+the necessary program-FD queries and quiescence across all readers.
