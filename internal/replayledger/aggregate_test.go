@@ -27,6 +27,19 @@ func TestRecordedBuildFailureDiagnostics(t *testing.T) {
 	}
 }
 
+func TestBuildFailurePathsAreSorted(t *testing.T) {
+	for _, paths := range [][]string{{"z/package", "a/package"}, {"a/package", "z/package"}} {
+		events := []TestEvent{}
+		for _, p := range paths {
+			events = append(events, TestEvent{Action: "build-fail", ImportPath: p})
+		}
+		_, err := Aggregate(encodeEvents(events), receiptReport(), nil)
+		if err == nil || err.Error() != "build failed: a/package, z/package" {
+			t.Fatalf("unordered or incomplete failed imports: %v", err)
+		}
+	}
+}
+
 func TestRequiredReceiptsByOS(t *testing.T) {
 	for _, goos := range []string{"windows", "linux"} {
 		for _, scope := range []string{"", "windows", "linux"} {

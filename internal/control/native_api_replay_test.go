@@ -18,6 +18,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/replayledger"
 )
 
 // Deliberately a partial mapping, not a disposition of the entire trace.
@@ -113,8 +114,9 @@ func TestNativeAPIPinReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256(b)); got != "80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11" {
-		t.Fatal("mapping needs review for changed trace", got)
+	traceHash := fmt.Sprintf("%x", sha256.Sum256(b))
+	if traceHash != "80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11" {
+		t.Fatal("mapping needs review for changed trace", traceHash)
 	}
 	var trace recordedTrace
 	if err := json.Unmarshal(b, &trace); err != nil {
@@ -124,6 +126,18 @@ func TestNativeAPIPinReplay(t *testing.T) {
 		t.Fatal("unsupported mapping/trace")
 	}
 	consumed := map[int]string{}
+	mapping, err := replayledger.DefaultMapping()
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces, err := replayledger.Load("../..", mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := replayledger.Build(mapping, traces)
+	if err != nil {
+		t.Fatal(err)
+	}
 	entry := func(seq int, kind, direction, owner string) json.RawMessage {
 		t.Helper()
 		if previous, ok := consumed[seq]; ok {
@@ -171,6 +185,7 @@ func TestNativeAPIPinReplay(t *testing.T) {
 	files.observeAllWrites = true
 	for _, step := range pinReplaySteps {
 		t.Run(step.name, func(t *testing.T) {
+			checkedBefore := len(consumed)
 			orderStart, logsStart, eventsStart := len(files.order), len(files.logs), len(files.events)
 			applies := e.applies
 			callsBefore := len(base.calls)
@@ -316,6 +331,29 @@ func TestNativeAPIPinReplay(t *testing.T) {
 				if err != nil || d.Line != want || d.Revision != e.Snapshot().AppliedRevision {
 					t.Fatal("owner decision", owner, d, err)
 				}
+			}
+			// Select only this executing test's registered rows, in original
+			// sequence order. No receipt is earned until every check above passes.
+			var rows []replayledger.Row
+			for _, row := range report.Rows {
+				if row.Hash == traceHash && row.Assertion == "internal/control/native_api_replay_test.go#"+t.Name() {
+					if consumed[row.Seq] != step.name && consumed[row.Seq] != step.name+" native revision" && consumed[row.Seq] != step.name+" acknowledgement" {
+						t.Fatalf("registered entry %d has no behavioral check in %s", row.Seq, t.Name())
+					}
+					rows = append(rows, row)
+				}
+			}
+			if len(rows) != len(consumed)-checkedBefore {
+				t.Fatalf("registered %d entries but checked %d", len(rows), len(consumed)-checkedBefore)
+			}
+			cursor := replayledger.NewCursor(rows)
+			for _, row := range rows {
+				if err := cursor.Consume(t, row.Hash, row.Seq, row.Disposition); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := cursor.Receipt(t); err != nil {
+				t.Fatal(err)
 			}
 		})
 		if t.Failed() {

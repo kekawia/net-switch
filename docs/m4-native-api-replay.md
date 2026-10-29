@@ -93,5 +93,35 @@ Hosted checks at the revised head and independent re-review remain pending. The 
 CI runs this package; no new privileged job or workflow is added. Frozen
 reference/oracle bytes and production source remain unchanged.
 
-Cross-slice ownership belongs to PR #108's internal/replayledger. Registration
-of these 23 entries is deferred until that PR merges; no second registry is added.
+## Shared ledger registration
+
+Rebased onto cf10c6db after PR #108 merged. All seven annotations are now bound
+(`status: uncovered`, with their actual test/subtest references) in
+internal/replayledger/mapping.json. No OS scope is set: these are pure tests.
+Each subtest selects its rows from Build in original sequence order and checks
+that each selected row has a behavioral assertion in that subtest. Only after
+all response, durability, native-policy, ordering and I/O checks pass does it
+Consume those rows and call Receipt. The cursor emits one receipt per owned
+group: two for pin, two for unpin, one for read (23 entries total).
+The parent emits no duplicate receipt. The aggregate gate requires each owner,
+its parent and its package to pass. Static inventory alone still credits zero.
+Cross-slice ownership stays in the shared ledger; no second registry is added.
+
+2026-10-29 validation: the complete `go test -json -count=1` sweep of
+`./internal/control ./internal/replayledger` streamed directly into replay-report,
+without a log file. Both processes exited 0; the report printed
+`covered 23 / 7,894; uncovered 7871; pending map[]`. Package times were
+21.770 s and 29.923 s. The pinned toolchain ran at Idle priority with
+GOMAXPROCS=2 and -p=2. Fifteen CI dependency/workflow gate tests also passed.
+
+Three temporary mutations were tested and reverted:
+- Omitting read's Receipt left the tests passing but replay-report failed with
+  three missing required receipts, first appLine:207 (producer 0, report 1).
+- Failing read after Consume made Receipt refuse emission. No read receipt was
+  logged and the aggregate rejected the failed package (producer 1, report 1).
+- Renaming TestNativeAPIPinReplay made TestNativeSemanticLedger fail its source
+  binding check with the missing Test function and original bound name.
+
+The report now lists all failed build import paths in sorted order, with a
+two-order regression. The shared CI replay step explicitly selects UTF-8.
+Hosted checks at this rebased head remain pending; CI was not watched.
