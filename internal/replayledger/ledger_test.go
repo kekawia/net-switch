@@ -127,19 +127,42 @@ func TestLedgerRejectsMutations(t *testing.T) {
 }
 
 func TestResponseBoundedGroups(t *testing.T) {
+	target := func(m *Mapping) *Group {
+		for i := range m.Groups {
+			if m.Groups[i].Name == "combining-strict" {
+				return &m.Groups[i]
+			}
+		}
+		t.Fatal("missing response-boundary regression fixture")
+		return nil
+	}
 	cases := []struct {
 		name   string
 		mutate func(*Mapping)
 	}{
 		{"v1", func(m *Mapping) { m.Version = 1 }},
-		{"fake-ack", func(m *Mapping) { m.Groups[len(m.Groups)-1].Ack = 192 }},
-		{"unknown-boundary", func(m *Mapping) { m.Groups[len(m.Groups)-1].Boundary = "implicit" }},
+		{"fake-ack", func(m *Mapping) { target(m).Ack = 192 }},
+		{"unknown-boundary", func(m *Mapping) { target(m).Boundary = "implicit" }},
 		{"reorder", func(m *Mapping) {
-			g := &m.Groups[len(m.Groups)-1]
+			g := target(m)
 			g.Members[0], g.Members[1] = g.Members[1], g.Members[0]
 		}},
-		{"drop-member", func(m *Mapping) { g := &m.Groups[len(m.Groups)-1]; g.Members = g.Members[1:] }},
-		{"cross-http", func(m *Mapping) { m.Groups[len(m.Groups)-1].End = 196 }},
+		{"drop-member", func(m *Mapping) { g := target(m); g.Members = g.Members[1:] }},
+		{"split-owner", func(m *Mapping) {
+			g := target(m)
+			for i := range m.Annotations {
+				a := &m.Annotations[i]
+				if a.Group == g.Name {
+					other := *a
+					other.Seqs = []int{a.Seqs[0]}
+					other.Assertion = "internal/control/native_startup_replay_test.go#TestNativeStartupReplay/capMoved"
+					a.Seqs = a.Seqs[1:]
+					m.Annotations = append(m.Annotations, other)
+					return
+				}
+			}
+		}},
+		{"cross-http", func(m *Mapping) { target(m).End = 196 }},
 	}
 	m, traces := load(t)
 	if _, err := Build(m, traces); err != nil {

@@ -76,6 +76,8 @@ func newStartupCounterparts(files *memoryFiles, cmp *nativeTraceComparator, firs
 	log(i)
 	appendLog(i)
 	i++ // session announcement
+	add("counter-sample", "Ethernet", find("native:initial-poll"))
+	add("counter-sample", "Wi-Fi", find("native:initial-poll"))
 	for _, op := range []string{"platform.detectAdapters", "platform.readDefaultRoutes", "platform.readDefaultRoutes"} {
 		add("async-result", op, find("platform:network"))
 	}
@@ -110,17 +112,21 @@ func newStartupCounterparts(files *memoryFiles, cmp *nativeTraceComparator, firs
 
 func (c *startupCounterparts) Observe(entry replayledger.Entry) error {
 	switch entry.Kind {
-	case "log", "async-result", "engine", "engine-reply", "probe-result", "probe-vote":
+	case "log", "async-result", "engine", "engine-reply", "probe-result", "probe-vote", "event", "counter-sample":
 	default:
 		return nil
 	}
-	var v struct{ Operation, Method, Route, Line string }
+	var v struct{ Operation, Method, Route, Line, Kind, LineID, Alias string }
 	if err := json.Unmarshal(entry.Value, &v); err != nil {
 		return err
 	}
 	id := ""
 	switch entry.Kind {
 	case "log":
+	case "event":
+		id = v.Kind + " " + v.LineID
+	case "counter-sample":
+		id = v.Alias
 	case "async-result":
 		id = v.Operation
 	case "engine":
@@ -299,10 +305,12 @@ func TestStartupCounterpartsRejectReordering(t *testing.T) {
 	for _, pair := range [][2]startupCounterpart{
 		{{kind: "async-result", identity: "log.append", source: 0}, {kind: "async-result", identity: "engine./proxies/line-a1/delay.json", source: 1}},
 		{{kind: "engine", identity: "GET /proxies/line-a1/delay", source: 0}, {kind: "probe-result", identity: "/proxies/line-a1/delay", source: 1}},
+		{{kind: "event", identity: "exhausted a1", source: 0}, {kind: "log", source: 1}},
+		{{kind: "counter-sample", identity: "Ethernet", source: 0}, {kind: "counter-sample", identity: "Wi-Fi", source: 1}},
 	} {
 		t.Run(pair[0].kind, func(t *testing.T) {
 			c := startupCounterparts{want: pair[:], cmp: &nativeTraceComparator{effectNext: 2}}
-			v := map[string]any{"operation": pair[1].identity, "route": pair[1].identity}
+			v := map[string]any{"operation": pair[1].identity, "route": pair[1].identity, "alias": pair[1].identity}
 			e := replayledger.Entry{Seq: 1, Kind: pair[1].kind, Value: mustStartupJSON(t, v)}
 			if err := c.Observe(e); err == nil {
 				t.Fatal("out-of-order counterpart accepted")

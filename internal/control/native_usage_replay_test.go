@@ -38,7 +38,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 	c.op.ID = func() string {
 		id := originalID()
 		if generated[id] {
-			t.Fatal("repeated native ID", id)
+			e.guardError = fmt.Errorf("repeated native ID: %s", id)
 		}
 		generated[id] = true
 		return id
@@ -47,7 +47,8 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 	polls, reads := 0, 0
 	resetTrace := trace.Name == "capReset"
 	movedTrace := trace.Name == "capMoved"
-	blockedFlows := trace.Name == "capBlockedAndMainException"
+	combined := trace.Name == "combiningNoOpenLine"
+	blockedFlows := trace.Name == "capBlockedAndMainException" || combined
 	populated := movedTrace || blockedFlows
 	selectedID := "phone-flow"
 	if blockedFlows {
@@ -65,7 +66,12 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 		files.recordOrder("native:connections")
 		return append([]engine.Connection{}, supplied...), nil
 	}
-	e.closeCheck = func(r engine.CloseRequest) (engine.CloseResult, error) {
+	e.closeCheck = func(r engine.CloseRequest) (result engine.CloseResult, resultErr error) {
+		defer func() {
+			if resultErr != nil {
+				e.guardError = resultErr
+			}
+		}()
 		wantPoll := 3
 		if movedTrace {
 			wantPoll = 2
@@ -78,15 +84,16 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 		for _, name := range []string{"control-journal.json", "control-journal.json.bak"} {
 			var j struct{ Closures []closureIntent }
 			if err := json.Unmarshal(files.data[filepath.Join("/test", name)], &j); err != nil {
-				t.Fatal(err)
+				return engine.CloseResult{}, err
 			}
 			if len(j.Closures) != 1 || !reflect.DeepEqual(j.Closures[0].Request, r) {
-				t.Fatal("closure lacks durable acknowledged cutoff", name, j.Closures, r)
+				return engine.CloseResult{}, fmt.Errorf("closure lacks durable acknowledged cutoff: %s %+v / %+v", name, j.Closures, r)
 			}
 		}
 		closes++
 		if populated {
-			return engine.CloseResult{Closed: checkNativePhysicalClosure(t, supplied, r, e.want)}, nil
+			closed, err := checkNativePhysicalClosure(supplied, r, e.want)
+			return engine.CloseResult{Closed: closed}, err
 		}
 		return engine.CloseResult{}, nil
 	}
@@ -203,9 +210,13 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			logsAt, eventsAt, effectAt := len(files.logs), len(files.events), len(files.order)
 			before := e.Snapshot()
 			want := twoLineNativeConfig(map[string]string{})
+			want.Combine = combined
 			if polls >= 2 && !resetTrace || polls == 2 {
 				want.Blocked = []string{"b2"}
 				want.Shares = map[string]uint64{"a1": 500000}
+				if combined {
+					want.Shares = map[string]uint64{}
+				}
 				if movedTrace {
 					want.Blocked = []string{}
 					want.Shares = map[string]uint64{"a1": 500000, "b2": 500000}
@@ -215,6 +226,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			e.want = want
 			// Startup's journal/settings guard remains installed: physical usage
 			// must never mutate the user's saved settings.
+			files.recordOrder("native:poll")
 			if err := c.Poll(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -239,11 +251,15 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				order = []string{"event", "log", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "write:control-journal.json", "write:control-journal.json.bak", "lane-log", "native:connections", "platform:app-info", "native:close", "log", "write:control-journal.json", "write:control-journal.json.bak"}
 			}
 			if blockedFlows && polls == 2 {
+				if combined {
+					order = []string{"event", "log", "event", "log", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "write:control-journal.json", "write:control-journal.json.bak", "shares-log", "blocked-log", "native:connections"}
+				}
 				order = append(order, "platform:app-info")
 			}
 			if blockedFlows && polls == 3 {
 				order = []string{"native:connections", "native:close", "log", "write:control-journal.json", "write:control-journal.json.bak"}
 			}
+			order = append([]string{"native:poll"}, order...)
 			if err := cmp.Effects(order...); err != nil {
 				t.Fatal("poll native ordering", err, files.order[effectAt:])
 			}
@@ -252,7 +268,11 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 			for _, owner := range []string{"", `c:\apps\firefox.exe`} {
 				d, err := e.active.Decide(platform.Owner{AppID: owner}, 40000, false, 1)
-				if err != nil || d.Line != "a1" {
+				line := "a1"
+				if combined && polls == 1 {
+					line = "b2"
+				}
+				if err != nil || d.Line != line {
 					t.Fatal("exhausted main exception", d, err)
 				}
 			}
@@ -277,19 +297,31 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 			logSources := []int{}
 			for i := effectAt; i < len(files.order); i++ {
-				if files.order[i] == "log" || files.order[i] == "blocked-log" || files.order[i] == "lane-log" {
+				if files.order[i] == "log" || files.order[i] == "blocked-log" || files.order[i] == "lane-log" || files.order[i] == "shares-log" {
 					logSources = append(logSources, i)
 				}
 			}
 			add := func(kind, id string, source int) {
 				counterparts.want = append(counterparts.want, startupCounterpart{kind, id, source})
 			}
+			add("counter-sample", "Ethernet", find("native:poll"))
+			add("counter-sample", "Wi-Fi", find("native:poll"))
 			if polls == 2 || resetTrace && polls == 3 {
 				n := 2
 				if movedTrace {
 					n = 1
 				}
 				for i := 0; i < n; i++ {
+					kind, line := "exhausted", []string{"a1", "b2"}[i]
+					if movedTrace {
+						line = "b2"
+					}
+					if resetTrace && polls == 3 {
+						kind = "cap-reset"
+					}
+					// Each event immediately precedes its own diagnostic in the
+					// actual native stream; retain that cross-kind adjacency.
+					add("event", kind+" "+line, logSources[i]-1)
 					add("log", "", logSources[i])
 				}
 				for i := 0; i < n; i++ {
@@ -319,6 +351,10 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				}
 				add("log", "", logSources[2])
 				add("async-result", "log.append", logSources[2])
+				if combined {
+					add("log", "", logSources[3])
+					add("async-result", "log.append", logSources[3])
+				}
 			}
 			if blockedFlows && polls == 3 {
 				add("engine", "DELETE /connections/"+selectedID, find("native:close"))
@@ -481,6 +517,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				}
 				guard := e.check
 				want := twoLineNativeConfig(map[string]string{})
+				want.Combine = combined
 				for seq, proof := range replayNativePolicySteps(t, c, e, clock, files, trace, cmp, []nativePolicyStep{{pos, end, settingsSeq, want}}) {
 					checked[seq] = proof
 				}
@@ -580,69 +617,67 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 // may have been admitted under earlier pins, independently of today's policy.
 // The fixture's repeated connection inputs remain observation snapshots; they
 // do not assert that a closed socket came back to life.
-func checkNativePhysicalClosure(t *testing.T, input []engine.Connection, request engine.CloseRequest, current policy.Config) int {
-	t.Helper()
+func checkNativePhysicalClosure(input []engine.Connection, request engine.CloseRequest, current policy.Config) (int, error) {
 	table := flows.New(flows.Defaults(), nil)
-	t.Cleanup(table.CloseAll)
+	defer table.CloseAll()
 	var revision uint64
-	apply := func(config policy.Config) policy.Applied {
+	apply := func(config policy.Config) (policy.Applied, error) {
 		revision++
-		a, err := table.Apply(policy.Revision{N: revision, Hash: policy.Hash(config), Config: config})
+		return table.Apply(policy.Revision{N: revision, Hash: policy.Hash(config), Config: config})
+	}
+	admit := func(port int, app string, up, down uint64) error {
+		ticket, err := table.Begin("tcp", platform.Tuple{Source: netip.MustParseAddrPort(fmt.Sprintf("198.18.0.2:%d", port)), Destination: netip.MustParseAddrPort("203.0.113.9:443")})
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
-		return a
+		if _, err := ticket.Resolve(platform.Owner{AppID: app, Path: app}); err != nil {
+			ticket.Close()
+			return err
+		}
+		ticket.Add(up, down)
+		ticket.SetCancel(ticket.Close)
+		return nil
 	}
 	for i, connection := range input {
 		if len(connection.Chains) != 1 {
-			t.Fatal("physical flow input", connection)
+			return 0, fmt.Errorf("physical flow input: %+v", connection)
 		}
 		line := strings.TrimPrefix(connection.Chains[0], "line-")
-		config := twoLineNativeConfig(map[string]string{connection.Metadata.ProcessPath: line})
-		apply(config)
-		ticket, err := table.Begin("tcp", platform.Tuple{Source: netip.MustParseAddrPort(fmt.Sprintf("198.18.0.2:%d", 40000+i)), Destination: netip.MustParseAddrPort("203.0.113.9:443")})
-		if err != nil {
-			t.Fatal(err)
+		if _, err := apply(twoLineNativeConfig(map[string]string{connection.Metadata.ProcessPath: line})); err != nil {
+			return 0, err
 		}
-		if _, err := ticket.Resolve(platform.Owner{AppID: connection.Metadata.ProcessPath, Path: connection.Metadata.ProcessPath}); err != nil {
-			t.Fatal(err)
+		if err := admit(40000+i, connection.Metadata.ProcessPath, uint64(connection.Upload), uint64(connection.Download)); err != nil {
+			return 0, err
 		}
-		ticket.Add(uint64(connection.Upload), uint64(connection.Download))
-		ticket.SetCancel(ticket.Close)
 	}
 	before, err := table.Page("")
 	if err != nil || len(before.Flows) != len(input) {
-		t.Fatal("closure starting flows", before, err)
+		return 0, fmt.Errorf("closure starting flows: %+v: %v", before, err)
 	}
 	for i, flow := range before.Flows {
-		if flow.Line != strings.TrimPrefix(input[i].Chains[0], "line-") || flow.Owner.Path != input[i].Metadata.ProcessPath || flow.Up != uint64(input[i].Upload) || flow.Down != uint64(input[i].Download) {
-			t.Fatal("native flow bijection", flow, input[i])
+		if input[i].ID != fmt.Sprintf("%s:%d", request.Instance, flow.ID) || flow.Line != strings.TrimPrefix(input[i].Chains[0], "line-") || flow.Owner.Path != input[i].Metadata.ProcessPath || flow.Up != uint64(input[i].Upload) || flow.Down != uint64(input[i].Download) {
+			return 0, fmt.Errorf("native flow bijection: %+v / %+v", flow, input[i])
 		}
 	}
-	cutoff := apply(current).Point
-	// A later reset can reopen b2 before a delayed closure is delivered. The
-	// old cutoff must spare that new b2 flow, not merely spare another line.
-	apply(twoLineNativeConfig(map[string]string{"new-b2": "b2"}))
-	newLine, err := table.Begin("tcp", platform.Tuple{Source: netip.MustParseAddrPort("198.18.0.2:41001"), Destination: netip.MustParseAddrPort("203.0.113.11:443")})
+	applied, err := apply(current)
 	if err != nil {
-		t.Fatal(err)
+		return 0, err
 	}
-	if _, err := newLine.Resolve(platform.Owner{AppID: "new-b2"}); err != nil {
-		t.Fatal(err)
+	cutoff := applied.Point
+	// Model a later reset before delivery: newer flows on the SAME physical
+	// line and on main must both survive the original exhaustion cutoff.
+	if _, err := apply(twoLineNativeConfig(map[string]string{"new-b2": "b2"})); err != nil {
+		return 0, err
 	}
-	newLine.SetCancel(newLine.Close)
-	// A newer main flow must survive, as must every old unrelated main flow.
-	newer, err := table.Begin("tcp", platform.Tuple{Source: netip.MustParseAddrPort("198.18.0.2:41000"), Destination: netip.MustParseAddrPort("203.0.113.10:443")})
-	if err != nil {
-		t.Fatal(err)
+	if err := admit(41001, "new-b2", 0, 0); err != nil {
+		return 0, err
 	}
-	if _, err := newer.Resolve(platform.Owner{AppID: "new-main"}); err != nil {
-		t.Fatal(err)
+	if err := admit(41000, "new-main", 0, 0); err != nil {
+		return 0, err
 	}
-	newer.SetCancel(newer.Close)
 	result, err := table.CloseFlows(flows.Selector{Line: request.Line}, cutoff)
 	if err != nil || result.Failed != 0 || result.Gone != 0 {
-		t.Fatal("native physical closure", result, err)
+		return 0, fmt.Errorf("native physical closure: %+v: %v", result, err)
 	}
 	want := 0
 	for _, flow := range before.Flows {
@@ -651,16 +686,16 @@ func checkNativePhysicalClosure(t *testing.T, input []engine.Connection, request
 		}
 	}
 	if want == 0 || result.Closed != want {
-		t.Fatal("exact selected native flows", result, want)
+		return 0, fmt.Errorf("exact selected native flows: %+v, want %d", result, want)
 	}
 	after, err := table.Page("")
 	if err != nil || len(after.Flows) != len(input)-want+2 {
-		t.Fatal("native closure survivors", after, err)
+		return 0, fmt.Errorf("native closure survivors: %+v: %v", after, err)
 	}
 	for _, flow := range after.Flows {
 		if flow.Line == request.Line && flow.Point < cutoff {
-			t.Fatal("old physical flow survived", flow)
+			return 0, fmt.Errorf("old physical flow survived: %+v", flow)
 		}
 	}
-	return result.Closed
+	return result.Closed, nil
 }

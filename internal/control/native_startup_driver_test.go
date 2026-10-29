@@ -48,7 +48,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
-	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException"
+	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException" || name == "combiningNoOpenLine"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
 	ownerLine := secondLine
@@ -91,6 +91,9 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			trace.Entries[i].Value = b
 		}
+	}
+	if name == "combiningNoOpenLine" {
+		ownerLine = secondLine
 	}
 	var rows []replayledger.Row
 	for _, row := range report.Rows {
@@ -149,6 +152,9 @@ func replayNativeStartup(t *testing.T, name string) {
 	c, base, _, _ := testCoreWithFilesLocation(t, files, clock, true, location)
 	base.ackPoint = 1
 	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfigIDs(firstLine, secondLine, pins)}
+	if name == "combiningNoOpenLine" {
+		e.want.Combine = true
+	}
 	c.op.Engine = e
 	construction := []string{"read:settings.json:ok", "read:control-journal.json:missing", "read:windows-undo.json:missing"}
 	if name == "legacyCaseOrder" {
@@ -278,11 +284,12 @@ func replayNativeStartup(t *testing.T, name string) {
 	if c.initialSampled {
 		t.Fatal("poll precondition: already sampled")
 	}
+	files.recordOrder("native:initial-poll")
 	check("initial physical sample", c.Poll(context.Background()))
 	if !c.initialSampled || len(c.meters) != 0 {
 		t.Fatal("null physical counters guard")
 	}
-	check("poll effects", cmp.Effects())
+	check("poll effects", cmp.Effects("native:initial-poll"))
 
 	// Each mutation must see matching durable desired/settings before it runs.
 	e.check = func(r engine.Revision) error {
@@ -369,7 +376,11 @@ func replayNativeStartup(t *testing.T, name string) {
 	// No stale compiled rule/PID/log artifacts survive in the native boundary.
 	for _, owner := range []string{`C:\Discord\app-2.0.0\other.exe`, `C:\Apps\unrelated.exe`, ""} {
 		d, err := e.active.Decide(platform.Owner{AppID: apppath.Normalize(owner, apppath.Windows)}, 40000, false, 1)
-		if err != nil || d.Line != firstLine {
+		fallback := firstLine
+		if name == "combiningNoOpenLine" {
+			fallback = secondLine
+		}
+		if err != nil || d.Line != fallback {
 			t.Fatal("near-neighbour/unpinned fallback guard", owner, d, err)
 		}
 	}

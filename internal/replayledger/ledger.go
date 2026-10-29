@@ -354,12 +354,13 @@ func validateGroups(m Mapping, traces map[string]Trace, annotations map[string]m
 		}
 		previous := g.Begin
 		groupOS := annotations[g.Hash][g.Members[0]].OS
+		groupOwner := annotations[g.Hash][g.Members[0]].Assertion
 		for _, seq := range g.Members {
 			if seq <= previous || seq >= limit {
 				return fmt.Errorf("incomplete group %s: unordered members", g.Name)
 			}
 			a, ok := annotations[g.Hash][seq]
-			if !ok || a.Group != g.Name || a.OS != groupOS || a.Disposition != "atomic-revision" || !ruleWrite(t.Entries[seq]) {
+			if !ok || a.Group != g.Name || a.OS != groupOS || a.Assertion != groupOwner || a.Disposition != "atomic-revision" || !ruleWrite(t.Entries[seq]) {
 				return fmt.Errorf("incomplete group %s at %d", g.Name, seq)
 			}
 			previous = seq

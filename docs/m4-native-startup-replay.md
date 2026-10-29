@@ -4,9 +4,14 @@ Inventory recorded before implementation, against main 22e044d7 (2026-10-29).
 The initial requested slice had 463 unregistered entries: appLine's remaining 188,
 legacyCaseOrder's 144, and savedVersionOrder's 131. No frozen bytes may change.
 
-Current result: all three traces are registered. The restored aggregate reports
+Original slice result: all three traces are registered. Its restored aggregate reported
 **covered 486 / 7,894; uncovered 7408; pending map[]**, both producers and report
 exit 0. The 154/298 figures below are the earlier saved-identity checkpoints.
+
+The subsequent [policy and physical usage slice](m4-native-policy-replay.md)
+extends this driver to six more traces and raises the aggregate to 1,922.
+It documents the scenario clock, physical inputs, event ID mappings and
+response-bounded transactions that this original startup slice did not cover.
 
 ## Inputs, conditions and gaps
 

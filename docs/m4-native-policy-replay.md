@@ -156,4 +156,31 @@ also checks the newer same-line and main survivors.
 bijections. main-flow and blocked-flow map respectively to test-engine:1 and
 test-engine:2 in the ordered native observation input.
 
-Only combiningNoOpenLine remains unregistered in this slice.
+## Completed slice and validation
+
+combiningNoOpenLine's 298 entries are also registered. All six traces now add
+exactly **1,436 entries**; the aggregate reports **1,922 / 7,894**, with 5,972
+remaining outside this slice. The all-exhausted combined policy retains the
+combining setting but has no eligible shares: unknown and unpinned flows use
+the main lane target. The blocked secondary closes on the following poll.
+Event and flow identity bijections match capBlockedAndMainException.
+
+The complete pure Control, control/engine and ledger suites, plus the selected
+native lifecycle replacement contract, passed with producer/lifecycle/report
+exit codes 0/0/0. The pinned Go runtime used Idle priority, GOMAXPROCS=2 and
+-p 2; go test -json -count=1 streamed directly into replay-report without logs.
+Ledger v2 regressions also reject splitting one group across different owners.
+
+The counterpart cursor now includes physical samples and events, preserving
+event/log adjacency as well as engine and async-result ordering. A further
+reverted mutation swapping combiningNoOpenLine's event/log 213/214 failed at
+the expected event. Removing the real table's cutoff closed two flows instead
+of one and failed; advancing it past the newer flow likewise failed. Callbacks
+return guard errors to the test goroutine rather than invoking FailNow from
+Control's queue worker.
+
+No product behavior change was required. Full literal policies, response
+comparisons and existing startup contracts remain the basis of every receipt.
+Frozen reference and oracle bytes remain unchanged. No engine process, service,
+TUN or route operation ran locally. Independent review and hosted checks remain
+outside this local validation; CI is not watched by this implementation task.
