@@ -125,9 +125,8 @@ INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
      * evidence/counters: the kernel recursion guard must cause the refusal.
      * reserved = {active pid_tgid, release, ended}; mode 8 holds consume,
      * mode 16 holds free, mode 32 holds capture. Neither path is present in the
-     * normal object. Keep 20k clock calls, but poll the data-dependent exits
-     * only between 16-call straight-line quanta. A branchy 20k loop exhausted
-     * the verifier's pending-jump stack. */
+     * normal object. Poll data-dependent exits between 32-call straight-line
+     * quanta so the verifier's pending-jump stack remains well below 8,192. */
     u32 zero = 0;
     struct ns_faults *f = lookup(&faults, &zero);
     struct ns_config *cfg = lookup(&config, &zero);
@@ -136,8 +135,8 @@ INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
         f->cpu == cpu_id() && !f->hits &&
         !READ(dev, skb->dev) && selected(dev, cfg)) {
         if (mode != 32) {
-            /* Only the armed read may open a terminal hold. A queue drop during
-             * setup must not consume this one-shot control before the read. */
+            /* Only an armed reader slot may open a terminal hold. A queue drop
+             * during setup must not consume this one-shot control before the read. */
             u64 id = pid_tgid();
             struct ns_reader_key key = { .tgid = id >> 32, .tid = (u32)id };
             struct ns_reader_registration *r = lookup(&readers, &key);
@@ -145,8 +144,7 @@ INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
                 return;
             u32 slot = r->slot;
             struct ns_reader_slot *s = lookup(&read_slots, &slot);
-            if (!s || s->control.armed != 1 || s->control.epoch != cfg->epoch ||
-                s->control.registration != r->generation)
+            if (!s || s->control.armed != 1 || s->control.epoch != cfg->epoch)
                 return;
         }
         __sync_fetch_and_add(&f->hits, 1);
@@ -158,7 +156,7 @@ INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
             if (*(volatile u64 *)&f->reserved[1] || now - start >= 20000000)
                 break;
 #pragma unroll
-            for (u32 tick = 0; tick < 16; tick++)
+            for (u32 tick = 0; tick < 32; tick++)
                 now = ktime_ns();
         }
         f->reserved[2] = 1;

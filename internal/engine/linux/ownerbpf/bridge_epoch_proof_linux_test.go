@@ -157,9 +157,49 @@ func verifyProofThread(cpu int, priority uint32) error {
 	return nil
 }
 
+func newEventFD(t *testing.T) int {
+	t.Helper()
+	efd, err := unix.Eventfd(0, unix.EFD_CLOEXEC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = unix.Close(efd) })
+	return efd
+}
+
+func waitEventFD(efd int) error {
+	var buf [8]byte
+	for {
+		n, err := unix.Read(efd, buf[:])
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n == 8 {
+			return nil
+		}
+	}
+}
+
+func signalEventFD(efd int) error {
+	buf := [8]byte{1}
+	_, err := unix.Write(efd, buf[:])
+	return err
+}
+
+func releaseHold(f *bridgeFixture) {
+	var state BridgeFault
+	if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &state); err == nil && state.Reserved[0] != 0 && state.Reserved[2] == 0 {
+		state.Reserved[1] = 1
+		_ = f.b.Collection.Maps["faults"].Update(uint32(0), state, ebpf.UpdateAny)
+	}
+}
+
 // Complete controller setup before the holder can enter the bounded BPF
 // window. Starting a goroutine is not evidence it has run, pinned, or polled.
-func readyHoldController(t *testing.T, f *bridgeFixture, trigger func()) <-chan error {
+func readyHoldController(t *testing.T, f *bridgeFixture, trigger func() error) <-chan error {
 	t.Helper()
 	ready := make(chan error, 1)
 	result := make(chan error, 1)
@@ -218,11 +258,7 @@ func readyHoldController(t *testing.T, f *bridgeFixture, trigger func()) <-chan 
 					result <- fmt.Errorf("hold ended before ready controller observed it: holder=%d hits=%d", active.Reserved[0], active.Hits)
 					return
 				}
-				trigger()
-				result <- nil
-				// Park here to hand the Go execution token to the waiting
-				// actor. Restoring affinity now could move this controller
-				// behind the held FIFO task before that handoff completed.
+				result <- trigger()
 				<-cancel
 				return
 			}
@@ -246,9 +282,8 @@ func TestBridgePreemptedReader(t *testing.T) {
 	if err := f.b.Collection.Maps["config"].Update(uint32(0), f.b.config, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
+	wakeFD := newEventFD(t)
 	ready := make(chan error, 1)
-	start := make(chan struct{})
-	cancel := make(chan struct{})
 	done := make(chan struct{})
 	type result struct {
 		frames []ReadFrame
@@ -291,18 +326,19 @@ func TestBridgePreemptedReader(t *testing.T) {
 		}
 		t.Logf("P2_READER ready=true tid=%d cpu=%d policy=FIFO priority=20", unix.Gettid(), f.cpu)
 		ready <- nil
-		select {
-		case <-start:
-		case <-cancel:
+		if err := waitEventFD(wakeFD); err != nil {
+			out <- result{err: err}
 			return
 		}
 		frames, readErr := r.ReadBurst(f.fd, 1)
 		var state BridgeFault
 		lookupErr := f.b.Collection.Maps["faults"].Lookup(uint32(0), &state)
-		out <- result{frames, errors.Join(readErr, lookupErr), state.Reserved[2]}
+		ended := state.Reserved[2]
+		releaseHold(f)
+		out <- result{frames, errors.Join(readErr, lookupErr), ended}
 	}()
 	t.Cleanup(func() {
-		close(cancel)
+		_ = signalEventFD(wakeFD)
 		select {
 		case <-done:
 		case <-time.After(2 * time.Second):
@@ -326,7 +362,7 @@ func TestBridgePreemptedReader(t *testing.T) {
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
-	controller := readyHoldController(t, f, func() { close(start) })
+	controller := readyHoldController(t, f, func() error { return signalEventFD(wakeFD) })
 	if err := setProofPriority(10); err != nil {
 		t.Fatal(err)
 	}
@@ -358,7 +394,7 @@ func TestBridgePreemptedReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	if b.ended != 0 {
-		t.Fatal("B did not read while A's callback was active")
+		t.Fatalf("B did not read while A's callback was active: ended=%d misses_before=%d misses_after=%d b_err=%v", b.ended, before[1].Misses, after[1].Misses, b.err)
 	}
 	if after[1].Misses <= before[1].Misses {
 		t.Fatal("kernel consume recursion counter did not grow", before, after)
@@ -435,9 +471,8 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
+	wakeFD := newEventFD(t)
 	ready := make(chan error, 1)
-	start := make(chan struct{})
-	cancel := make(chan struct{})
 	sent := make(chan error, 1)
 	joined := make(chan struct{})
 	go func() {
@@ -475,9 +510,8 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 		}
 		t.Logf("P2_SENDER ready=true tid=%d cpu=%d policy=FIFO priority=20", unix.Gettid(), f.cpu)
 		ready <- nil
-		select {
-		case <-start:
-		case <-cancel:
+		if err := waitEventFD(wakeFD); err != nil {
+			sent <- err
 			return
 		}
 		for range 8 {
@@ -487,15 +521,12 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 			}
 		}
 		sent <- nil
-		// Park the higher-priority sender so the held FIFO-10 task resumes
-		// before the queued timer traffic arrives on this same CPU.
-		<-cancel
 	}()
-	t.Cleanup(func() { close(cancel); <-joined })
+	t.Cleanup(func() { _ = signalEventFD(wakeFD); <-joined })
 	if err := <-ready; err != nil {
 		t.Fatal(err)
 	}
-	controller := readyHoldController(t, f, func() { close(start) })
+	controller := readyHoldController(t, f, func() error { return signalEventFD(wakeFD) })
 	assertHealthy("stimulus-ready")
 	if err := setProofPriority(10); err != nil {
 		t.Fatal(err)
@@ -598,9 +629,8 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
 				t.Fatal(err)
 			}
+			wakeFD := newEventFD(t)
 			ready := make(chan error, 1)
-			start := make(chan struct{})
-			cancel := make(chan struct{})
 			preempted := make(chan error, 1)
 			joined := make(chan struct{})
 			go func() {
@@ -637,22 +667,22 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 					return
 				}
 				ready <- nil
-				select {
-				case <-start:
-				case <-cancel:
+				if err := waitEventFD(wakeFD); err != nil {
+					preempted <- err
 					return
 				}
 				// Send while the FIFO-10 holder is inside capture on the same CPU.
 				// The kernel raw-tracepoint recursion guard suppresses this capture
 				// and increments capture recursion_misses.
-				preempted <- unix.Sendto(s3, []byte("preempt-xmit"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000})
-				<-cancel
+				sendErr := unix.Sendto(s3, []byte("preempt-xmit"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000})
+				releaseHold(f)
+				preempted <- sendErr
 			}()
-			t.Cleanup(func() { close(cancel); <-joined })
+			t.Cleanup(func() { _ = signalEventFD(wakeFD); <-joined })
 			if err := <-ready; err != nil {
 				t.Fatal(err)
 			}
-			controller := readyHoldController(t, f, func() { close(start) })
+			controller := readyHoldController(t, f, func() error { return signalEventFD(wakeFD) })
 			if err := setProofPriority(10); err != nil {
 				t.Fatal(err)
 			}
@@ -784,4 +814,5 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 		})
 	}
 }
+
 

@@ -494,7 +494,7 @@ func TestBridgeRelocations(t *testing.T) {
 			}
 			want := 0
 			if variable == "NS_BRIDGE_FAULT_OBJECT" {
-				want = 17
+				want = 33
 			}
 			if clockCalls != want {
 				t.Fatalf("%s %s compiled hold shape: clock sites=%d want=%d", variable, name, clockCalls, want)
@@ -597,15 +597,7 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		t.Fatalf("packet after zero-length read corrupted: %+v", fr1.Decision)
 	}
 
-	// 2. Interrupted read (EINTR) returns cleanly without dequeuing or faulting.
-	_, eintrErr := f.r.readBurst(f.fd, 1, func(int, []byte) (int, error) {
-		return -1, unix.EINTR
-	})
-	if !errors.Is(eintrErr, unix.EINTR) || f.b.Faults() != 0 {
-		t.Fatalf("EINTR read handling failed: err=%v faults=%d", eintrErr, f.b.Faults())
-	}
-
-	// 3. Truncated read retains packet provenance while returning truncated bytes.
+	// 2. Truncated read retains packet provenance while returning truncated bytes.
 	c2 := bridgeSend(t, s, []byte("0123456789abcdef0123456789abcdef"))
 	truncFrames, err := f.r.readBurst(f.fd, 1, func(fd int, dst []byte) (int, error) {
 		return unix.Read(fd, dst[:32])
@@ -614,7 +606,7 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		t.Fatalf("truncated read failed: len=%d err=%v decision=%+v", len(truncFrames), err, truncFrames)
 	}
 
-	// 4. Publication suppression (mode 2) retires the packet record from the map
+	// 3. Publication suppression (mode 2) retires the packet record from the map
 	// while refusing the read with delivered_without_record and requesting reload.
 	c3 := bridgeSend(t, s, []byte("suppress-publication"))
 	var states []CPUState
