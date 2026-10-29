@@ -8,6 +8,10 @@ on:
     paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'scripts/run-native-proof.mjs', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
   workflow_dispatch:
     inputs:
+      owner_bridge:
+        description: 'Only the small isolated Linux provenance bridge diagnostic'
+        type: boolean
+        default: false
       runner:
         description: 'One runner for focused diagnostics; ordinary PRs use the full matrix'
         type: choice
@@ -26,7 +30,11 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  owner_bridge:
+    if: github.event_name == 'workflow_dispatch' && inputs.owner_bridge
+    uses: ./.github/workflows/linux-owner-bridge.yml
   services:
+    if: ${{ !inputs.owner_bridge }}
     name: Native services / ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40

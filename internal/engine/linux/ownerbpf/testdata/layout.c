@@ -1,6 +1,12 @@
 /* SPDX-License-Identifier: (MIT OR GPL-2.0-only) */
 #include <stdio.h>
+#include <stddef.h>
+#include <linux/bpf.h>
 #include "../bpf/provenance.h"
+
+_Static_assert(offsetof(struct bpf_prog_info, id) == 4, "program id offset");
+_Static_assert(offsetof(struct bpf_prog_info, recursion_misses) == 208, "misses offset");
+_Static_assert(sizeof(((struct bpf_prog_info *)0)->recursion_misses) == 8, "misses size");
 
 /* Independent C writer, consumed by Go. Never loads a BPF program. */
 int main(void)

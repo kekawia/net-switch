@@ -3,9 +3,12 @@
 This is the first coherent part of the 27 October attribution design's PR 1,
 not its completed kernel proof. Nothing here is registered in the engine.
 
-29 October: implementation is stopped at a modern-kernel design gap documented
-in [the raw-tracepoint recursion finding](linux-owner-raw-recursion-blocker.md).
-No bridge or floor guest is qualified by this contract slice.
+29 October: the revised [whole-burst rule](linux-owner-burst.md) resolves the
+source-level gap for implementation. The draft now includes raw capture/terminal
+programs, root-cookie initialization, mmap reader and post-burst counter checks.
+No bridge or floor guest is qualified until the hosted evidence passes.
+The earlier contract-only scope below is historical; the current remaining work
+is full P1/P2, epoch-reload integration, manifests/audit, floor guests and cost.
 
 ## What is implemented
 

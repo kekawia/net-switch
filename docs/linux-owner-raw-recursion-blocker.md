@@ -1,5 +1,12 @@
 # Modern raw-tracepoint retirement: unresolved design obligation
 
+**Latest status, 29 October:** the revised *whole-burst* rule is adopted for
+implementation with an explicit post-read full barrier and private reader
+baselines. See [the burst rule and ordering proof](linux-owner-burst.md).
+The earlier rejected first-flow-only argument below is retained as history.
+The source-level blocker has a specified resolution; runtime P2 controls,
+mutation evidence and storm cost remain unproved. This is not qualification.
+
 29 October 2026. Implementation stopped at the source audit, before restoring
 the unfinished bridge or dispatching privileged tests. This is a source-backed
 design gap, **not an executed TUN reproduction or a measured failure rate**.
