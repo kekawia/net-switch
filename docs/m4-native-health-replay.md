@@ -1,5 +1,26 @@
 # Health replay checkpoint
 
+## Resumed work
+
+The CI race in job 123709836811 was in the generated-ID recording hook:
+two full-probe goroutines wrote the same map. The hook now uses the same mutex
+as the request/result recording hooks; production probe concurrency is unchanged.
+The other new hooks were audited: probe answers are read-only during a joined
+round; request/result writes are locked; connection, event and projection work
+runs on the calling test goroutine after the round joins. The local race command
+first rejected disabled cgo. With CGO_ENABLED=1 it failed because gcc is absent,
+so race verification remains a hosted check. No compiler was installed.
+
+busyFailedChecks is now implemented: all 687 entries are registered. The supplied
+flow retains one instance-scoped identity across 35 accumulating snapshots;
+incoming bytes keep the line busy when the 15 s and 30 s rounds fail. Each
+failed native round contains one quick and two distinct full checks, but adds
+no failed health vote. The independent cadence check requires exactly those
+rounds, and the complete API comparison preserves the busy line's null ping.
+No routed byte count is substituted for physical adapter usage.
+The pure aggregate reports `covered 2841 / 7,894; uncovered 5053; pending map[]`,
+producer/lifecycle/report exits 0/0/0.
+
 2026-10-29. Paused at the user's request after implementing failoverFailback.
 The requested slice contains 2,063 entries: failoverFailback 232,
 busyFailedChecks 687, probeFailover 749 and lostDefaultRoute 395.

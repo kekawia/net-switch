@@ -108,6 +108,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("busyFailedChecks", func(t *testing.T) { replayNativeStartup(t, "busyFailedChecks") })
 	t.Run("failoverFailback", func(t *testing.T) { replayNativeStartup(t, "failoverFailback") })
 	t.Run("combiningNoOpenLine", func(t *testing.T) { replayNativeStartup(t, "combiningNoOpenLine") })
 	t.Run("capBlockedAndMainException", func(t *testing.T) { replayNativeStartup(t, "capBlockedAndMainException") })

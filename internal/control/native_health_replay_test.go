@@ -18,7 +18,7 @@ import (
 // probe kinds/operators, counts completed rounds and publishes lane revisions.
 func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, fileCursor *startupFileCursor, start int) map[int]string {
 	t.Helper()
-	if trace.Name != "failoverFailback" {
+	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" {
 		t.Fatal("health trace not yet implemented", trace.Name)
 	}
 	checked := map[int]string{}
@@ -95,7 +95,13 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 	ids := map[string]string{}
 	generated := map[string]bool{}
 	oldID := c.op.ID
-	c.op.ID = func() string { id := oldID(); generated[id] = true; return id }
+	c.op.ID = func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		id := oldID()
+		generated[id] = true
+		return id
+	}
 	last := origin
 	completion := 0
 	for _, x := range trace.Entries[:start] {
@@ -278,8 +284,15 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				if l.probing {
 					t.Fatal("unfinished round")
 				}
-				if (len(answers[id]) != 0) != (id == "a1" && elapsed == 4000) {
-					t.Fatal("address recovery probe deadline", id, elapsed, answers[id])
+				probeDue := elapsed%15000 == 0
+				if trace.Name == "failoverFailback" {
+					probeDue = id == "a1" && elapsed == 4000
+				}
+				if trace.Name == "probeFailover" && id == "a1" {
+					probeDue = elapsed >= 15000 && elapsed <= 40000 && elapsed%5000 == 0
+				}
+				if (len(answers[id]) != 0) != probeDue {
+					t.Fatal("physical probe deadline", id, elapsed, answers[id])
 				}
 				if len(answers[id]) == 0 {
 					continue
@@ -311,12 +324,19 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 					if a.request.Line != id || a.request.Index != 0 || a.request.Custom || a.result.Instance != e.Snapshot().Instance || a.result.Kind != kind {
 						t.Fatal("physical probe fence", a)
 					}
-					if !generated[a.request.OperationID] || a.result.Delay == nil || *a.result.Delay != 18 {
-						t.Fatal("recovery operation identity/delay", a)
+					delay := float64(18)
+					if value, ok := probes[id].(float64); ok {
+						delay = value
+					}
+					if !generated[a.request.OperationID] || failed && a.result.Delay != nil || !failed && (a.result.Delay == nil || *a.result.Delay != delay) {
+						t.Fatal("physical operation identity/delay", a)
 					}
 					if a.request.Quick {
 						if doubt[id] {
 							t.Fatal("quick recovery")
+						}
+						if a.request.Target != []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}[operators[id]%3] {
+							t.Fatal("quick operator rotation", a)
 						}
 					} else {
 						if full[a.request.Target] {
@@ -331,10 +351,22 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				if doubt[id] && quick != 0 || !doubt[id] && quick != 1 {
 					t.Fatal("probe kind count")
 				}
-				if !reflect.DeepEqual(full, map[string]bool{"8.8.8.8:443": true, "9.9.9.9:443": true}) {
-					t.Fatal("rotating recovery operators", full, operators[id])
+				wantFull := map[string]bool{}
+				if doubt[id] || failed {
+					op := operators[id] % 3
+					if !doubt[id] {
+						op = (op + 1) % 3
+					}
+					targets := []string{"1.1.1.1:443", "8.8.8.8:443", "9.9.9.9:443"}
+					wantFull[targets[op]], wantFull[targets[(op+1)%3]] = true, true
+				}
+				if !reflect.DeepEqual(full, wantFull) {
+					t.Fatal("rotating full operators", full, operators[id])
 				}
 				busy := c.tracker.LineRate(id).Down >= 16*1024 || c.tracker.LineRate(id).Up >= 16*1024
+				if busy != (trace.Name == "busyFailedChecks" && id == "a1") {
+					t.Fatal("busy suppression starting traffic", id, c.tracker.LineRate(id))
+				}
 				if failed && busy {
 					if l.health.ProbeFails != fails[id] || l.health.ProbePasses != passes[id] {
 						t.Fatal("busy round counted")
