@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"net/netip"
 	"reflect"
@@ -13,6 +14,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/AyoubAchour/net-switch/internal/replayledger"
 )
 
 // Native goldens for the exact inputs of the frozen sing-box rule-file
@@ -385,5 +387,58 @@ func TestLegacyEmptyAppsReplacesPinsWithoutASentinel(t *testing.T) {
 	d, err := ticket.Resolve(platform.Owner{AppID: gameID, Path: gamePin})
 	if err != nil || d.Lane != "aa" || d.Line != "aa" || d.Revision != 42 {
 		t.Fatalf("formerly pinned game decided %+v %v", d, err)
+	}
+	// The failed adapter readdir had no cleanup effect. Its native replacement
+	// is this complete-revision contract, including the nonempty starting state
+	// above, rather than an invented successful directory scan.
+	mapping, err := replayledger.DefaultMapping()
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces, err := replayledger.Load("../../..", mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := replayledger.Build(mapping, traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []replayledger.Row
+	for _, row := range report.Rows {
+		if row.Assertion == "internal/control/engine/native_golden_test.go#"+t.Name() {
+			entry := traces[row.Hash].Entries[row.Seq]
+			var value struct {
+				Operation, Code, Kind, Directory string
+				Names                            []string
+				OK                               bool
+			}
+			if err := json.Unmarshal(entry.Value, &value); err != nil {
+				t.Fatal(err)
+			}
+			if entry.Kind == "directory-list" {
+				if value.Directory != "/oracle/data" || len(value.Names) == 0 {
+					t.Fatal("unknown directory list replacement", value)
+				}
+			} else if entry.Kind == "file-completion" {
+				if value.Operation != "readdir" || !(value.OK && value.Code == "" || !value.OK && value.Code == "ERR_INVALID_ARG_TYPE") {
+					t.Fatal("unknown cleanup failure", value)
+				}
+			} else if entry.Kind != "completion" || (value.Kind != "file-completion" && value.Kind != "directory-list") || traces[row.Hash].Entries[row.Seq-1].Kind != value.Kind {
+				t.Fatal("unknown cleanup completion", entry)
+			}
+			rows = append(rows, row)
+		}
+	}
+	if len(rows) == 0 {
+		t.Fatal("cleanup replacement has no bound entries")
+	}
+	cursor := replayledger.NewCursor(rows)
+	for _, row := range rows {
+		if err := cursor.Consume(t, row.Hash, row.Seq, row.Disposition); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cursor.Receipt(t); err != nil {
+		t.Fatal(err)
 	}
 }

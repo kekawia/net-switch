@@ -958,8 +958,18 @@ func (c *Core) applyPolicy(ctx context.Context, auto bool) error {
 			}
 			c.mu.Unlock()
 			if changed {
-				return c.persistJournal()
+				if err := c.persistJournal(); err != nil {
+					return err
+				}
 			}
+			// Native Start returns with this revision already acknowledged.
+			// Skipping Apply must not skip publication of its lane targets and
+			// diagnostics: no later policy change may arrive to publish them.
+			c.mu.Lock()
+			if gen == c.generation {
+				c.recordLanesLocked(p)
+			}
+			c.mu.Unlock()
 		}
 		return nil
 	}

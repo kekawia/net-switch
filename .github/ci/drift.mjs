@@ -46,7 +46,7 @@ export const declared = [{
   why: 'each path is a frozen trace returned by the preceding repository-relative glob',
 }, {
   from: 'internal/replayledger/ledger_test.go', call: 'filepath.Join("../..", path)',
-  reads: ['internal/control/native_golden_control_test.go', 'internal/control/engine/native_golden_test.go', 'internal/lifecycle/native_recovery_replay_test.go', 'internal/control/native_api_replay_test.go'],
+  reads: ['internal/control/native_golden_control_test.go', 'internal/control/engine/native_golden_test.go', 'internal/lifecycle/native_recovery_replay_test.go', 'internal/control/native_api_replay_test.go', 'internal/control/native_startup_replay_test.go'],
   why: 'supportingEvidence and bound annotations in mapping.json name test declarations in these source files; parsing checks references, not test execution',
 }, {
   from: 'scripts/smoke-test-installer.ps1', call: 'import(process.argv[1])', reads: ['lib/engine.mjs'],

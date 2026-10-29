@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -13,8 +14,92 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/AyoubAchour/net-switch/internal/replayledger"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
+
+// The retired TCP reservation/PID/version machinery has no native file or
+// socket equivalent. Reuse the real in-memory protocol contracts instead of
+// manufacturing listeners in Control's trace fixture. OS transport access
+// control remains covered by the installed/identity tests, not net.Pipe.
+func TestNativeStartupSessionReplacement(t *testing.T) {
+	t.Run("hello-instance", TestRemoteAttachesToTheNativeEngine)
+	t.Run("required-capabilities", TestRemoteRefusesEnginesMissingRequiredCapabilities)
+	t.Run("native-start-apply", TestNativeStartApplyAndSnapshotCarryPoints)
+	t.Run("release-and-reacquire", TestNativeRecoveryReplayReattach)
+	t.Run("acknowledged-cleanup", TestNativeRecoveryReplayAcknowledgedStop)
+	if t.Failed() {
+		return
+	}
+	mapping, err := replayledger.DefaultMapping()
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces, err := replayledger.Load("../..", mapping)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := replayledger.Build(mapping, traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []replayledger.Row
+	for _, row := range report.Rows {
+		if row.Assertion == "internal/lifecycle/native_recovery_replay_test.go#"+t.Name() {
+			rows = append(rows, row)
+		}
+	}
+	if len(rows) == 0 {
+		t.Fatal("session replacement has no bound entries")
+	}
+	cursor := replayledger.NewCursor(rows)
+	for _, row := range rows {
+		if row.Disposition != "obsolete" {
+			t.Fatal("session replacement requires explicit obsolete disposition", row)
+		}
+		entry := traces[row.Hash].Entries[row.Seq]
+		var value struct {
+			Operation, File, Route, Kind string
+			OK                           bool
+			Code                         string
+			Port                         int
+		}
+		if err := json.Unmarshal(entry.Value, &value); err != nil {
+			t.Fatal(err)
+		}
+		switch entry.Kind {
+		case "completion":
+			if row.Seq == 0 || value.Kind != traces[row.Hash].Entries[row.Seq-1].Kind {
+				t.Fatal("session completion adjacency", entry)
+			}
+		case "socket-completion":
+			if !(value.Operation == "listen" && (value.Port == 47820 || value.Port == 47821 || value.Port == 49000) || value.Operation == "close" && value.Port == 49000) {
+				t.Fatal("unknown listener replacement", entry)
+			}
+		case "file-completion":
+			if value.File != "/oracle/data/engine.pid" || !(value.Operation == "readFile" && !value.OK && value.Code == "ENOENT" || value.Operation == "writeFile" && value.OK) {
+				t.Fatal("unknown PID replacement", entry)
+			}
+		case "write":
+			if value.File != "/oracle/data/engine.pid" {
+				t.Fatal("unknown instance publication replacement", entry)
+			}
+		case "engine", "engine-reply":
+			if value.Route != "/version" {
+				t.Fatal("unknown handshake replacement", entry)
+			}
+		case "spawn": // acknowledged service Start replaces child process creation
+		default:
+			t.Fatal("session contract does not cover this kind", entry)
+		}
+		if err := cursor.Consume(t, row.Hash, row.Seq, row.Disposition); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cursor.Receipt(t); err != nil {
+		t.Fatal(err)
+	}
+}
 
 // Start the shared native fixture with a durable desired revision.
 func newRecoveryReplay(t *testing.T) *nativeFixture {
