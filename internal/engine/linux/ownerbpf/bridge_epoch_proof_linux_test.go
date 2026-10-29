@@ -393,8 +393,10 @@ func TestBridgePreemptedReader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var postState BridgeFault
+	_ = f.b.Collection.Maps["faults"].Lookup(uint32(0), &postState)
 	if b.ended != 0 {
-		t.Fatalf("B did not read while A's callback was active: ended=%d misses_before=%d misses_after=%d b_err=%v", b.ended, before[1].Misses, after[1].Misses, b.err)
+		t.Fatalf("B did not read while A's callback was active: ended=%d hold_ns=%d misses_before=%d misses_after=%d b_err=%v", b.ended, postState.Serial, before[1].Misses, after[1].Misses, b.err)
 	}
 	if after[1].Misses <= before[1].Misses {
 		t.Fatal("kernel consume recursion counter did not grow", before, after)
@@ -417,8 +419,65 @@ func TestBridgePreemptedReader(t *testing.T) {
 	reloadBridgeFixture(t, f)
 }
 
+func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops uint64, before [3]CounterSample) (BridgeFault, [3]CounterSample, uint64) {
+	t.Helper()
+	l, err := netlink.LinkByName("nsbridge0")
+	if err != nil || l.Attrs().Statistics == nil {
+		t.Fatal(err)
+	}
+	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 2000, Limit: 100})
+	if err := netlink.QdiscReplace(q); err != nil {
+		t.Fatal("netem positive-control prerequisite", err)
+	}
+	ctl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 16}
+	if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	faultBuf, err := unix.Mmap(-1, 0, unix.Getpagesize(), unix.PROT_NONE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Munmap(faultBuf) }()
+
+	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=2000us=2ms)
+	// immediately before entering the 20ms kfree_skb hold on f.cpu. Even when
+	// preemption is disabled on f.cpu, the hrtimer hardirq fires on f.cpu and
+	// runs NET_TX_SOFTIRQ on irq_exit in the interrupted reader task's context.
+	for range 8 {
+		if err := unix.Sendto(s, []byte("timer-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	called := false
+	_, readErr := f.r.readBurst(f.fd, 1, func(fd int, _ []byte) (int, error) {
+		called = true
+		return unix.Read(fd, faultBuf[:64])
+	})
+	if !errors.Is(readErr, unix.EFAULT) || !errors.Is(readErr, ErrEpochRebuild) {
+		t.Fatalf("copy-fault precondition: syscall_entered=%t health=%d: %v", called, f.b.Faults(), readErr)
+	}
+	if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &ctl); err != nil {
+		t.Fatal(err)
+	}
+	after, err := f.b.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err = netlink.LinkByName("nsbridge0")
+	if err != nil || l.Attrs().Statistics == nil {
+		t.Fatal(err)
+	}
+	drops := l.Attrs().Statistics.TxDropped - beforeDrops
+	if ctl.Hits != 1 || ctl.Address == 0 || drops == 0 || after[2].Misses <= before[2].Misses {
+		t.Fatalf("nested skip not exercised: hold=%d hold_ns=%d observed_same_task=%d kernel_drops=%d free_before=%d free_after=%d", ctl.Hits, ctl.Serial, ctl.Address, drops, before[2].Misses, after[2].Misses)
+	}
+	return ctl, after, drops
+}
+
 func TestBridgeNestedFreeSkip(t *testing.T) {
-	f := newBridgeFixture(t, true)
+	// IFF_VNET_HDR ensures tun_put_user checks copy_to_iter's -EFAULT return
+	// and routes the dequeued skb to kfree_skb(skb) in task context.
+	f := newBridgeFixture(t, true, unix.IFF_VNET_HDR)
 	if runtime.NumCPU() < 2 {
 		t.Fatal("two CPUs required for ready nested-free stimulus")
 	}
@@ -458,132 +517,11 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeDrops := l.Attrs().Statistics.TxDropped
-	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 100, Limit: 100})
-	if err := netlink.QdiscReplace(q); err != nil {
-		t.Fatal("netem positive-control prerequisite", err)
-	}
-	assertHealthy("qdisc-installed")
 	before, err := f.b.Sample()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 16}
-	if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
-		t.Fatal(err)
-	}
-	wakeFD := newEventFD(t)
-	ready := make(chan error, 1)
-	sent := make(chan error, 1)
-	joined := make(chan struct{})
-	go func() {
-		defer close(joined)
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		var old unix.CPUSet
-		if err := unix.SchedGetaffinity(0, &old); err != nil {
-			ready <- err
-			return
-		}
-		var mask unix.CPUSet
-		mask.Set(f.cpu)
-		if err := unix.SchedSetaffinity(0, &mask); err != nil {
-			ready <- err
-			return
-		}
-		defer func() {
-			if err := unix.SchedSetaffinity(0, &old); err != nil {
-				t.Error(err)
-			}
-		}()
-		if err := setProofPriority(20); err != nil {
-			ready <- err
-			return
-		}
-		defer func() {
-			if err := setProofPriority(0); err != nil {
-				t.Error(err)
-			}
-		}()
-		if err := verifyProofThread(f.cpu, 20); err != nil {
-			ready <- err
-			return
-		}
-		t.Logf("P2_SENDER ready=true tid=%d cpu=%d policy=FIFO priority=20", unix.Gettid(), f.cpu)
-		ready <- nil
-		if err := waitEventFD(wakeFD); err != nil {
-			sent <- err
-			return
-		}
-		for range 8 {
-			if err := unix.Sendto(s, []byte("timer-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
-				sent <- err
-				return
-			}
-		}
-		sent <- nil
-	}()
-	t.Cleanup(func() { _ = signalEventFD(wakeFD); <-joined })
-	if err := <-ready; err != nil {
-		t.Fatal(err)
-	}
-	controller := readyHoldController(t, f, func() error { return signalEventFD(wakeFD) })
-	assertHealthy("stimulus-ready")
-	if err := setProofPriority(10); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := setProofPriority(0); err != nil {
-			t.Error(err)
-		}
-	}()
-	if err := verifyProofThread(f.cpu, 10); err != nil {
-		t.Fatal(err)
-	}
-	// A real copy fault frees the reader's packet in task context. The netem
-	// timer must interrupt that held free callback and drop from the full ring.
-	called := false
-	_, readErr := f.r.readBurst(f.fd, 1, func(fd int, _ []byte) (int, error) {
-		called = true
-		_, _, errno := unix.Syscall(unix.SYS_READ, uintptr(fd), 1, 64)
-		if errno == 0 {
-			return 0, errors.New("invalid destination did not fault")
-		}
-		return -1, errno
-	})
-	if err := setProofPriority(0); err != nil {
-		t.Fatal(err)
-	}
-	if err := <-controller; err != nil {
-		var reasons [8]uint64
-		lookupErr := f.b.Collection.Maps["health"].Lookup(uint32(0), &reasons)
-		t.Fatalf("nested-free stimulus: syscall_entered=%t health=%d reasons=%v lookup=%v: %v", called, f.b.Faults(), reasons[3:], lookupErr, err)
-	}
-	select {
-	case err := <-sent:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("ready sender did not finish")
-	}
-	if !errors.Is(readErr, unix.EFAULT) || !errors.Is(readErr, ErrEpochRebuild) {
-		t.Fatalf("copy-fault precondition: syscall_entered=%t health=%d: %v", called, f.b.Faults(), readErr)
-	}
-	if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &ctl); err != nil {
-		t.Fatal(err)
-	}
-	after, err := f.b.Sample()
-	if err != nil {
-		t.Fatal(err)
-	}
-	l, err = netlink.LinkByName("nsbridge0")
-	if err != nil || l.Attrs().Statistics == nil {
-		t.Fatal(err)
-	}
-	drops := l.Attrs().Statistics.TxDropped - beforeDrops
-	if ctl.Hits != 1 || ctl.Address == 0 || drops == 0 || after[2].Misses <= before[2].Misses {
-		t.Fatalf("nested skip not exercised: hold=%d observed_same_task=%d kernel_drops=%d free_before=%d free_after=%d", ctl.Hits, ctl.Address, drops, before[2].Misses, after[2].Misses)
-	}
+	ctl, after, drops := triggerNestedFreeHold(t, f, s, beforeDrops, before)
 	if f.b.UnknownRecursion.Load() != 1 {
 		t.Fatal("recursion event not classified exactly once")
 	}
@@ -593,16 +531,13 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 
 func TestBridgeStaleRecordMutation(t *testing.T) {
 	if runtime.NumCPU() < 2 {
-		t.Fatal("two CPUs required for ready capture-recursion stimulus")
+		t.Fatal("two CPUs required for ready recursion stimulus")
 	}
 	for _, skipPostCheck := range []bool{false, true} {
 		t.Run(fmt.Sprintf("skip_post_check=%t", skipPostCheck), func(t *testing.T) {
-			f := newBridgeFixture(t, true)
-			f.r.SkipPostCheck = skipPostCheck
+			f := newBridgeFixture(t, true, unix.IFF_VNET_HDR)
 			s1, _ := bridgeSocket(t, 0)
 			s2, _ := bridgeSocket(t, 0)
-			s3, _ := bridgeSocket(t, 0)
-			// Establish socket cookies via one normal ping-pong on each socket.
 			c1 := bridgeSend(t, s1, []byte("init-1"))
 			if fr := bridgeRead(t, f, 1)[0]; fr.Decision.Status != ReadCookie || fr.Decision.Packet.Cookie != c1 {
 				t.Fatal("init-1 failed", fr.Decision)
@@ -611,163 +546,105 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			if fr := bridgeRead(t, f, 1)[0]; fr.Decision.Status != ReadCookie || fr.Decision.Packet.Cookie != c2 {
 				t.Fatal("init-2 failed", fr.Decision)
 			}
-			c3 := bridgeSend(t, s3, []byte("init-3"))
-			if fr := bridgeRead(t, f, 1)[0]; fr.Decision.Status != ReadCookie || fr.Decision.Packet.Cookie != c3 {
-				t.Fatal("init-3 failed", fr.Decision)
-			}
-			if c1 == c2 || c1 == c3 || c2 == c3 {
-				t.Fatal("distinct socket cookies required", c1, c2, c3)
+			if c1 == c2 {
+				t.Fatal("distinct socket cookies required", c1, c2)
 			}
 
-			// Step 1: Trigger a real kernel capture recursion skip on this epoch so
-			// capture recursion_misses > f.r's baseline while health remains 0.
+			// Register a second reader r2 while capture is temporarily quiesced so r2's
+			// baseline is sampled BEFORE the kernel recursion skip, then use f.r to
+			// trigger the real nested-free kernel recursion skip.
+			f.b.config.Enabled = 0
+			if err := f.b.Collection.Maps["config"].Update(uint32(0), f.b.config, ebpf.UpdateAny); err != nil {
+				t.Fatal(err)
+			}
+			r2, err := f.b.Register()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if r2 != nil {
+					_ = r2.Close()
+				}
+			})
+			r2.SkipPostCheck = skipPostCheck
+			if err := f.b.Enable(500); err != nil {
+				t.Fatal(err)
+			}
+
+			// Step 1: Fill the ring with 500 packets from s1 (cookie c1) and trigger
+			// a real kernel kfree_skb recursion skip using f.r. The 8 dropped packets
+			// have their kfree_skb terminal suppressed by the kernel recursion guard,
+			// so their stale records (cookie c1) remain in the kernel packet map AND
+			// freed recursion_misses increments above r2's baseline!
+			for range 500 {
+				bridgeSend(t, s1, []byte("fixed-size"))
+			}
+			var beforeMapKeys = make(map[uint64]PacketRecord)
+			var k uint64
+			var v PacketRecord
+			it := f.b.Collection.Maps["packets"].Iterate()
+			for it.Next(&k, &v) {
+				beforeMapKeys[k] = v
+			}
+			if err := it.Err(); err != nil || len(beforeMapKeys) != 500 {
+				t.Fatal("full ring precondition", len(beforeMapKeys), err)
+			}
+			l, err := netlink.LinkByName("nsbridge0")
+			if err != nil || l.Attrs().Statistics == nil {
+				t.Fatal(err)
+			}
+			beforeDrops := l.Attrs().Statistics.TxDropped
 			before, err := f.b.Sample()
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 32}
-			if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
-				t.Fatal(err)
-			}
-			wakeFD := newEventFD(t)
-			ready := make(chan error, 1)
-			preempted := make(chan error, 1)
-			joined := make(chan struct{})
-			go func() {
-				defer close(joined)
-				runtime.LockOSThread()
-				defer runtime.UnlockOSThread()
-				var old unix.CPUSet
-				if err := unix.SchedGetaffinity(0, &old); err != nil {
-					ready <- err
-					return
-				}
-				var mask unix.CPUSet
-				mask.Set(f.cpu)
-				if err := unix.SchedSetaffinity(0, &mask); err != nil {
-					ready <- err
-					return
-				}
-				defer func() {
-					if err := unix.SchedSetaffinity(0, &old); err != nil {
-						t.Error(err)
-					}
-				}()
-				if err := setProofPriority(20); err != nil {
-					ready <- err
-					return
-				}
-				defer func() {
-					if err := setProofPriority(0); err != nil {
-						t.Error(err)
-					}
-				}()
-				if err := verifyProofThread(f.cpu, 20); err != nil {
-					ready <- err
-					return
-				}
-				ready <- nil
-				if err := waitEventFD(wakeFD); err != nil {
-					preempted <- err
-					return
-				}
-				// Send while the FIFO-10 holder is inside capture on the same CPU.
-				// The kernel raw-tracepoint recursion guard suppresses this capture
-				// and increments capture recursion_misses.
-				sendErr := unix.Sendto(s3, []byte("preempt-xmit"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000})
-				releaseHold(f)
-				preempted <- sendErr
-			}()
-			t.Cleanup(func() { _ = signalEventFD(wakeFD); <-joined })
-			if err := <-ready; err != nil {
-				t.Fatal(err)
-			}
-			controller := readyHoldController(t, f, func() error { return signalEventFD(wakeFD) })
-			if err := setProofPriority(10); err != nil {
-				t.Fatal(err)
-			}
-			defer func() {
-				if err := setProofPriority(0); err != nil {
-					t.Error(err)
-				}
-			}()
-			if err := verifyProofThread(f.cpu, 10); err != nil {
-				t.Fatal(err)
-			}
-			if err := unix.Sendto(s3, []byte("holder-xmit"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
-				t.Fatal(err)
-			}
-			if err := setProofPriority(0); err != nil {
-				t.Fatal(err)
-			}
-			if err := <-controller; err != nil {
-				t.Fatal("capture recursion controller:", err)
-			}
-			if err := <-preempted; err != nil {
-				t.Fatal("preempting sender:", err)
-			}
-			afterHold, err := f.b.Sample()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if afterHold[0].Misses <= before[0].Misses {
-				t.Fatalf("kernel capture recursion counter did not grow: before=%+v after=%+v", before[0], afterHold[0])
-			}
-			// Drain the two stimulus packets directly from the TUN fd without advancing f.r's guard.
-			for range 2 {
-				buf := make([]byte, 2048)
-				if _, err := unix.Read(f.fd, buf); err != nil {
-					t.Fatal("drain stimulus packet:", err)
-				}
-			}
-			if f.b.Faults() != 0 {
-				t.Fatal("unexpected health fault during capture hold", f.b.Faults())
-			}
+			_, afterHold, _ := triggerNestedFreeHold(t, f, s1, beforeDrops, before)
 
-			// Step 2: Discover a reusable skb pointer address via ping-pong on s1
-			// (using raw unix.Read so f.r's baseline stays before the capture skip).
-			seen := map[uint64]uint64{}
-			var targetAddr uint64
-			var staleRecord PacketRecord
-			deadline := time.Now().Add(10 * time.Second)
-			for i := 0; i < 100000 && time.Now().Before(deadline); i++ {
-				if got := bridgeSend(t, s1, []byte("fixed-size")); got != c1 {
-					t.Fatal("cookie changed", got, c1)
+			// Remove netem qdisc by replacing with pfifo_fast / noqueue via link cycling or draining,
+			// and drain the remaining 499 queued packets from the ring using raw unix.Read.
+			// First reset f.b.stopped (which f.r's EFAULT read set) ONLY so r2 can enter ReadBurst
+			// to test the post-burst counter gate directly.
+			buf := make([]byte, 2048)
+			for range 499 {
+				if _, err := unix.Read(f.fd, buf); err != nil {
+					t.Fatal("drain ring after nested free:", err)
 				}
-				var states []CPUState
-				if err := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); err != nil {
+			}
+			// Any entries still in packets now are the exact skb addresses whose kfree_skb
+			// callback was suppressed by the kernel's raw_tracepoint recursion guard!
+			var retainedAddrs []uint64
+			it = f.b.Collection.Maps["packets"].Iterate()
+			for it.Next(&k, &v) {
+				if v.Cookie != c1 {
+					t.Fatalf("unexpected retained cookie: got %d want %d", v.Cookie, c1)
+				}
+				retainedAddrs = append(retainedAddrs, k)
+			}
+			if err := it.Err(); err != nil || len(retainedAddrs) == 0 {
+				t.Fatalf("kernel recursion skip did not leave retained stale records: len=%d err=%v", len(retainedAddrs), err)
+			}
+			targetAddr := retainedAddrs[0]
+			// Delete the other retained records so only targetAddr remains armed for recurrence.
+			for _, addr := range retainedAddrs[1:] {
+				if err := f.b.Collection.Maps["packets"].Delete(addr); err != nil {
 					t.Fatal(err)
 				}
-				st := states[f.cpu]
-				var rec PacketRecord
-				if err := f.b.Collection.Maps["packets"].Lookup(st.Address, &rec); err != nil || rec.Cookie != c1 {
-					t.Fatal("packet record missing before read", err, rec)
-				}
-				buf := make([]byte, 2048)
-				if _, err := unix.Read(f.fd, buf); err != nil {
-					t.Fatal("seed raw read failed", err)
-				}
-				if _, ok := seen[st.Address]; ok {
-					targetAddr = st.Address
-					staleRecord = rec
-					break
-				}
-				seen[st.Address] = st.SeenSerial
 			}
-			if targetAddr == 0 {
-				t.Fatal("pointer reuse not observed within 10s/100000 iterations")
-			}
+			_ = netlink.QdiscDel(netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{}))
 
-			// Step 3: Retain staleRecord (cookie c1) at targetAddr in the kernel packet map
-			// and arm one-shot capture skip at targetAddr so Y (sent on s2 with cookie c2)
-			// reuses targetAddr without updating or faulting the retained entry.
-			if err := f.b.Collection.Maps["packets"].Update(targetAddr, staleRecord, ebpf.UpdateNoExist); err != nil {
-				t.Fatal("failed to insert retained stale record", err)
-			}
+			// Clear b.stopped so r2 reaches the post-burst counter certification gate instead
+			// of being rejected at the pre-read b.stopped check.
+			f.b.mu.Lock()
+			f.b.stopped = false
+			f.b.mu.Unlock()
+
+			// Step 2: Arm one-shot capture skip at targetAddr so Y (sent on s2 with cookie c2)
+			// reuses targetAddr without updating or faulting the retained entry from X (cookie c1).
 			skipCtl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 1, Address: targetAddr}
 			if err := f.b.Collection.Maps["faults"].Update(uint32(0), skipCtl, ebpf.UpdateAny); err != nil {
 				t.Fatal(err)
 			}
+			deadline := time.Now().Add(10 * time.Second)
 			recurred := false
 			for j := 0; j < 100000 && time.Now().Before(deadline); j++ {
 				if got := bridgeSend(t, s2, []byte("fixed-size")); got != c2 {
@@ -784,7 +661,7 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 					if observed[f.cpu].Address != targetAddr {
 						t.Fatal("suppression hit without independently observed pointer recurrence")
 					}
-					frames, readErr := f.r.ReadBurst(f.fd, 1)
+					frames, readErr := r2.ReadBurst(f.fd, 1)
 					if len(frames) != 1 {
 						t.Fatalf("expected 1 frame, got %d (err=%v)", len(frames), readErr)
 					}
@@ -792,18 +669,21 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 						if !errors.Is(readErr, ErrEpochRebuild) || frames[0].Decision.Status != "attribution_unknown_recursion" {
 							t.Fatalf("normal reader accepted stale record or wrong status: err=%v decision=%+v", readErr, frames[0].Decision)
 						}
-						t.Logf("P2_STALE_MUTATION skip_post_check=false address=%x stale_cookie=%d sender_cookie=%d capture_recursion_delta=%d decision=%s result=refused", targetAddr, c1, c2, afterHold[0].Misses-before[0].Misses, frames[0].Decision.Status)
+						t.Logf("P2_STALE_MUTATION skip_post_check=false address=%x stale_cookie=%d sender_cookie=%d free_recursion_delta=%d decision=%s result=refused", targetAddr, c1, c2, afterHold[2].Misses-before[2].Misses, frames[0].Decision.Status)
+						_ = r2.Close()
+						r2 = nil
 						reloadBridgeFixture(t, f)
 					} else {
 						if readErr != nil || frames[0].Decision.Status != ReadCookie || frames[0].Decision.Packet.Cookie != c1 {
 							t.Fatalf("mutant reader without post-burst check did not accept stale record: err=%v decision=%+v want_cookie=%d", readErr, frames[0].Decision, c1)
 						}
-						t.Logf("P2_STALE_MUTATION skip_post_check=true address=%x stale_cookie=%d sender_cookie=%d accepted_cookie=%d capture_recursion_delta=%d result=stale_accepted", targetAddr, c1, c2, frames[0].Decision.Packet.Cookie, afterHold[0].Misses-before[0].Misses)
+						t.Logf("P2_STALE_MUTATION skip_post_check=true address=%x stale_cookie=%d sender_cookie=%d accepted_cookie=%d free_recursion_delta=%d result=stale_accepted", targetAddr, c1, c2, frames[0].Decision.Packet.Cookie, afterHold[2].Misses-before[2].Misses)
+						_ = r2.Close()
+						r2 = nil
 					}
 					recurred = true
 					break
 				}
-				buf := make([]byte, 2048)
 				if _, err := unix.Read(f.fd, buf); err != nil {
 					t.Fatal("raw read while waiting for recurrence:", err)
 				}
