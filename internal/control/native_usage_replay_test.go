@@ -42,6 +42,9 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 	}
 	ids, reverse := map[string]string{}, map[string]string{}
 	polls, reads := 0, 0
+	resetTrace := trace.Name == "capReset"
+	var exhaustedPoint uint64
+	closes := 0
 	base := e.fakeEngine
 	base.readConnections = func(context.Context) ([]engine.Connection, error) {
 		reads++
@@ -49,7 +52,12 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 		return []engine.Connection{}, nil
 	}
 	e.closeCheck = func(r engine.CloseRequest) (engine.CloseResult, error) {
-		return engine.CloseResult{}, fmt.Errorf("unexpected close in midnight gap: %+v", r)
+		if !resetTrace || polls != 3 || r.Line != "b2" || r.Instance != e.Snapshot().Instance || r.StartedBeforePoint != exhaustedPoint || r.ConnectionIDs != nil || r.OperationID == "" || !generated[r.OperationID] {
+			return engine.CloseResult{}, fmt.Errorf("unfenced reset closure: %+v", r)
+		}
+		files.recordOrder("native:close")
+		closes++
+		return engine.CloseResult{}, nil
 	}
 	lastPoll := origin.UnixMilli()
 	startupCheck := e.check
@@ -66,7 +74,11 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				return fmt.Errorf("%s missing cap intent", name)
 			}
 			i := j.Closures[0]
-			if i.ID == "" || !generated[i.ID] || i.Request.OperationID != i.ID || i.Request.Line != "b2" || i.Request.Instance != e.Snapshot().Instance || i.Request.BeforeRevision != r.Number || i.Request.StartedBeforePoint != 0 || i.Request.ConnectionIDs != nil {
+			wantRevision, wantPoint := r.Number, uint64(0)
+			if polls == 3 {
+				wantRevision, wantPoint = r.Number-1, exhaustedPoint
+			}
+			if i.ID == "" || !generated[i.ID] || i.Request.OperationID != i.ID || i.Request.Line != "b2" || i.Request.Instance != e.Snapshot().Instance || i.Request.BeforeRevision != wantRevision || i.Request.StartedBeforePoint != wantPoint || i.Request.ConnectionIDs != nil {
 				return fmt.Errorf("unfenced cap intent: %+v", i)
 			}
 		}
@@ -154,6 +166,10 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				if e.Snapshot().AppliedRevision <= before.AppliedRevision || e.Snapshot().AppliedPoint <= before.AppliedPoint {
 					t.Fatal("cap revision not acknowledged")
 				}
+				exhaustedPoint = e.Snapshot().AppliedPoint
+			}
+			if resetTrace && polls == 3 {
+				order = []string{"event", "log", "event", "log", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "native:connections", "native:close", "write:control-journal.json", "write:control-journal.json.bak"}
 			}
 			if err := cmp.Effects(order...); err != nil {
 				t.Fatal("poll native ordering", err, files.order[effectAt:])
@@ -195,7 +211,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			add := func(kind, id string, source int) {
 				counterparts.want = append(counterparts.want, startupCounterpart{kind, id, source})
 			}
-			if polls == 2 {
+			if polls == 2 || resetTrace && polls == 3 {
 				for i := 0; i < 2; i++ {
 					add("log", "", logSources[i])
 				}
@@ -205,7 +221,14 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 			add("engine", "GET /connections", find("native:connections"))
 			add("engine-reply", "/connections", find("native:connections"))
+			if resetTrace && polls == 3 {
+				add("engine", "GET /connections", find("native:close"))
+				add("engine-reply", "/connections", find("native:close"))
+			}
 			add("async-result", "engine./connections.json", find("native:connections"))
+			if resetTrace && polls == 3 {
+				add("async-result", "engine./connections.json", find("native:close"))
+			}
 			if polls == 2 {
 				add("log", "", logSources[2])
 				add("async-result", "log.append", logSources[2])
@@ -285,7 +308,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				case "write", "file-completion":
 					file, _ := value["file"].(string)
 					base := filepath.Base(file)
-					if !(strings.HasPrefix(base, "apps-") || strings.HasPrefix(base, "share-") || strings.HasPrefix(base, "cut-")) || polls != 2 {
+					if !(strings.HasPrefix(base, "apps-") || strings.HasPrefix(base, "share-") || strings.HasPrefix(base, "cut-")) || (polls != 2 && !(resetTrace && polls == 3)) {
 						t.Fatal("unmapped poll file", x)
 					}
 					if x.Kind == "file-completion" && (value["ok"] != true || (value["operation"] != "writeFile" && value["operation"] != "rename")) {
@@ -327,14 +350,40 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				}
 				cmp.entries[i].Value = value
 			}
-			guard := replayStartupHTTP(t, c, entry, trace.Entries[pos+1], cmp)
-			checked[pos], checked[pos+1] = guard, guard
-			pos += 2
+			end := pos + 1
+			for end < len(trace.Entries) && trace.Entries[end].Kind != "api" {
+				end++
+			}
+			if end == len(trace.Entries) {
+				t.Fatal("missing response")
+			}
+			guard := replayStartupHTTP(t, c, entry, trace.Entries[end], cmp)
+			checked[pos], checked[end] = guard, guard
+			for seq := pos + 1; seq < end; seq++ {
+				x := trace.Entries[seq]
+				var snapshot struct {
+					Now  int64
+					Kind string
+				}
+				_ = json.Unmarshal(x.Value, &snapshot)
+				if x.Kind == "state-snapshot" && snapshot.Now == clock.Now().UnixMilli() {
+					checked[seq] = "HTTP response constructed at scenario clock"
+				} else if x.Kind == "completion" && snapshot.Kind == trace.Entries[seq-1].Kind && checked[seq-1] != "" {
+					checked[seq] = checked[seq-1] + " completed"
+				} else {
+					t.Fatal("unmapped HTTP observation", x)
+				}
+			}
+			pos = end + 1
 		default:
 			t.Fatal("unmapped usage input", entry)
 		}
 	}
-	if polls != 2 || reads != 2 || clock.Now().Sub(origin) != 2*time.Second || len(ids) != 2 {
+	wantPolls, wantEvents, wantCloses := 2, 2, 0
+	if resetTrace {
+		wantPolls, wantEvents, wantCloses = 4, 4, 1
+	}
+	if polls != wantPolls || reads != wantPolls || clock.Now().Sub(origin) != time.Duration(wantPolls)*time.Second || len(ids) != wantEvents || closes != wantCloses {
 		t.Fatal("usage replay cardinality", polls, reads, len(ids))
 	}
 	for _, write := range files.writes[initialWrites:] {

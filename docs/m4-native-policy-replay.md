@@ -113,4 +113,15 @@ The blocked revision persists its fenced b2 closure intent before Apply;
 closure is deferred to the next poll, beyond this trace's end. Main remains
 usable. No suffix usage or recovery file is written.
 
-The remaining four traces are not yet registered.
+## Daily-reset checkpoint
+
+capReset's 256 entries are registered; aggregate **1,127 / 7,894**, producer and
+report exit 0. Four one-second polls preserve the exhausted state before UTC
+midnight and reset both physical totals at midnight. The pending empty b2
+closure keeps the exhaustion apply point through the reset revision and
+completes after the native connection observation. Both snapshot markers are
+checked against the response time. Reset event mappings are
+0f0f0f0f0f0f → 000000000010 and 101010101010 → 000000000011; exhaustion mappings
+match the Santiago trace. The journal accounts for the different ID sequence.
+
+The remaining three traces are not yet registered.
