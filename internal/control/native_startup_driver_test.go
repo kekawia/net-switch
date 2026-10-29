@@ -49,6 +49,43 @@ func replayNativeStartup(t *testing.T, name string) {
 	if hash == "" {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
+	firstLine, secondLine := "a1", "b2"
+	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
+	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
+	if name == "legacyCaseOrder" {
+		firstLine, secondLine = "000001", "000002"
+		pins = map[string]string{`c:\apps\x.exe`: secondLine}
+		owners = []string{`c:\apps\x.exe`, `C:\Apps\X.exe`}
+		// A bijection of generated identities only. Saved paths and their order
+		// remain untouched; embedded settings/usage JSON retains object order.
+		ids := map[string]string{"010101": firstLine, "020202": secondLine}
+		var convert func(string) string
+		convert = func(s string) string {
+			if strings.HasPrefix(s, "{") && json.Valid([]byte(s)) {
+				b, err := rewriteTraceStrings([]byte(s), convert)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return string(b)
+			}
+			for from, to := range ids {
+				if s == "/proxies/line-"+from+"/delay" {
+					return "/proxies/line-" + to + "/delay"
+				}
+				if s == "engine./proxies/line-"+from+"/delay.json" {
+					return "engine./proxies/line-" + to + "/delay.json"
+				}
+			}
+			return normalizeResourceString(s, ids)
+		}
+		for i := range trace.Entries {
+			b, err := rewriteTraceStrings(trace.Entries[i].Value, convert)
+			if err != nil {
+				t.Fatal(err)
+			}
+			trace.Entries[i].Value = b
+		}
+	}
 	var rows []replayledger.Row
 	for _, row := range report.Rows {
 		if row.Hash == hash && row.Assertion == "internal/control/native_startup_replay_test.go#"+t.Name() {
@@ -97,15 +134,50 @@ func replayNativeStartup(t *testing.T, name string) {
 	}
 	c, base, _, _ := testCoreWithFilesMode(t, files, clock, true)
 	base.ackPoint = 1
-	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfig(map[string]string{`c:\discord\app-*\discord.exe`: "b2"})}
+	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfigIDs(firstLine, secondLine, pins)}
 	c.op.Engine = e
-	check("store construction order", cmp.Effects("read:settings.json:ok", "read:control-journal.json:missing", "read:windows-undo.json:missing", "log", "log", "read:usage.json:missing", "read:usage.recovery.json:missing"))
+	construction := []string{"read:settings.json:ok", "read:control-journal.json:missing", "read:windows-undo.json:missing"}
+	if name == "legacyCaseOrder" {
+		construction = append(construction, "write:control-journal.json", "write:control-journal.json.bak", "write:settings.json", "write:settings.json.bak", "log")
+	}
+	construction = append(construction, "log", "log", "read:usage.json:missing", "read:usage.recovery.json:missing")
+	if name == "legacyCaseOrder" {
+		construction = append(construction, "write:settings.json", "write:settings.json.bak")
+	}
+	check("store construction order", cmp.Effects(construction...))
 	if len(files.reads) == 0 || !bytes.Equal(files.reads[0].Bytes, initial.Settings) {
 		t.Fatal("ordered settings read guard")
 	}
 	loaded := c.op.Settings.RawValues()
 	var saved map[string]json.RawMessage
-	check("initial settings", json.Unmarshal(initial.Settings, &saved))
+	stableSettings := append([]byte(nil), files.data[filepath.Join("/test", "settings.json")]...)
+	expectedSettings := initial.Settings
+	if name == "legacyCaseOrder" {
+		for _, entry := range trace.Entries {
+			if entry.Kind == "write" {
+				var v struct{ File, Text string }
+				check("migration write", json.Unmarshal(entry.Value, &v))
+				if filepath.Base(v.File) == "settings.json" {
+					expectedSettings = []byte(v.Text)
+					break
+				}
+			}
+		}
+		before, _ := orderedTraceJSON(initial.Settings)
+		after, _ := orderedTraceJSON(stableSettings)
+		if reflect.DeepEqual(before, after) {
+			t.Fatal("migration precondition: settings did not change")
+		}
+		want, _ := orderedTraceJSON(expectedSettings)
+		equal("ordered migrated settings", after, want)
+		backup, _ := orderedTraceJSON(files.data[filepath.Join("/test", "settings.json.bak")])
+		equal("migration backup", backup, want)
+		items := c.itemsLocked()
+		if len(items) != 2 || items[0].ID != firstLine || items[1].ID != secondLine || firstLine == secondLine {
+			t.Fatal("generated identity bijection", items)
+		}
+	}
+	check("initial/migrated settings", json.Unmarshal(expectedSettings, &saved))
 	for key, value := range saved {
 		a, _ := orderedTraceJSON(value)
 		b, _ := orderedTraceJSON(loaded[key])
@@ -171,7 +243,20 @@ func replayNativeStartup(t *testing.T, name string) {
 	equal("route result", c.routes, routes)
 	equal("policy result", c.policy, policyValue)
 	check("platform effects", cmp.Effects())
-	console, err := c.PublishSession(47821, strings.Repeat("01", 24), 123)
+	token := strings.Repeat("01", 24)
+	for _, entry := range trace.Entries {
+		if entry.Kind == "write" {
+			var v struct{ File, Text string }
+			check("session input", json.Unmarshal(entry.Value, &v))
+			if filepath.Base(v.File) == "server.json" {
+				var s struct{ Token string }
+				check("session token", json.Unmarshal([]byte(v.Text), &s))
+				token = s.Token
+				break
+			}
+		}
+	}
+	console, err := c.PublishSession(47821, token, 123)
 	check("session publish", err)
 	files.recordOrder("console")
 	check("session order", cmp.Effects("write:server.json", "log", "console"))
@@ -206,7 +291,7 @@ func replayNativeStartup(t *testing.T, name string) {
 				}
 			}
 		}
-		if !bytes.Equal(files.data[filepath.Join("/test", "settings.json")], initial.Settings) {
+		if !bytes.Equal(files.data[filepath.Join("/test", "settings.json")], stableSettings) {
 			return fmt.Errorf("startup changed saved settings")
 		}
 		return nil
@@ -252,7 +337,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	check("probe request/result bijection", probeErr)
 	check("startup revision group", cmp.End("startup"))
 	// Diagnostic logs, usage and native transactions share the same stream.
-	check("startup order", cmp.Effects("write:control-journal.json", "write:control-journal.json.bak", "native:desired", "log", "native:start", "write:usage.json", "native:apply", "native:ack", "native:started", "log", "lane-log", "lane-log", "native:probe:a1", "native:probe-result:a1", "native:probe:b2", "native:probe-result:b2"))
+	check("startup order", cmp.Effects("write:control-journal.json", "write:control-journal.json.bak", "native:desired", "log", "native:start", "write:usage.json", "native:apply", "native:ack", "native:started", "log", "lane-log", "lane-log", "native:probe:"+firstLine, "native:probe-result:"+firstLine, "native:probe:"+secondLine, "native:probe-result:"+secondLine))
 	if e.active == nil || e.applies != 1 || len(files.syncs) == 0 {
 		t.Fatal("complete durable revision guard")
 	}
@@ -260,9 +345,9 @@ func replayNativeStartup(t *testing.T, name string) {
 	// or repeating its lane diagnostics on every later supervisor pass.
 	check("idempotent policy publication", c.ApplyPolicy(context.Background()))
 	check("no repeated publication effects", cmp.Effects())
-	for _, owner := range []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`} {
+	for _, owner := range owners {
 		d, err := e.active.Decide(platform.Owner{AppID: apppath.Normalize(owner, apppath.Windows)}, 40000, false, 1)
-		if err != nil || d.Line != "b2" || d.Revision != base.Snapshot().AppliedRevision {
+		if err != nil || d.Line != secondLine || d.Revision != base.Snapshot().AppliedRevision {
 			t.Fatal("complete pin replacement guard", d, err)
 		}
 	}
@@ -273,7 +358,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		}
 	}
 	seenOps := map[string]bool{}
-	for _, line := range []string{"a1", "b2"} {
+	for _, line := range []string{firstLine, secondLine} {
 		if len(answers[line]) != 1 {
 			t.Fatal("healthy startup needs one successful quick probe", line, answers[line])
 		}
@@ -351,7 +436,7 @@ func replayNativeStartup(t *testing.T, name string) {
 					t.Fatal("recorded cleanup failure guard")
 				}
 				guard = "complete revision replaces failed adapter directory cleanup"
-			case strings.HasPrefix(baseName, "server.json.") || strings.HasPrefix(baseName, "usage.json."):
+			case strings.HasPrefix(baseName, "server.json.") || strings.HasPrefix(baseName, "usage.json.") || strings.HasPrefix(baseName, "settings.json."):
 				if v["ok"] != true || (operation != "writeFile" && operation != "rename") {
 					t.Fatal("atomic file completion guard")
 				}
@@ -359,8 +444,17 @@ func replayNativeStartup(t *testing.T, name string) {
 				if strings.HasPrefix(baseName, "usage.json.") {
 					name = "usage.json"
 				}
+				if strings.HasPrefix(baseName, "settings.json.") {
+					name = "settings.json"
+				}
+				if strings.HasPrefix(baseName, "settings.json.bak.") {
+					name = "settings.json.bak"
+				}
 				found := false
 				for _, result := range files.fileResults {
+					if name == "settings.json" && strings.HasPrefix(filepath.Base(result.Path), "settings.json.bak.") {
+						continue
+					}
 					if result.Operation == operation && strings.HasPrefix(filepath.Base(result.Path), name+".") {
 						if result.Err != nil {
 							t.Fatal("native file completion failed", result)
@@ -394,9 +488,13 @@ func replayNativeStartup(t *testing.T, name string) {
 		case "write":
 			file := filepath.Base(js.Text(v["file"]))
 			switch file {
-			case "server.json", "usage.json":
+			case "server.json", "usage.json", "settings.json", "settings.json.bak":
 				got := files.data[filepath.Join("/test", file)]
-				equal("persisted "+file, replayJSON(t, got), replayJSON(t, []byte(js.Text(v["text"]))))
+				a, err := orderedTraceJSON(got)
+				check("persisted JSON", err)
+				b, err := orderedTraceJSON([]byte(js.Text(v["text"])))
+				check("recorded JSON", err)
+				equal("persisted "+file, a, b)
 				guard = "actual atomic native publication"
 			default:
 				if strings.HasPrefix(file, "apps-") || strings.HasPrefix(file, "share-") || strings.HasPrefix(file, "cut-") || file == "engine-config.json" {

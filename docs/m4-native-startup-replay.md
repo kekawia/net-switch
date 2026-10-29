@@ -168,11 +168,30 @@ assumed every annotation belonged to the original 23 API rows; its pending-PR
 fixture now explicitly selects those API annotations. No coverage gate was
 weakened.
 
+### Registered legacyCaseOrder checkpoint
+
+All 144 legacyCaseOrder entries are now registered, using the same driver:
+125 Control rows, 17 session replacements, and 2 cleanup replacements.
+The passing aggregate reports **298 / 7,894**, both producers and report exit 0.
+The generation bijection is 010101 → 000001 and 020202 → 000002. It is applied
+only to resource identities in decoded trace copies, including embedded JSON;
+saved executable paths and object order remain unchanged. The generated IDs
+and their distinctness are independently asserted against Core's migrated lines.
+
+Migration checks the original read, the changed full ordered settings document,
+both durable settings copies and the migration diagnostic. Native service
+construction also journals the migrated desired state and repairs its settings
+mirror on recovery; the extra journal/mirror writes are included in the ordered
+native stream. The original two differently cased keys remain in order and the
+second pin wins for both Windows case variants. No new product code changes.
+
+Sensitivity mutation: swapping cableApps and secondApps in the in-memory input
+failed `ordered migrated settings guard`, showing the reversed saved keys and
+their line IDs. It was reverted; frozen fixture bytes were unchanged.
+
 ### Remaining work
 
-This checkpoint completes 131 of this slice's 463 new entries (28%).
-Continue with legacyCaseOrder (144), then appLine startup and suffix bookkeeping
-(188). Their existing original fixtures, per-kind mapping and native boundary
-are reused; only trace-specific literals, migration identities and suffix
-operations need extending. Target after both: 486 covered. Hosted checks and
+This checkpoint completes 275 of this slice's 463 new entries (59%).
+Continue with appLine startup and suffix bookkeeping (188), retaining its
+existing 23 API owners. Target: 486 covered. Hosted checks and
 independent review remain pending.

@@ -36,10 +36,14 @@ type nativeStartupEngine struct {
 }
 
 func twoLineNativeConfig(pins map[string]string) policy.Config {
+	return twoLineNativeConfigIDs("a1", "b2", pins)
+}
+
+func twoLineNativeConfigIDs(first, second string, pins map[string]string) policy.Config {
 	return policy.Config{
-		Lines:    []platform.Line{{ID: "a1", Interface: "Ethernet"}, {ID: "b2", Interface: "Wi-Fi"}},
-		AppLines: pins, Shares: map[string]uint64{"a1": 500000, "b2": 500000},
-		Lanes: map[string]string{"a1": "a1", "b2": "b2"}, Blocked: []string{},
+		Lines:    []platform.Line{{ID: first, Interface: "Ethernet"}, {ID: second, Interface: "Wi-Fi"}},
+		AppLines: pins, Shares: map[string]uint64{first: 500000, second: 500000},
+		Lanes: map[string]string{first: first, second: second}, Blocked: []string{},
 	}
 }
 
@@ -104,6 +108,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 
 func TestNativeStartupReplay(t *testing.T) {
 	t.Run("savedVersionOrder", func(t *testing.T) { replayNativeStartup(t, "savedVersionOrder") })
+	t.Run("legacyCaseOrder", func(t *testing.T) { replayNativeStartup(t, "legacyCaseOrder") })
 }
 
 func (e *nativeStartupEngine) Apply(ctx context.Context, r engine.Revision) (ack engine.Acknowledgement, err error) {

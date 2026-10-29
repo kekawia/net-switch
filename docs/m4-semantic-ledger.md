@@ -7,12 +7,12 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
-Updated 2026-10-29 by savedVersionOrder registration in PR #110.
+Updated 2026-10-29 by savedVersionOrder and legacyCaseOrder registration in PR #110.
 The pure Control, control/engine and ledger suites plus the selected native
 lifecycle contract passed the aggregate locally:
-`covered 154 / 7,894; uncovered 7740; pending map[]` (all exit codes 0).
-The existing five API receipts plus three startup/replacement receipts cover
-154 entries without an OS restriction. Static inventory still credits zero.
+`covered 298 / 7,894; uncovered 7596; pending map[]` (all exit codes 0).
+The existing five API receipts plus six startup/replacement receipts cover
+298 entries without an OS restriction. Static inventory still credits zero.
 Missing startup receipt, failing subtest, dropped HTTP behavioural check and
 removal of the startup publication fix all failed the gate and were reverted.
 See [startup replay evidence](m4-native-startup-replay.md).
@@ -20,29 +20,29 @@ See [startup replay evidence](m4-native-startup-replay.md).
 | Measure | Entries |
 | --- | ---: |
 | Hash-verified original entries consumed once by accounting | 7,894 |
-| Proven by native trace assertions in a passing aggregate run | 154 |
-| Uncovered after that run | 7,740 |
+| Proven by native trace assertions in a passing aggregate run | 298 |
+| Uncovered after that run | 7,596 |
 | Pending #107 | 0 |
 
 | Checked disposition (coverage is separate) | Entries |
 | --- | ---: |
 | Unchanged external observation | 1,284 |
-| Translated native operation/result | 6,555 |
+| Translated native operation/result | 6,528 |
 | Member of a named atomic revision | 8 |
-| Obsolete representation with a replacement assertion | 47 |
+| Obsolete representation with a replacement assertion | 74 |
 | Total | 7,894 |
 
 The distinction matters: assigning an assertion obligation to a completion or
 log is not proof that native Control produced that completion or log. No feature
 test is credited for entries it never read. The current generic obligations
-remain uncovered, including 2,950 of the 3,003 completion markers. No assertion name
+remain uncovered, including 2,892 of the 3,003 completion markers. No assertion name
 alone, or a manually edited `covered` status, earns coverage.
 
 ## Implementation and use
 
 `internal/replayledger/mapping.json` is the versioned, machine-readable source.
-It has 25 original SHA-256 keys, eight generic rules with savedVersionOrder
-bindings, ten sequence annotations (seven API and three startup replacements),
+It has 25 original SHA-256 keys, eight generic rules with both saved-identity
+bindings, thirteen sequence annotations (seven API and six startup replacements),
 two atomic groups, and references to existing supporting tests.
 It contains no copied fixture payloads. The fixtures and provenance are read
 from their existing `tests/oracle` paths, never regenerated or rewritten.
@@ -339,7 +339,7 @@ hand-written trace. Each trace starts at sequence zero.
 | failoverFailback | 0–231 | 232 |
 | hungEngine | 0–485 | 486 |
 | ipv6 | 0–1152 | 1,153 |
-| legacyCaseOrder | 0–143 | 144 |
+| legacyCaseOrder | None (0–143 registered) | 0 |
 | lineAdd | 0–200 | 201 |
 | lineOrder | 0–273 | 274 |
 | lineRemove | 0–233 | 234 |
@@ -353,57 +353,57 @@ hand-written trace. Each trace starts at sequence zero.
 | routingAndReads | 0–267 | 268 |
 | savedVersionOrder | None (0–130 registered) | 0 |
 | settingsSetupUpdate | 0–340 | 341 |
-| **Total** | | **7,740** |
+| **Total** | | **7,596** |
 
 | Input kind | Uncovered | Output kind | Uncovered |
 | --- | ---: | --- | ---: |
-| adapter-snapshot | 86 | api | 60 |
-| adapters | 1 | console | 24 |
-| async-result | 904 | engine | 403 |
+| adapter-snapshot | 84 | api | 59 |
+| adapters | 1 | console | 23 |
+| async-result | 885 | engine | 398 |
 | clock-tick | 506 | event | 17 |
-| completion | 2,950 | log | 272 |
+| completion | 2,892 | log | 264 |
 | connections | 40 | outside-close | 2 |
 | connectionsStatus | 2 | remove | 27 |
-| counter-sample | 451 | spawn | 32 |
-| directory-list | 17 | write | 348 |
-| engine-reply | 308 | | |
-| file-completion | 891 | | |
-| helper-line | 12 | | |
-| http | 60 | | |
-| initial-files | 24 | | |
-| interfaces | 5 | | |
-| probe-result | 95 | | |
-| probe-vote | 35 | | |
-| probes | 3 | | |
-| process-exit | 10 | | |
-| quitFailure | 2 | | |
-| refresh-adapters | 1 | | |
-| release | 1 | | |
-| routes | 2 | | |
-| socket-completion | 112 | | |
-| state-snapshot | 31 | | |
-| timer-completion | 1 | | |
-| update-reply | 4 | | |
-| updateStatus | 1 | | |
+| counter-sample | 449 | spawn | 31 |
+| directory-list | 17 | write | 338 |
+| engine-reply | 305 |  |  |
+| file-completion | 865 |  |  |
+| helper-line | 12 |  |  |
+| http | 59 |  |  |
+| initial-files | 23 |  |  |
+| interfaces | 5 |  |  |
+| probe-result | 93 |  |  |
+| probe-vote | 35 |  |  |
+| probes | 3 |  |  |
+| process-exit | 10 |  |  |
+| quitFailure | 2 |  |  |
+| refresh-adapters | 1 |  |  |
+| release | 1 |  |  |
+| routes | 2 |  |  |
+| socket-completion | 108 |  |  |
+| state-snapshot | 31 |  |  |
+| timer-completion | 1 |  |  |
+| update-reply | 4 |  |  |
+| updateStatus | 1 |  |  |
 
 ## Remaining slices
 
-These disjoint counts partition the remaining 7,740 entries outside the API
-and savedVersionOrder receipts. Shared
+These disjoint counts partition the remaining 7,596 entries outside the API
+and saved-identity receipts. Shared
 startup machinery should be implemented once; each trace must still supply and
 consume its own startup entries. Slices include completions and all external
 observations, not just their headline feature.
 
 | Slice | Traces / entries | Total |
 | --- | --- | ---: |
-| Startup and saved app identities | appLine remainder 188, legacyCaseOrder 144; savedVersionOrder complete | 332 |
+| Startup and saved app identities | appLine remainder 188; both saved-identity traces complete | 188 |
 | Policy transactions, caps and physical usage | combining 197, combiningNoOpenLine 298, capBlockedAndMainException 275, capMoved 222, capReset 256, midnightGap 188 | 1,436 |
 | Health, probes and route votes | failoverFailback 232, busyFailedChecks 687, probeFailover 749, lostDefaultRoute 395 | 2,063 |
 | Live line/IPv6 revisions | adapterRename 281, ipv6 1,153, lineAdd 201, lineOrder 274, lineRemove 234 | 2,143 |
 | Reconnect and flow identity | reconnectPinned 154, reconnectShared 151 | 305 |
 | Lifecycle and read APIs | hungEngine 486, quitFailure 175, routingAndReads 268 | 929 |
 | Settings, setup, updates and migration | settingsSetupUpdate 341, migration 191 | 532 |
-| **Total still uncovered** | | **7,740** |
+| **Total still uncovered** | | **7,596** |
 
 Build the shared native boundary and ordered comparator with the startup slice,
 then reuse it. Required follow-ups outside this 7,894-entry denominator remain:
