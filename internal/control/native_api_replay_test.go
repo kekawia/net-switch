@@ -11,10 +11,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"sync/atomic"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
@@ -37,67 +35,6 @@ var pinReplaySteps = []pinReplayStep{
 	{"pin", 135, 170, 168, 166, 158, 163, []int{138, 143, 148, 153}, map[string]string{`c:\apps\firefox.exe`: "b2"}},
 	{"unpin", 171, 206, 204, 202, 194, 199, []int{174, 179, 184, 189}, map[string]string{}},
 	{"read", 207, 210, 208, -1, -1, -1, nil, map[string]string{}},
-}
-
-// Uses no adapter, engine process, sockets, capture or OS routes. The embedded
-// fake supplies lifecycle/ack bookkeeping; compilation and decisions are native.
-type pinReplayEngine struct {
-	*fakeEngine
-	files      *memoryFiles
-	check      func(engine.Revision) error
-	want       policy.Config
-	active     *policy.Policy
-	applies    int
-	guardError error
-	probes     atomic.Uint64
-}
-
-func (e *pinReplayEngine) ForgetLane(string) {} // complete revisions own lanes
-
-func (e *pinReplayEngine) CloseFlows(context.Context, engine.CloseRequest) (engine.CloseResult, error) {
-	e.files.recordOrder("native:unexpected-close")
-	return engine.CloseResult{}, fmt.Errorf("pin changes must not close existing flows")
-}
-
-func (e *pinReplayEngine) Probe(ctx context.Context, r engine.ProbeRequest) engine.ProbeResult {
-	e.probes.Add(1)
-	return e.fakeEngine.Probe(ctx, r)
-}
-
-func (e *pinReplayEngine) Apply(ctx context.Context, r engine.Revision) (ack engine.Acknowledgement, err error) {
-	defer func() {
-		if err != nil {
-			e.guardError = err
-		}
-	}()
-	if e.check != nil {
-		if err := e.check(r); err != nil {
-			return engine.Acknowledgement{}, err
-		}
-	}
-	native, err := engine.NativeRevision(r, apppath.Windows)
-	if err != nil {
-		return engine.Acknowledgement{}, err
-	}
-	if e.check != nil && (!reflect.DeepEqual(native.Config, e.want) || native.Hash != policy.Hash(e.want)) {
-		return engine.Acknowledgement{}, fmt.Errorf("native revision differs from literal: got %+v want %+v", native.Config, e.want)
-	}
-	compiled, err := policy.Compile(native)
-	if err != nil {
-		return engine.Acknowledgement{}, err
-	}
-	e.files.recordOrder("native:apply")
-	ack, err = e.fakeEngine.Apply(ctx, r)
-	if err != nil {
-		return engine.Acknowledgement{}, err
-	}
-	e.active = compiled
-	e.applies++
-	e.mu.Lock()
-	e.s.StartedWith = &r.Policy
-	e.mu.Unlock()
-	e.files.recordOrder("native:ack")
-	return ack, nil
 }
 
 func replayJSON(t *testing.T, b []byte) any {
@@ -157,7 +94,7 @@ func TestNativeAPIPinReplay(t *testing.T) {
 	c, base, clock, files := testCore(t, initial.Settings)
 	c.op.ServiceMode = true
 	base.ackPoint = 1
-	e := &pinReplayEngine{fakeEngine: base, files: files}
+	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfig(map[string]string{})}
 	c.op.Engine = e
 	// Recorded startup inputs establish the suffix precondition. Startup itself
 	// is explicitly NOT consumed by this mapping.

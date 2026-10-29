@@ -177,9 +177,11 @@ Use explicit native group/ack observations, not `revisionOutputOrder`'s old
 adapter reordering. Record all effects in one stream through `recordOrder`;
 do not compare separately sorted kind lists. The comparator reports success
 to the test, which then calls Cursor.Consume. Its `Finish` checks no effects,
-replies or groups remain. Neither `nativeStartupEngine` nor
-`nativeTraceComparator` exists yet: these are the two concrete types the next
-slice must add, rather than silently treating the current fake as native proof.
+replies or groups remain. The [startup foundation](m4-native-startup-replay.md)
+now supplies `nativeStartupEngine` and the selected-value portion of
+`nativeTraceComparator`. Native transaction/effect/reply exhaustion and complete
+startup replay remain unfinished; these helpers earn no new receipts by
+themselves and must not be mistaken for full native startup proof.
 
 Each subtest calls `DefaultMapping`, `Load("../..", mapping)`, and `Build`, then
 selects the original-order rows whose hash matches its fixture and whose
