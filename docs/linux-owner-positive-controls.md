@@ -1,5 +1,22 @@
 # Modern positive-control checkpoint
 
+## Build-only preflight before dispatch
+
+After every change to the opt-in fixtures, cross-compile the complete
+`ownerbpfproof` test binary for **both** linux/amd64 and linux/arm64 with the
+pinned Go toolchain, `CGO_ENABLED=0`, `GOMAXPROCS=2` and `-p 2`, at Idle priority.
+Use `go test -c -tags=ownerbpfproof -o <architecture-specific-output>` on
+`./internal/engine/linux/ownerbpf`; never execute these binaries on the PC.
+Both compiler exit codes must be zero before dispatching the small hosted run.
+This does not replace BPF object generation, verifier checks or kernel tests.
+
+Run 40884669811 failed before kernel execution because the test used
+`unix.SCHED_OTHER`, which our vendored x/sys does not export. It exports
+`SCHED_NORMAL=0`, matching
+[Linux's UAPI scheduler header](https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/include/uapi/linux/sched.h?h=v7.0).
+The fixture now uses that exported name. Plain unit/contract tests could not
+catch this because they excluded the `ownerbpfproof` build tag.
+
 The first passing bridge run is
 [40878506707](https://github.com/kekawia/net-switch/actions/runs/40878506707),
 head c375f0c7bdb3b67d829fdc8c2f7ecdb934cf4192. The earlier load failure remains

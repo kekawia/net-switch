@@ -121,7 +121,9 @@ func TestBridgeDeletionFaultReload(t *testing.T) {
 }
 
 func setProofPriority(priority int32) error {
-	policy := uintptr(unix.SCHED_OTHER)
+	// Linux UAPI include/uapi/linux/sched.h calls the ordinary policy
+	// SCHED_NORMAL (0); this is also the name exported by our pinned x/sys.
+	policy := uintptr(unix.SCHED_NORMAL)
 	if priority != 0 {
 		policy = unix.SCHED_FIFO
 	}
