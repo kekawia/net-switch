@@ -47,6 +47,12 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 	polls, reads := 0, 0
 	resetTrace := trace.Name == "capReset"
 	movedTrace := trace.Name == "capMoved"
+	blockedFlows := trace.Name == "capBlockedAndMainException"
+	populated := movedTrace || blockedFlows
+	selectedID := "phone-flow"
+	if blockedFlows {
+		selectedID = "blocked-flow"
+	}
 	var supplied []engine.Connection
 	wireConnections := any([]any{})
 	flowIDs := map[string]string{}
@@ -65,7 +71,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			wantPoll = 2
 			exhaustedPoint = e.Snapshot().AppliedPoint
 		}
-		if (!resetTrace && !movedTrace) || polls != wantPoll || r.Line != "b2" || r.Instance != e.Snapshot().Instance || r.StartedBeforePoint != exhaustedPoint || r.ConnectionIDs != nil || r.OperationID == "" || !generated[r.OperationID] {
+		if (!resetTrace && !populated) || polls != wantPoll || r.Line != "b2" || r.Instance != e.Snapshot().Instance || r.StartedBeforePoint != exhaustedPoint || r.ConnectionIDs != nil || r.OperationID == "" || !generated[r.OperationID] {
 			return engine.CloseResult{}, fmt.Errorf("unfenced reset closure: %+v", r)
 		}
 		files.recordOrder("native:close")
@@ -79,7 +85,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 		}
 		closes++
-		if movedTrace {
+		if populated {
 			return engine.CloseResult{Closed: checkNativePhysicalClosure(t, supplied, r, e.want)}, nil
 		}
 		return engine.CloseResult{}, nil
@@ -232,6 +238,12 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			if movedTrace && polls == 2 {
 				order = []string{"event", "log", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "write:control-journal.json", "write:control-journal.json.bak", "lane-log", "native:connections", "platform:app-info", "native:close", "log", "write:control-journal.json", "write:control-journal.json.bak"}
 			}
+			if blockedFlows && polls == 2 {
+				order = append(order, "platform:app-info")
+			}
+			if blockedFlows && polls == 3 {
+				order = []string{"native:connections", "native:close", "log", "write:control-journal.json", "write:control-journal.json.bak"}
+			}
 			if err := cmp.Effects(order...); err != nil {
 				t.Fatal("poll native ordering", err, files.order[effectAt:])
 			}
@@ -246,7 +258,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 			// Independent physical totals: the first sample is a baseline.
 			bytes := float64(0)
-			if polls == 2 || movedTrace && polls > 2 {
+			if polls == 2 || populated && polls > 2 {
 				bytes = 200
 			}
 			for _, line := range []string{"a1", "b2"} {
@@ -292,12 +304,12 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 			add("engine", "GET /connections", find("native:connections"))
 			add("engine-reply", "/connections", find("native:connections"))
-			if resetTrace && polls == 3 || movedTrace && polls == 2 {
+			if resetTrace && polls == 3 || movedTrace && polls == 2 || blockedFlows && polls == 3 {
 				add("engine", "GET /connections", find("native:close"))
 				add("engine-reply", "/connections", find("native:close"))
 			}
 			add("async-result", "engine./connections.json", find("native:connections"))
-			if resetTrace && polls == 3 || movedTrace && polls == 2 {
+			if resetTrace && polls == 3 || movedTrace && polls == 2 || blockedFlows && polls == 3 {
 				add("async-result", "engine./connections.json", find("native:close"))
 			}
 			if polls == 2 {
@@ -307,6 +319,12 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				}
 				add("log", "", logSources[2])
 				add("async-result", "log.append", logSources[2])
+			}
+			if blockedFlows && polls == 3 {
+				add("engine", "DELETE /connections/"+selectedID, find("native:close"))
+				add("engine-reply", "/connections/"+selectedID, find("native:close"))
+				add("log", "", logSources[0])
+				add("async-result", "log.append", logSources[0])
 			}
 			logIndex, eventIndex := logsAt, eventsAt
 			pending := []string{}
@@ -375,7 +393,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 						guard = "acknowledged moved lane"
 						break
 					}
-					if movedTrace && polls == 2 && value["route"] == "/connections/phone-flow" && value["method"] == "DELETE" && closes == 1 && flowIDs["phone-flow"] != "" {
+					if populated && (movedTrace && polls == 2 || blockedFlows && polls == 3) && value["route"] == "/connections/"+selectedID && value["method"] == "DELETE" && closes == 1 && flowIDs[selectedID] != "" {
 						guard = "physical line and apply-point closure selected exact flow"
 						break
 					}
@@ -384,7 +402,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 					}
 					guard = "actual native connection observation"
 				case "engine-reply":
-					if movedTrace && polls == 2 && (value["route"] == "/proxies/lane-b2" || value["route"] == "/connections/phone-flow") && value["status"] == float64(200) && reflect.DeepEqual(value["body"], map[string]any{}) {
+					if populated && (movedTrace && polls == 2 || blockedFlows && polls == 3) && (value["route"] == "/proxies/lane-b2" || value["route"] == "/connections/"+selectedID) && value["status"] == float64(200) && reflect.DeepEqual(value["body"], map[string]any{}) {
 						guard = "completed native apply or closure"
 						break
 					}
@@ -537,6 +555,9 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 	}
 	if movedTrace {
 		wantPolls, wantEvents, wantCloses = 3, 1, 1
+	}
+	if blockedFlows {
+		wantPolls, wantEvents, wantCloses = 3, 2, 1
 	}
 	if polls != wantPolls || reads != wantPolls || clock.Now().Sub(origin) != time.Duration(wantPolls)*time.Second || len(ids) != wantEvents || closes != wantCloses {
 		t.Fatal("usage replay cardinality", polls, reads, len(ids))

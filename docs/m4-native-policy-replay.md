@@ -144,4 +144,16 @@ fixture's point, whose exact request and durable intent are checked at closure.
 No real sockets or engine process are used. This replaces the redundant second
 GET and DELETE under §§3.3/4.6; it is not an extra native observation request.
 
-The remaining two traces are not yet registered.
+## Blocked secondary and main exception checkpoint
+
+capBlockedAndMainException's 275 entries are registered; aggregate
+**1,624 / 7,894**, producer and report exit 0. Both cap-setting transactions
+have response-bounded groups. Both physical lines exhaust together, but only
+the blocked secondary gets a persisted closure intent. The subsequent poll
+closes blocked-flow while main-flow survives. The real flow-table counterpart
+also checks the newer same-line and main survivors.
+151515151515 → 000000000015 and 161616161616 → 000000000016 are the event
+bijections. main-flow and blocked-flow map respectively to test-engine:1 and
+test-engine:2 in the ordered native observation input.
+
+Only combiningNoOpenLine remains unregistered in this slice.
