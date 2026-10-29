@@ -408,17 +408,22 @@ func TestLegacyEmptyAppsReplacesPinsWithoutASentinel(t *testing.T) {
 		if row.Assertion == "internal/control/engine/native_golden_test.go#"+t.Name() {
 			entry := traces[row.Hash].Entries[row.Seq]
 			var value struct {
-				Operation, Code, Kind string
-				OK                    bool
+				Operation, Code, Kind, Directory string
+				Names                            []string
+				OK                               bool
 			}
 			if err := json.Unmarshal(entry.Value, &value); err != nil {
 				t.Fatal(err)
 			}
-			if entry.Kind == "file-completion" {
-				if value.Operation != "readdir" || value.OK || value.Code != "ERR_INVALID_ARG_TYPE" {
+			if entry.Kind == "directory-list" {
+				if value.Directory != "/oracle/data" || len(value.Names) == 0 {
+					t.Fatal("unknown directory list replacement", value)
+				}
+			} else if entry.Kind == "file-completion" {
+				if value.Operation != "readdir" || !(value.OK && value.Code == "" || !value.OK && value.Code == "ERR_INVALID_ARG_TYPE") {
 					t.Fatal("unknown cleanup failure", value)
 				}
-			} else if entry.Kind != "completion" || value.Kind != "file-completion" || traces[row.Hash].Entries[row.Seq-1].Kind != "file-completion" {
+			} else if entry.Kind != "completion" || (value.Kind != "file-completion" && value.Kind != "directory-list") || traces[row.Hash].Entries[row.Seq-1].Kind != value.Kind {
 				t.Fatal("unknown cleanup completion", entry)
 			}
 			rows = append(rows, row)

@@ -75,9 +75,24 @@ func TestReferenceValidation(t *testing.T) {
 	}
 }
 
+func originalAPIBindingFixture(m *Mapping, hash string) {
+	// These binding fixtures start with only the original API annotations. New
+	// startup overrides deliberately take precedence over a kind binding and
+	// overlap 0..134, so exclude them from this synthetic baseline.
+	annotations := make([]Annotation, 0, len(m.Annotations))
+	for _, a := range m.Annotations {
+		if a.Hash == hash && !strings.HasPrefix(a.Assertion, "internal/control/native_api_replay_test.go#") {
+			continue
+		}
+		annotations = append(annotations, a)
+	}
+	m.Annotations = annotations
+}
+
 func TestRangesAndRuleBindings(t *testing.T) {
 	m, traces := load(t)
 	hash := m.Annotations[0].Hash
+	originalAPIBindingFixture(&m, hash)
 	// A per-trace binding covers this rule's kinds without listing sequences.
 	m.Rules[3].Bindings = map[string]Binding{hash: {Test: consumeIdentity}}
 	r, err := Build(m, traces)
@@ -145,6 +160,7 @@ func TestPendingCountsPerPR(t *testing.T) {
 func TestMappingOSScopes(t *testing.T) {
 	m, traces := load(t)
 	hash := m.Annotations[0].Hash
+	originalAPIBindingFixture(&m, hash)
 	m.Rules[3].Bindings = map[string]Binding{hash: {Test: consumeIdentity, OS: "windows"}}
 	r, err := Build(m, traces)
 	if err != nil {
@@ -178,6 +194,7 @@ func TestMappingOSScopes(t *testing.T) {
 func TestAppLineWorkedBindings(t *testing.T) {
 	m, traces := load(t)
 	hash := m.Annotations[0].Hash
+	originalAPIBindingFixture(&m, hash)
 	for i := range m.Rules {
 		m.Rules[i].Bindings = map[string]Binding{hash: {Test: consumeIdentity}}
 	}

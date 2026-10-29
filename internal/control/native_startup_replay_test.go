@@ -1,12 +1,9 @@
 package control
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http/httptest"
-	"os"
 	"reflect"
 	"slices"
 	"sync/atomic"
@@ -109,6 +106,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 func TestNativeStartupReplay(t *testing.T) {
 	t.Run("savedVersionOrder", func(t *testing.T) { replayNativeStartup(t, "savedVersionOrder") })
 	t.Run("legacyCaseOrder", func(t *testing.T) { replayNativeStartup(t, "legacyCaseOrder") })
+	t.Run("appLine", func(t *testing.T) { replayNativeStartup(t, "appLine") })
 }
 
 func (e *nativeStartupEngine) Apply(ctx context.Context, r engine.Revision) (ack engine.Acknowledgement, err error) {
@@ -361,128 +359,4 @@ func TestNativeTraceComparator(t *testing.T) {
 			t.Fatal("missing API check accepted")
 		}
 	})
-}
-
-// Supporting evidence only. The startup completion/session/probe replay is not
-// implemented here, so this test must not receive whole-trace ledger bindings.
-func TestNativeStartupIdentityEvidence(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		pins   map[string]string
-		owners map[string]string
-	}{
-		{"appLine", map[string]string{}, map[string]string{`c:\apps\firefox.exe`: "a1"}},
-		{"savedVersionOrder", map[string]string{`c:\discord\app-*\discord.exe`: "b2"}, map[string]string{
-			`c:\discord\app-1.0.9\discord.exe`: "b2", `c:\discord\app-1.0.10\discord.exe`: "b2",
-			`c:\discord\app-2.0.0\discord.exe`: "b2", `c:\discord\app-2.0.0\other.exe`: "a1",
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			data, err := os.ReadFile("../../tests/oracle/fixtures/" + tc.name + ".trace.json")
-			if err != nil {
-				t.Fatal(err)
-			}
-			var trace recordedTrace
-			if err := json.Unmarshal(data, &trace); err != nil {
-				t.Fatal(err)
-			}
-			// RawMessages retain the saved appLines insertion order through Store.
-			var first struct{ Settings map[string]json.RawMessage }
-			if err := json.Unmarshal(trace.Entries[0].Value, &first); err != nil {
-				t.Fatal(err)
-			}
-			initial := map[string]any{}
-			for k, v := range first.Settings {
-				initial[k] = v
-			}
-			c, base, clock, files := testCore(t, initial)
-			c.op.ServiceMode = true
-			files.observeAllWrites = true
-			base.ackPoint = 1
-			e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfig(tc.pins)}
-			c.op.Engine = e
-			// These are explicit setup inputs, not consumed startup observations.
-			if err := json.Unmarshal(trace.Entries[25].Value, &c.adapters); err != nil {
-				t.Fatal(err)
-			}
-			c.policy = float64(1)
-			if base.Snapshot().Status != "off" || e.applies != 0 || e.active != nil {
-				t.Fatal("initial off guard")
-			}
-			if err := c.Poll(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.Start(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			if err := c.ApplyPolicy(context.Background()); err != nil {
-				t.Fatal(err)
-			}
-			if e.guardError != nil {
-				t.Fatal(e.guardError)
-			}
-			if e.active == nil || e.applies == 0 {
-				t.Fatal("missing compiled/acknowledged policy")
-			}
-			for owner, line := range tc.owners {
-				d, err := e.active.Decide(platform.Owner{AppID: apppath.Normalize(owner, apppath.Windows)}, 40000, false, 1)
-				if err != nil || d.Line != line || d.Revision != e.Snapshot().AppliedRevision {
-					t.Fatalf("saved identity guard: %s got %+v (%v), want %s", owner, d, err, line)
-				}
-			}
-			if tc.name == "appLine" {
-				return
-			} // pin/unpin suffix has its existing owner
-			requestEntry, responseEntry := trace.Entries[129], trace.Entries[130]
-			var request struct {
-				Method, Route string
-				Headers       map[string]string
-			}
-			if err := json.Unmarshal(requestEntry.Value, &request); err != nil {
-				t.Fatal(err)
-			}
-			var expected struct {
-				Status  int
-				Headers map[string]string
-				Body    map[string]any
-			}
-			if err := json.Unmarshal(responseEntry.Value, &expected); err != nil {
-				t.Fatal(err)
-			}
-			operatorStateExpectation(expected.Body, false)
-			// Use the trace's lowercase envelope field names.
-			responseEntry.Value, err = json.Marshal(map[string]any{"status": expected.Status, "headers": expected.Headers, "body": expected.Body})
-			if err != nil {
-				t.Fatal(err)
-			}
-			comparator := nativeTraceComparator{entries: []traceEntry{requestEntry, responseEntry}}
-			before, waits, at := len(files.order), clock.afterCalls.Load(), clock.Now()
-			h := &HTTP{Core: c, Port: 47821, Token: "native-replay"}
-			r := httptest.NewRequest(request.Method, "http://127.0.0.1:47821"+request.Route, bytes.NewReader(nil))
-			r.Header.Set("X-Token", h.Token)
-			actualRequest, _ := json.Marshal(map[string]any{"method": r.Method, "route": r.URL.Path, "headers": request.Headers})
-			if err := comparator.Observe(129, "http", actualRequest); err != nil {
-				t.Fatal(err)
-			}
-			response := httptest.NewRecorder()
-			h.ServeHTTP(response, r)
-			headers := map[string]string{}
-			for k := range response.Header() {
-				headers[k] = response.Header().Get(k)
-			}
-			actualResponse, err := json.Marshal(map[string]any{"status": response.Code, "headers": headers, "body": replayJSON(t, response.Body.Bytes())})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := comparator.Observe(130, "api", actualResponse); err != nil {
-				t.Fatal(err)
-			}
-			if err := comparator.Finish(); err != nil {
-				t.Fatal(err)
-			}
-			if len(files.order) != before || clock.afterCalls.Load() != waits || !clock.Now().Equal(at) {
-				t.Fatal("read-only snapshot guard: effects, wait or clock advance")
-			}
-		})
-	}
 }

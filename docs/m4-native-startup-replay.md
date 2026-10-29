@@ -1,8 +1,12 @@
 # Startup and saved identities replay work
 
 Inventory recorded before implementation, against main 22e044d7 (2026-10-29).
-The requested slice has 463 unregistered entries: appLine's remaining 188,
+The initial requested slice had 463 unregistered entries: appLine's remaining 188,
 legacyCaseOrder's 144, and savedVersionOrder's 131. No frozen bytes may change.
+
+Current result: all three traces are registered. The restored aggregate reports
+**covered 486 / 7,894; uncovered 7408; pending map[]**, both producers and report
+exit 0. The 154/298 figures below are the earlier saved-identity checkpoints.
 
 ## Inputs, conditions and gaps
 
@@ -67,7 +71,7 @@ the test goroutine and does not stop other goroutines. Boundary callbacks return
 errors to their caller; the executing test reports them. The aggregate report
 must continue to require the subtest, parents and package to pass.
 
-## Registered savedVersionOrder trace
+## Registered savedVersionOrder checkpoint
 
 All 131 entries now have executing owners. The aggregate adds them to the
 existing 23 appLine entries: **covered 154 / 7,894**, with 7,740 uncovered.
@@ -189,9 +193,66 @@ Sensitivity mutation: swapping cableApps and secondApps in the in-memory input
 failed `ordered migrated settings guard`, showing the reversed saved keys and
 their line IDs. It was reverted; frozen fixture bytes were unchanged.
 
-### Remaining work
+### Registered appLine and completed slice
 
-This checkpoint completes 275 of this slice's 463 new entries (59%).
-Continue with appLine startup and suffix bookkeeping (188), retaining its
-existing 23 API owners. Target: 486 covered. Hosted checks and
-independent review remain pending.
+appLine's remaining 188 entries are now registered: 167 to its startup replay,
+17 to the native session contract, and 4 successful-directory-list/callback
+entries to the existing complete-revision cleanup contract. The original 23
+API entries keep their original owners and groups without duplicate receipts.
+
+The pin/unpin executor is shared with TestNativeAPIPinReplay. The startup owner
+uses it on its continuously running Core, with receipts disabled for those 23
+entries, then checks every remaining file/completion/snapshot obligation. Both
+native revisions, durable settings/backup and journal ordering, pin removal,
+acknowledgement barriers, snapshot timing and absence of extra probes/logs are
+checked by the same executor. Two real settings writes cannot share one result.
+Probe votes are tied to completed native rounds and their publication time.
+
+The redundant TestNativeStartupIdentityEvidence was removed. Changed-version,
+case-variant and near-neighbour/unpinned decisions now run in the full driver.
+The fixture table keeps independent literal policies; generated migration IDs
+are mapped bijectively and the session token comes from each trace's own input.
+
+### Review fixes: ordered observations and exactly-once file calls
+
+The previous value-only checks could accept reordered async observations or
+reuse a previous successful file operation. The driver now has two consuming
+cursors in addition to the aggregate receipt cursor:
+
+- The counterpart cursor projects the native startup transaction into ordered
+  legacy observations. Every engine/probe/log/async-result/vote has a named
+  source position in the actual native effect stream, which must already have
+  passed its boundary comparison. The projection explicitly expands one atomic
+  revision into its ordered lane members and one worker snapshot into its
+  same-time legacy reads. Its operation order is independent of the trace loop;
+  it never sorts the observed kinds or constructs expectations from the entry
+  currently being checked.
+- The file cursor advances over actual read/write/rename results once. A
+  publication compares the bytes of that particular preceding write, and the
+  rename must follow its checked publication. Only named native journal/recovery
+  operations and the migration mirror repair are grouped separately; repair
+  bytes must equal the first publication. Finish rejects unused calls and
+  pending writes. Assertion-only file inspection uses peekFile and cannot
+  create fake product read evidence.
+
+Real replay mutations, all reverted, failed the aggregate with producers 1/0
+and report 1:
+
+1. Swap savedVersionOrder's log.append and delay.json values (112/114): the
+   counterpart cursor rejects delay.json where log.append is required.
+2. Put its probe-result before the GET request (108/109): the cursor rejects
+   probe-result where engine GET /proxies/line-a1/delay is required.
+3. Remove appLine's second settings write observation after asserting it exists:
+   sequence 192 rejects rename where a distinct writeFile is required. Both HTTP
+   mutations themselves succeeded, proving the gate detects missing evidence
+   rather than merely relying on the product request failing.
+
+Permanent regressions cover reordered async/probe observations and a missing
+second file write. The restored complete pure suites and selected native
+lifecycle contract report 486 covered; the dependency graph reports no problems.
+Synthetic ledger binding tests retain their original 85-completion/135-range/
+188-plus-23 checks by explicitly starting with the original API-only fixture,
+rather than accidentally including the new overriding startup annotations.
+
+No work remains in this 463-entry slice. The other slices still contain 7,408
+uncovered entries. Hosted checks and independent re-review remain pending.

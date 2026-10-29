@@ -20,7 +20,7 @@ import (
 )
 
 // Deliberately a partial mapping, not a disposition of the entire trace.
-// Every selected entry has one assertion owner; all others remain uncovered.
+// Every selected entry has one assertion owner; startup owns the remainder.
 const appLineMappingVersion = 1
 
 type pinReplayStep struct {
@@ -62,6 +62,37 @@ func TestNativeAPIPinReplay(t *testing.T) {
 	if appLineMappingVersion != 1 || trace.Version != 1 || trace.Name != "appLine" || len(trace.Entries) != 211 {
 		t.Fatal("unsupported mapping/trace")
 	}
+	var initial struct{ Settings map[string]any }
+	if err := json.Unmarshal(trace.Entries[0].Value, &initial); err != nil {
+		t.Fatal(err)
+	}
+	c, base, clock, files := testCore(t, initial.Settings)
+	c.op.ServiceMode = true
+	base.ackPoint = 1
+	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfig(map[string]string{})}
+	c.op.Engine = e
+	// Recorded startup inputs establish the suffix precondition. Startup itself
+	// is explicitly NOT consumed by this mapping.
+	if err := json.Unmarshal(trace.Entries[25].Value, &c.adapters); err != nil {
+		t.Fatal(err)
+	}
+	c.policy = float64(1)
+	if err := c.Poll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.ApplyPolicy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	replayNativePinSuffix(t, c, e, clock, files, trace, traceHash, true, nil)
+}
+
+// Shared with startup replay; only the original API subtests emit its 23 receipts.
+func replayNativePinSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace recordedTrace, traceHash string, register bool, observer *nativeTraceComparator) map[int]string {
+	t.Helper()
+	base := e.fakeEngine
 	consumed := map[int]string{}
 	mapping, err := replayledger.DefaultMapping()
 	if err != nil {
@@ -86,30 +117,6 @@ func TestNativeAPIPinReplay(t *testing.T) {
 		}
 		consumed[seq] = owner
 		return v.Value
-	}
-	var initial struct{ Settings map[string]any }
-	if err := json.Unmarshal(trace.Entries[0].Value, &initial); err != nil {
-		t.Fatal(err)
-	}
-	c, base, clock, files := testCore(t, initial.Settings)
-	c.op.ServiceMode = true
-	base.ackPoint = 1
-	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfig(map[string]string{})}
-	c.op.Engine = e
-	// Recorded startup inputs establish the suffix precondition. Startup itself
-	// is explicitly NOT consumed by this mapping.
-	if err := json.Unmarshal(trace.Entries[25].Value, &c.adapters); err != nil {
-		t.Fatal(err)
-	}
-	c.policy = float64(1)
-	if err := c.Poll(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Start(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.ApplyPolicy(context.Background()); err != nil {
-		t.Fatal(err)
 	}
 	h := &HTTP{Core: c, Port: 47821, Token: "native-replay"}
 	clock.afterImmediate = true
@@ -168,7 +175,7 @@ func TestNativeAPIPinReplay(t *testing.T) {
 				for _, seq := range step.rules {
 					entry(seq, "write", "output", step.name+" native revision")
 				}
-				before, err := files.ReadFile(filepath.Join("/test", "settings.json"))
+				before, err := files.peekFile(filepath.Join("/test", "settings.json"))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -186,14 +193,14 @@ func TestNativeAPIPinReplay(t *testing.T) {
 				}
 				e.check = func(r engine.Revision) error {
 					for i, name := range []string{"settings.json", "settings.json.bak"} {
-						got, err := files.ReadFile(filepath.Join("/test", name))
+						got, err := files.peekFile(filepath.Join("/test", name))
 						var value any
 						if err != nil || json.Unmarshal(got, &value) != nil || !reflect.DeepEqual(value, documentValues[i]) {
 							return fmt.Errorf("%s not committed before native apply: %s (%v)", name, got, err)
 						}
 					}
 					for _, name := range []string{"control-journal.json", "control-journal.json.bak"} {
-						got, err := files.ReadFile(filepath.Join("/test", name))
+						got, err := files.peekFile(filepath.Join("/test", name))
 						if err != nil {
 							return err
 						}
@@ -219,9 +226,28 @@ func TestNativeAPIPinReplay(t *testing.T) {
 			for k, v := range input.Headers {
 				req.Header.Set(k, v)
 			}
+			if observer != nil {
+				value := map[string]any{"method": req.Method, "route": req.URL.Path, "headers": input.Headers}
+				if len(input.Body) != 0 {
+					value["body"] = replayJSON(t, input.Body)
+				}
+				if err := observer.Observe(step.http, "http", mustStartupJSON(t, value)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			response := httptest.NewRecorder()
 			h.ServeHTTP(response, req)
 			files.recordOrder("api")
+			if observer != nil {
+				headers := map[string]string{}
+				for k := range response.Header() {
+					headers[k] = response.Header().Get(k)
+				}
+				value := map[string]any{"status": response.Code, "headers": headers, "body": replayJSON(t, response.Body.Bytes())}
+				if err := observer.Observe(step.api, "api", mustStartupJSON(t, value)); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if e.guardError != nil {
 				t.Fatalf("native apply guard: %v", e.guardError)
 			}
@@ -269,6 +295,14 @@ func TestNativeAPIPinReplay(t *testing.T) {
 					t.Fatal("owner decision", owner, d, err)
 				}
 			}
+			if observer != nil {
+				if err := observer.Effects(wantOrder...); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !register {
+				return
+			}
 			// Select only this executing test's registered rows, in original
 			// sequence order. No receipt is earned until every check above passes.
 			var rows []replayledger.Row
@@ -298,7 +332,8 @@ func TestNativeAPIPinReplay(t *testing.T) {
 		}
 	}
 	if len(consumed) != 23 {
-		t.Fatalf("mapped %d entries, want exactly 23 (188 explicitly uncovered)", len(consumed))
+		t.Fatalf("mapped %d entries, want exactly 23 (188 outside this owner)", len(consumed))
 	}
 	t.Log("mapping v1: appLine 23 checked entries; all other entries belong to separate replay owners")
+	return consumed
 }

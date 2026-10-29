@@ -51,6 +51,7 @@ type memoryFiles struct {
 type recordedFileResult struct {
 	Operation, Path, Destination string
 	Err                          error
+	Bytes                        []byte
 }
 
 type recordedRead struct {
@@ -88,12 +89,24 @@ func (f *memoryFiles) ReadFile(p string) ([]byte, error) {
 			result = "missing"
 		}
 		f.reads = append(f.reads, recordedRead{p, append([]byte(nil), b...), err})
+		f.fileResults = append(f.fileResults, recordedFileResult{Operation: "readFile", Path: p, Err: err, Bytes: append([]byte(nil), b...)})
 		f.order = append(f.order, "read:"+filepath.Base(p)+":"+result)
 	}
 	if !ok {
 		return nil, fs.ErrNotExist
 	}
 	return append([]byte{}, b...), nil
+}
+
+// Assertion-only inspection: it must not manufacture product file reads.
+func (f *memoryFiles) peekFile(p string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	b, ok := f.data[p]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return append([]byte(nil), b...), nil
 }
 func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) (err error) {
 	if f.beforeWrite != nil {
@@ -103,7 +116,7 @@ func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) (err error) {
 	defer f.mu.Unlock()
 	defer func() {
 		if f.observeReads {
-			f.fileResults = append(f.fileResults, recordedFileResult{"writeFile", p, "", err})
+			f.fileResults = append(f.fileResults, recordedFileResult{Operation: "writeFile", Path: p, Err: err, Bytes: append([]byte(nil), b...)})
 		}
 	}()
 	if f.fail || f.failPrefix != "" && strings.HasPrefix(p, f.failPrefix) {
@@ -121,7 +134,7 @@ func (f *memoryFiles) Rename(a, b string) (err error) {
 	defer f.mu.Unlock()
 	defer func() {
 		if f.observeReads {
-			f.fileResults = append(f.fileResults, recordedFileResult{"rename", a, b, err})
+			f.fileResults = append(f.fileResults, recordedFileResult{Operation: "rename", Path: a, Destination: b, Err: err, Bytes: append([]byte(nil), f.data[b]...)})
 		}
 	}()
 	v, ok := f.data[a]
@@ -363,11 +376,17 @@ type fakePlatform struct {
 	recordClose func(any)
 	probe       func(map[string]any) (any, error)
 	override    func(string, map[string]any) (any, error, bool)
+	observeCall func(string, any, error)
 }
 
-func (f *fakePlatform) Call(_ context.Context, name string, a map[string]any) (any, error) {
+func (f *fakePlatform) Call(_ context.Context, name string, a map[string]any) (result any, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	defer func() {
+		if f.observeCall != nil {
+			f.observeCall(name, result, err)
+		}
+	}()
 	f.calls = append(f.calls, name)
 	if f.override != nil {
 		if v, err, ok := f.override(name, a); ok {

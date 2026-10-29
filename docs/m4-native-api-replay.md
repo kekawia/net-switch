@@ -127,8 +127,8 @@ two-order regression. The shared CI replay step explicitly selects UTF-8.
 Hosted checks at this rebased head remain pending; CI was not watched.
 
 The later [startup replay](m4-native-startup-replay.md) now shares this slice's
-native boundary and registers savedVersionOrder separately. The current
-aggregate is 154 entries; this API test still owns exactly its original 23.
+native boundary and registers all three startup/saved-identity traces. The current
+aggregate is 486 entries; this API test still owns exactly its original 23.
 The startup work also restores initial lane publication when native Start has
 already acknowledged its revision; the failure and reverted mutation are
 documented there. Earlier validation results above describe the API slice at

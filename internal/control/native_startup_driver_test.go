@@ -4,9 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io/fs"
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
@@ -52,8 +50,15 @@ func replayNativeStartup(t *testing.T, name string) {
 	firstLine, secondLine := "a1", "b2"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
+	ownerLine := secondLine
+	if name == "appLine" {
+		pins = map[string]string{}
+		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
+		ownerLine = firstLine
+	}
 	if name == "legacyCaseOrder" {
 		firstLine, secondLine = "000001", "000002"
+		ownerLine = secondLine
 		pins = map[string]string{`c:\apps\x.exe`: secondLine}
 		owners = []string{`c:\apps\x.exe`, `C:\Apps\X.exe`}
 		// A bijection of generated identities only. Saved paths and their order
@@ -232,6 +237,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		workerRoutes = append(workerRoutes, r)
 	}
 	p := c.op.Platform.(*fakePlatform)
+	p.observeCall = func(name string, _ any, _ error) { files.recordOrder("platform:" + name) }
 	p.network = map[string]any{"adapters": workerAdapters, "defaultRoutes": workerRoutes, "policy": policyValue, "readAt": float64(clock.Now().UnixMilli())}
 	c.adapters, c.routes, c.policy, c.elevated = nil, nil, nil, false
 	c.CheckElevation(context.Background())
@@ -242,7 +248,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	equal("platform operations", p.calls, []string{"elevated", "network"})
 	equal("route result", c.routes, routes)
 	equal("policy result", c.policy, policyValue)
-	check("platform effects", cmp.Effects())
+	check("platform effects", cmp.Effects("platform:elevated", "platform:network"))
 	token := strings.Repeat("01", 24)
 	for _, entry := range trace.Entries {
 		if entry.Kind == "write" {
@@ -347,11 +353,17 @@ func replayNativeStartup(t *testing.T, name string) {
 	check("no repeated publication effects", cmp.Effects())
 	for _, owner := range owners {
 		d, err := e.active.Decide(platform.Owner{AppID: apppath.Normalize(owner, apppath.Windows)}, 40000, false, 1)
-		if err != nil || d.Line != secondLine || d.Revision != base.Snapshot().AppliedRevision {
+		if err != nil || d.Line != ownerLine || d.Revision != base.Snapshot().AppliedRevision {
 			t.Fatal("complete pin replacement guard", d, err)
 		}
 	}
 	// No stale compiled rule/PID/log artifacts survive in the native boundary.
+	for _, owner := range []string{`C:\Discord\app-2.0.0\other.exe`, `C:\Apps\unrelated.exe`, ""} {
+		d, err := e.active.Decide(platform.Owner{AppID: apppath.Normalize(owner, apppath.Windows)}, 40000, false, 1)
+		if err != nil || d.Line != firstLine {
+			t.Fatal("near-neighbour/unpinned fallback guard", owner, d, err)
+		}
+	}
 	for path := range files.data {
 		if strings.Contains(filepath.Base(path), "apps-") || strings.Contains(filepath.Base(path), "share-") || strings.Contains(filepath.Base(path), "cut-") || strings.HasPrefix(filepath.Base(path), "engine") {
 			t.Fatal("obsolete artifact guard", path)
@@ -388,11 +400,23 @@ func replayNativeStartup(t *testing.T, name string) {
 
 	// Compare external observations in trace order and associate each callback
 	// with its checked native operation. No default handler can earn a receipt.
+	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
+	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine")
+	var pinEvidence map[int]string
+	if name == "appLine" {
+		var apiTrace recordedTrace
+		check("shared API trace", json.Unmarshal(mustStartupJSON(t, trace), &apiTrace))
+		pinEvidence = replayNativePinSuffix(t, c, e, clock, files, apiTrace, hash, false, cmp)
+		if t.Failed() {
+			return
+		}
+	}
 	checked := map[int]string{}
 	logIndex := 0
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		check("ordered native counterpart", counterparts.Observe(entry))
 		var v map[string]any
 		_ = json.Unmarshal(entry.Value, &v)
 		guard := ""
@@ -408,19 +432,14 @@ func replayNativeStartup(t *testing.T, name string) {
 				guard = checked[entry.Seq-1] + " completed"
 			}
 		case "file-completion":
+			if matched, err := fileCursor.Observe(entry); matched {
+				check("ordered file completion", err)
+				guard = "distinct completed native file operation"
+				break
+			}
 			file, operation := js.Text(v["file"]), js.Text(v["operation"])
 			baseName := filepath.Base(file)
 			switch {
-			case operation == "readFile" && (baseName == "settings.json" || baseName == "windows-undo.json" || baseName == "usage.json"):
-				for _, r := range files.reads {
-					if filepath.Base(r.Path) == baseName {
-						if (r.Err == nil) != (v["ok"] == true) || r.Err != nil && (!errors.Is(r.Err, fs.ErrNotExist) || v["code"] != "ENOENT") {
-							t.Fatal("actual store read result guard", entry.Seq)
-						}
-						guard = "actual Store/Core file result"
-						break
-					}
-				}
 			case operation == "readFile" && baseName == "package.json":
 				if c.op.Version != "0.3.1" || v["ok"] != true {
 					t.Fatal("compiled version guard")
@@ -432,43 +451,10 @@ func replayNativeStartup(t *testing.T, name string) {
 				}
 				guard = "constructed native stores replace adapter directory setup"
 			case operation == "readdir":
-				if v["ok"] != false || v["code"] != "ERR_INVALID_ARG_TYPE" {
+				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || name == "appLine" && v["ok"] == true) {
 					t.Fatal("recorded cleanup failure guard")
 				}
 				guard = "complete revision replaces failed adapter directory cleanup"
-			case strings.HasPrefix(baseName, "server.json.") || strings.HasPrefix(baseName, "usage.json.") || strings.HasPrefix(baseName, "settings.json."):
-				if v["ok"] != true || (operation != "writeFile" && operation != "rename") {
-					t.Fatal("atomic file completion guard")
-				}
-				name := "server.json"
-				if strings.HasPrefix(baseName, "usage.json.") {
-					name = "usage.json"
-				}
-				if strings.HasPrefix(baseName, "settings.json.") {
-					name = "settings.json"
-				}
-				if strings.HasPrefix(baseName, "settings.json.bak.") {
-					name = "settings.json.bak"
-				}
-				found := false
-				for _, result := range files.fileResults {
-					if name == "settings.json" && strings.HasPrefix(filepath.Base(result.Path), "settings.json.bak.") {
-						continue
-					}
-					if result.Operation == operation && strings.HasPrefix(filepath.Base(result.Path), name+".") {
-						if result.Err != nil {
-							t.Fatal("native file completion failed", result)
-						}
-						if operation == "rename" && filepath.Base(result.Destination) != name {
-							t.Fatal("native file rename destination", result)
-						}
-						found = true
-					}
-				}
-				if !found {
-					t.Fatal("missing actual native file operation", operation, name)
-				}
-				guard = "actual atomic native publication"
 			case strings.HasPrefix(baseName, "apps-") || strings.HasPrefix(baseName, "share-") || strings.HasPrefix(baseName, "cut-") || baseName == "engine-config.json":
 				if v["ok"] != true || (operation != "writeFile" && operation != "rename") {
 					t.Fatal("revision completion guard")
@@ -489,12 +475,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			file := filepath.Base(js.Text(v["file"]))
 			switch file {
 			case "server.json", "usage.json", "settings.json", "settings.json.bak":
-				got := files.data[filepath.Join("/test", file)]
-				a, err := orderedTraceJSON(got)
-				check("persisted JSON", err)
-				b, err := orderedTraceJSON([]byte(js.Text(v["text"])))
-				check("recorded JSON", err)
-				equal("persisted "+file, a, b)
+				check("distinct ordered publication", fileCursor.Publication(file, []byte(js.Text(v["text"]))))
 				guard = "actual atomic native publication"
 			default:
 				if strings.HasPrefix(file, "apps-") || strings.HasPrefix(file, "share-") || strings.HasPrefix(file, "cut-") || file == "engine-config.json" {
@@ -586,10 +567,36 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			equal("probe delay", v["body"], map[string]any{"delay": float64(18)})
 			guard = "completed physical probe round"
+		case "probe-vote":
+			line := js.Text(v["line"])
+			l := c.lanes[line]
+			if l == nil || l.health.Up == nil || !*l.health.Up || v["result"] != true || v["at"] != float64(clock.Now().UnixMilli()) {
+				t.Fatal("native probe vote guard", v)
+			}
+			guard = "completed and published physical probe vote"
+		case "directory-list":
+			if name != "appLine" || v["directory"] != "/oracle/data" {
+				t.Fatal("unknown directory replacement", v)
+			}
+			guard = "complete revision cleanup contract"
+		case "timer-completion", "state-snapshot":
+			if pinEvidence[entry.Seq] == "" {
+				t.Fatal("missing native snapshot/ack observation", entry.Seq)
+			}
+			guard = pinEvidence[entry.Seq]
 		case "http":
-			guard = replayStartupHTTP(t, c, entry, trace.Entries[entry.Seq+1], cmp)
+			if name == "appLine" {
+				if pinEvidence[entry.Seq] == "" {
+					t.Fatal("missing shared API request", entry.Seq)
+				}
+				guard = "actual HTTP read and response"
+			} else {
+				guard = replayStartupHTTP(t, c, entry, trace.Entries[entry.Seq+1], cmp)
+			}
 		case "api":
-			if entry.Seq > 0 && checked[entry.Seq-1] == "actual HTTP read and response" {
+			if pinEvidence[entry.Seq] != "" {
+				guard = "actual HTTP read and response"
+			} else if entry.Seq > 0 && checked[entry.Seq-1] == "actual HTTP read and response" {
 				guard = checked[entry.Seq-1]
 			}
 		}
@@ -600,6 +607,8 @@ func replayNativeStartup(t *testing.T, name string) {
 	if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || clock.Now().UnixMilli() != 1792411200000 {
 		t.Fatal("startup leftover/timing guard")
 	}
+	check("file exhaustion", fileCursor.Finish())
+	check("counterpart exhaustion", counterparts.Finish())
 	check("native exhaustion", cmp.Finish())
 	cursor := replayledger.NewCursor(rows)
 	if len(rows) == 0 {
