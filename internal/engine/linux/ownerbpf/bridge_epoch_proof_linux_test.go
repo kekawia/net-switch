@@ -370,17 +370,19 @@ func TestBridgePreemptedReader(t *testing.T) {
 			return
 		}
 		t.Logf("P2_READER ready=true tid=%d cpu=%d policy=FIFO priority=20", unix.Gettid(), f.cpu)
-		ready <- nil
-		if err := waitEventFD(wakeFD); err != nil {
-			out <- result{err: err}
-			return
-		}
-		frames, readErr := r.ReadBurst(f.fd, 1)
 		var state BridgeFault
-		lookupErr := f.b.Collection.Maps["faults"].Lookup(uint32(0), &state)
-		ended := state.Reserved[2]
-		releaseHold(f)
-		out <- result{frames, errors.Join(readErr, lookupErr), ended}
+		var lookupErr error
+		frames, readErr := r.readBurst(f.fd, 1, func(fd int, dst []byte) (int, error) {
+			ready <- nil
+			if err := waitEventFD(wakeFD); err != nil {
+				return -1, err
+			}
+			n, err := unix.Read(fd, dst)
+			lookupErr = f.b.Collection.Maps["faults"].Lookup(uint32(0), &state)
+			releaseHold(f)
+			return n, err
+		})
+		out <- result{frames, errors.Join(readErr, lookupErr), state.Reserved[2]}
 	}()
 	t.Cleanup(func() {
 		_ = signalEventFD(wakeFD)
