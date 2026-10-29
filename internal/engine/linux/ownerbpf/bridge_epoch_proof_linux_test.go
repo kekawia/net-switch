@@ -276,7 +276,22 @@ func readyHoldController(t *testing.T, f *bridgeFixture, trigger func() error) <
 
 func ensureFullPreempt(t *testing.T) {
 	t.Helper()
-	for _, path := range []string{"/sys/kernel/debug/sched/preempt", "/sys/kernel/tracing/../../debug/sched/preempt"} {
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err == nil {
+		rel := unix.ByteSliceToString(uts.Release[:])
+		if cfg, err := os.ReadFile("/boot/config-" + rel); err == nil {
+			for _, line := range strings.Split(string(cfg), "\n") {
+				if strings.HasPrefix(line, "CONFIG_PREEMPT") {
+					t.Logf("P2_KERNEL_CONFIG %s", line)
+				}
+			}
+		}
+	}
+	dbg := t.TempDir()
+	if err := unix.Mount("debugfs", dbg, "debugfs", 0, ""); err == nil {
+		t.Cleanup(func() { _ = unix.Unmount(dbg, 0) })
+	}
+	for _, path := range []string{dbg + "/sched/preempt", "/sys/kernel/debug/sched/preempt"} {
 		b, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -293,7 +308,8 @@ func ensureFullPreempt(t *testing.T) {
 				if strings.Contains(orig, "(none)") {
 					restore = "none"
 				}
-				t.Cleanup(func() { _ = os.WriteFile(path, []byte(restore), 0600) })
+				p := path
+				t.Cleanup(func() { _ = os.WriteFile(p, []byte(restore), 0600) })
 			}
 		}
 		return
@@ -567,20 +583,10 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			f := newBridgeFixture(t, true, unix.IFF_VNET_HDR)
 			s1, _ := bridgeSocket(t, 0)
 			s2, _ := bridgeSocket(t, 0)
-			c1 := bridgeSend(t, s1, []byte("init-1"))
-			if fr := bridgeRead(t, f, 1)[0]; fr.Decision.Status != ReadCookie || fr.Decision.Packet.Cookie != c1 {
-				t.Fatal("init-1 failed", fr.Decision)
-			}
-			c2 := bridgeSend(t, s2, []byte("init-2"))
-			if fr := bridgeRead(t, f, 1)[0]; fr.Decision.Status != ReadCookie || fr.Decision.Packet.Cookie != c2 {
-				t.Fatal("init-2 failed", fr.Decision)
-			}
-			if c1 == c2 {
-				t.Fatal("distinct socket cookies required", c1, c2)
-			}
 
 			// Register a second reader r2 on its own OS thread while capture is temporarily
-			// quiesced so r2's baseline is sampled BEFORE the kernel recursion skip.
+			// quiesced BEFORE any traffic on the interface so r2's baseline is sampled
+			// before the kernel recursion skip and the 500-packet ring fill is undisturbed.
 			f.b.config.Enabled = 0
 			if err := f.b.Collection.Maps["config"].Update(uint32(0), f.b.config, ebpf.UpdateAny); err != nil {
 				t.Fatal(err)
@@ -637,8 +643,9 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			// have their kfree_skb terminal suppressed by the kernel recursion guard,
 			// so their stale records (cookie c1) remain in the kernel packet map AND
 			// freed recursion_misses increments above r2's baseline!
+			var c1 uint64
 			for range 500 {
-				bridgeSend(t, s1, []byte("fixed-size"))
+				c1 = bridgeSend(t, s1, []byte("fixed-size"))
 			}
 			var beforeMapKeys = make(map[uint64]PacketRecord)
 			var k uint64
@@ -700,10 +707,17 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			if err := f.b.Collection.Maps["faults"].Update(uint32(0), skipCtl, ebpf.UpdateAny); err != nil {
 				t.Fatal(err)
 			}
+			var c2 uint64
 			deadline := time.Now().Add(10 * time.Second)
 			recurred := false
 			for j := 0; j < 100000 && time.Now().Before(deadline); j++ {
-				if got := bridgeSend(t, s2, []byte("fixed-size")); got != c2 {
+				got := bridgeSend(t, s2, []byte("fixed-size"))
+				if c2 == 0 {
+					c2 = got
+					if c1 == c2 {
+						t.Fatal("distinct socket cookies required", c1, c2)
+					}
+				} else if got != c2 {
 					t.Fatal("s2 cookie changed", got, c2)
 				}
 				if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &skipCtl); err != nil {

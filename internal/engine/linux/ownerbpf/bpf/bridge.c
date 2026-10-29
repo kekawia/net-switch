@@ -152,7 +152,7 @@ INLINE void proof_hold(u32 mode, struct sk_buff *skb) {
         u64 start = ktime_ns();
         u64 now = start;
 #pragma clang loop unroll(disable)
-        for (u32 quantum = 0; quantum < 2500; quantum++) {
+        for (u32 quantum = 0; quantum < 12500; quantum++) {
             if (*(volatile u64 *)&f->reserved[1] || now - start >= 20000000)
                 break;
 #pragma unroll
