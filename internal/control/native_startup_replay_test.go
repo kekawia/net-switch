@@ -29,6 +29,7 @@ type nativeStartupEngine struct {
 	probes     atomic.Uint64
 	probeCheck func(engine.ProbeRequest, engine.ProbeResult)
 	probeBegin func(engine.ProbeRequest)
+	closeCheck func(engine.CloseRequest) (engine.CloseResult, error)
 	desired    *engine.Revision
 }
 
@@ -86,7 +87,10 @@ func (e *nativeStartupEngine) Start(ctx context.Context, p engine.Policy) (err e
 
 func (e *nativeStartupEngine) ForgetLane(string) {} // complete revisions own lanes
 
-func (e *nativeStartupEngine) CloseFlows(context.Context, engine.CloseRequest) (engine.CloseResult, error) {
+func (e *nativeStartupEngine) CloseFlows(_ context.Context, request engine.CloseRequest) (engine.CloseResult, error) {
+	if e.closeCheck != nil {
+		return e.closeCheck(request)
+	}
 	e.files.recordOrder("native:unexpected-close")
 	return engine.CloseResult{}, fmt.Errorf("startup/pin changes must not close existing flows")
 }
@@ -104,6 +108,12 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("combiningNoOpenLine", func(t *testing.T) { replayNativeStartup(t, "combiningNoOpenLine") })
+	t.Run("capBlockedAndMainException", func(t *testing.T) { replayNativeStartup(t, "capBlockedAndMainException") })
+	t.Run("capMoved", func(t *testing.T) { replayNativeStartup(t, "capMoved") })
+	t.Run("capReset", func(t *testing.T) { replayNativeStartup(t, "capReset") })
+	t.Run("midnightGap", func(t *testing.T) { replayNativeStartup(t, "midnightGap") })
+	t.Run("combining", func(t *testing.T) { replayNativeStartup(t, "combining") })
 	t.Run("savedVersionOrder", func(t *testing.T) { replayNativeStartup(t, "savedVersionOrder") })
 	t.Run("legacyCaseOrder", func(t *testing.T) { replayNativeStartup(t, "legacyCaseOrder") })
 	t.Run("appLine", func(t *testing.T) { replayNativeStartup(t, "appLine") })

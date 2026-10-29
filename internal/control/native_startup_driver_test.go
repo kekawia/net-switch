@@ -48,10 +48,11 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
+	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException" || name == "combiningNoOpenLine"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
 	ownerLine := secondLine
-	if name == "appLine" {
+	if name == "appLine" || name == "combining" || usageSlice {
 		pins = map[string]string{}
 		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
 		ownerLine = firstLine
@@ -91,6 +92,9 @@ func replayNativeStartup(t *testing.T, name string) {
 			trace.Entries[i].Value = b
 		}
 	}
+	if name == "combiningNoOpenLine" {
+		ownerLine = secondLine
+	}
 	var rows []replayledger.Row
 	for _, row := range report.Rows {
 		if row.Hash == hash && row.Assertion == "internal/control/native_startup_replay_test.go#"+t.Name() {
@@ -103,6 +107,17 @@ func replayNativeStartup(t *testing.T, name string) {
 	}
 	files := &memoryFiles{data: map[string][]byte{filepath.Join("/test", "settings.json"): initial.Settings}, observeAllWrites: true, observeReads: true}
 	clock := &fakeClock{at: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC), afterImmediate: true}
+	if trace.Scenario.Now != nil {
+		clock.at = time.UnixMilli(*trace.Scenario.Now).UTC()
+	}
+	if clock.Now().Location() != time.UTC {
+		t.Fatal("scenario clock must not inherit machine location")
+	}
+	location, err := time.LoadLocation(trace.Scenario.Timezone)
+	if err != nil {
+		t.Fatal("scenario timezone", err)
+	}
+	origin := clock.Now()
 	cmp := &nativeTraceComparator{effects: &files.order}
 	for _, entry := range trace.Entries {
 		if entry.Kind != "http" && entry.Kind != "api" {
@@ -137,9 +152,12 @@ func replayNativeStartup(t *testing.T, name string) {
 			t.Fatal("initial absence guard", file)
 		}
 	}
-	c, base, _, _ := testCoreWithFilesMode(t, files, clock, true)
+	c, base, _, _ := testCoreWithFilesLocation(t, files, clock, true, location)
 	base.ackPoint = 1
 	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfigIDs(firstLine, secondLine, pins)}
+	if name == "combiningNoOpenLine" {
+		e.want.Combine = true
+	}
 	c.op.Engine = e
 	construction := []string{"read:settings.json:ok", "read:control-journal.json:missing", "read:windows-undo.json:missing"}
 	if name == "legacyCaseOrder" {
@@ -269,11 +287,12 @@ func replayNativeStartup(t *testing.T, name string) {
 	if c.initialSampled {
 		t.Fatal("poll precondition: already sampled")
 	}
+	files.recordOrder("native:initial-poll")
 	check("initial physical sample", c.Poll(context.Background()))
 	if !c.initialSampled || len(c.meters) != 0 {
 		t.Fatal("null physical counters guard")
 	}
-	check("poll effects", cmp.Effects())
+	check("poll effects", cmp.Effects("native:initial-poll"))
 
 	// Each mutation must see matching durable desired/settings before it runs.
 	e.check = func(r engine.Revision) error {
@@ -360,7 +379,11 @@ func replayNativeStartup(t *testing.T, name string) {
 	// No stale compiled rule/PID/log artifacts survive in the native boundary.
 	for _, owner := range []string{`C:\Discord\app-2.0.0\other.exe`, `C:\Apps\unrelated.exe`, ""} {
 		d, err := e.active.Decide(platform.Owner{AppID: apppath.Normalize(owner, apppath.Windows)}, 40000, false, 1)
-		if err != nil || d.Line != firstLine {
+		fallback := firstLine
+		if name == "combiningNoOpenLine" {
+			fallback = secondLine
+		}
+		if err != nil || d.Line != fallback {
 			t.Fatal("near-neighbour/unpinned fallback guard", owner, d, err)
 		}
 	}
@@ -401,8 +424,11 @@ func replayNativeStartup(t *testing.T, name string) {
 	// Compare external observations in trace order and associate each callback
 	// with its checked native operation. No default handler can earn a receipt.
 	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
-	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine")
+	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset")
 	var pinEvidence map[int]string
+	if name == "combining" {
+		pinEvidence = replayNativeCombiningSuffix(t, c, e, clock, files, trace, cmp, fileCursor)
+	}
 	if name == "appLine" {
 		var apiTrace recordedTrace
 		check("shared API trace", json.Unmarshal(mustStartupJSON(t, trace), &apiTrace))
@@ -416,6 +442,24 @@ func replayNativeStartup(t *testing.T, name string) {
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		if usageSlice && entry.Kind == "helper-line" {
+			check("startup counterpart exhaustion", counterparts.Finish())
+			if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 {
+				t.Fatal("startup observation leftovers")
+			}
+			for seq, guard := range replayNativeUsageSuffix(t, c, e, clock, files, trace, cmp, fileCursor, entry.Seq) {
+				checked[seq] = guard
+			}
+			logIndex = len(files.logs)
+			break
+		}
+		if name == "combining" && entry.Seq >= 129 && pinEvidence[entry.Seq] != "" {
+			checked[entry.Seq] = pinEvidence[entry.Seq]
+			// The shared file cursor still checks each distinct settings call.
+			if entry.Kind != "file-completion" && entry.Kind != "write" && entry.Kind != "completion" {
+				continue
+			}
+		}
 		check("ordered native counterpart", counterparts.Observe(entry))
 		var v map[string]any
 		_ = json.Unmarshal(entry.Value, &v)
@@ -432,6 +476,10 @@ func replayNativeStartup(t *testing.T, name string) {
 				guard = checked[entry.Seq-1] + " completed"
 			}
 		case "file-completion":
+			if pinEvidence[entry.Seq] == revisionFileProof {
+				guard = revisionFileProof
+				break
+			}
 			if matched, err := fileCursor.Observe(entry); matched {
 				check("ordered file completion", err)
 				guard = "distinct completed native file operation"
@@ -451,11 +499,14 @@ func replayNativeStartup(t *testing.T, name string) {
 				}
 				guard = "constructed native stores replace adapter directory setup"
 			case operation == "readdir":
-				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || name == "appLine" && v["ok"] == true) {
+				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset") && v["ok"] == true) {
 					t.Fatal("recorded cleanup failure guard")
 				}
 				guard = "complete revision replaces failed adapter directory cleanup"
 			case strings.HasPrefix(baseName, "apps-") || strings.HasPrefix(baseName, "share-") || strings.HasPrefix(baseName, "cut-") || baseName == "engine-config.json":
+				if name == "combining" && entry.Seq >= 129 {
+					t.Fatal("missing ordered HTTP rule-file evidence", entry.Seq)
+				}
 				if v["ok"] != true || (operation != "writeFile" && operation != "rename") {
 					t.Fatal("revision completion guard")
 				}
@@ -472,6 +523,10 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			guard = "physical counters remain unknown"
 		case "write":
+			if pinEvidence[entry.Seq] == revisionFileProof {
+				guard = revisionFileProof
+				break
+			}
 			file := filepath.Base(js.Text(v["file"]))
 			switch file {
 			case "server.json", "usage.json", "settings.json", "settings.json.bak":
@@ -479,6 +534,9 @@ func replayNativeStartup(t *testing.T, name string) {
 				guard = "actual atomic native publication"
 			default:
 				if strings.HasPrefix(file, "apps-") || strings.HasPrefix(file, "share-") || strings.HasPrefix(file, "cut-") || file == "engine-config.json" {
+					if name == "combining" && entry.Seq >= 129 {
+						t.Fatal("missing ordered HTTP rule-file evidence", entry.Seq)
+					}
 					guard = "complete acknowledged revision and pin decisions"
 				}
 			}
@@ -575,7 +633,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			guard = "completed and published physical probe vote"
 		case "directory-list":
-			if name != "appLine" || v["directory"] != "/oracle/data" {
+			if (name != "appLine" && name != "capReset") || v["directory"] != "/oracle/data" {
 				t.Fatal("unknown directory replacement", v)
 			}
 			guard = "complete revision cleanup contract"
@@ -604,7 +662,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			checked[entry.Seq] = guard
 		}
 	}
-	if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || clock.Now().UnixMilli() != 1792411200000 {
+	if logIndex != len(files.logs) || len(pendingLogs) != 0 || (!usageSlice && len(files.events) != 0) || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || (!usageSlice && !clock.Now().Equal(origin)) {
 		t.Fatal("startup leftover/timing guard")
 	}
 	check("file exhaustion", fileCursor.Finish())

@@ -126,6 +126,98 @@ func TestLedgerRejectsMutations(t *testing.T) {
 	}
 }
 
+func TestResponseBoundedGroups(t *testing.T) {
+	target := func(m *Mapping) *Group {
+		for i := range m.Groups {
+			if m.Groups[i].Name == "combining-strict" {
+				return &m.Groups[i]
+			}
+		}
+		t.Fatal("missing response-boundary regression fixture")
+		return nil
+	}
+	cases := []struct {
+		name   string
+		mutate func(*Mapping)
+	}{
+		{"v1", func(m *Mapping) { m.Version = 1 }},
+		{"fake-ack", func(m *Mapping) { target(m).Ack = 192 }},
+		{"unknown-boundary", func(m *Mapping) { target(m).Boundary = "implicit" }},
+		{"reorder", func(m *Mapping) {
+			g := target(m)
+			g.Members[0], g.Members[1] = g.Members[1], g.Members[0]
+		}},
+		{"drop-member", func(m *Mapping) { g := target(m); g.Members = g.Members[1:] }},
+		{"split-owner", func(m *Mapping) {
+			g := target(m)
+			for i := range m.Annotations {
+				a := &m.Annotations[i]
+				if a.Group == g.Name {
+					other := *a
+					other.Seqs = []int{a.Seqs[0]}
+					other.Assertion = "internal/control/native_startup_replay_test.go#TestNativeStartupReplay/capMoved"
+					a.Seqs = a.Seqs[1:]
+					m.Annotations = append(m.Annotations, other)
+					return
+				}
+			}
+		}},
+		{"cross-http", func(m *Mapping) { target(m).End = 196 }},
+	}
+	m, traces := load(t)
+	if _, err := Build(m, traces); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, traces := load(t)
+			tc.mutate(&m)
+			if _, err := Build(m, traces); err == nil {
+				t.Fatal("accepted invalid response-bounded transaction")
+			}
+		})
+	}
+}
+
+func TestResponseGroupRejectsRecordedBarriers(t *testing.T) {
+	for _, kind := range []string{"timer-completion", "state-snapshot"} {
+		t.Run(kind, func(t *testing.T) {
+			m, traces := load(t)
+			found := false
+			for i := range m.Groups {
+				g := &m.Groups[i]
+				if g.Name != "combining-enable" {
+					continue
+				}
+				found = true
+				trace := traces[g.Hash]
+				// Keep the completion structurally valid: only the forbidden
+				// recorded barrier should invalidate the response-only group.
+				trace.Entries[g.Ack].Kind = kind
+				if kind == "state-snapshot" {
+					trace.Entries[g.Ack].Value = json.RawMessage(`{"now":1792411200000}`)
+				}
+				var completion map[string]any
+				if err := json.Unmarshal(trace.Entries[g.Ack+1].Value, &completion); err != nil {
+					t.Fatal(err)
+				}
+				completion["kind"] = kind
+				trace.Entries[g.Ack+1].Value, _ = json.Marshal(completion)
+				traces[g.Hash] = trace
+				g.Boundary, g.Ack = "response", -1
+			}
+			if !found {
+				t.Fatal("missing combining-enable group")
+			}
+			if _, err := Build(m, traces); err == nil {
+				t.Fatal("accepted response-only group containing", kind)
+			} else if !strings.Contains(err.Error(), "recorded barrier") {
+				t.Fatal("wrong rejection", err)
+			}
+		})
+	}
+}
+
 func TestLedgerFixtureHashAndSet(t *testing.T) {
 	m, _ := load(t)
 	for hash, f := range m.Fixtures {

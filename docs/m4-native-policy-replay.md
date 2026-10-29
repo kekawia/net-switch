@@ -1,0 +1,255 @@
+# Policy transactions, caps and physical usage replay
+
+Implementation contract, 2026-10-29. Target: combining (197),
+combiningNoOpenLine (298), capBlockedAndMainException (275), capMoved (222),
+capReset (256), midnightGap (188): 1,436 entries. Registration is earned only
+after executing checks; this document alone claims no coverage.
+
+## Clock and physical inputs
+
+Read `scenario.now` (milliseconds since epoch) and `scenario.timezone` from the
+hash-verified fixture. Missing values mean the oracle's 2026-10-19T12:00:00Z and
+UTC. Set the clock and Options.Location before constructing Core/usage.
+capReset starts at 2026-10-19T23:59:57Z; midnightGap starts at
+2026-09-06T03:59:59Z in America/Santiago. Never substitute local machine time.
+
+Research: pinned Go src/time/zoneinfo.go's LoadLocation reads ZONEINFO, system
+zone data, GOROOT/lib/time/zoneinfo.zip, then embedded time/tzdata. Errors must
+fail the replay. The [tzdb Chile rules](https://github.com/eggert/tz/blob/main/southamerica)
+say Sep Sun>=2 at 04:00 UTC from 2023 onward. On September 6, 2026 this changes
+Santiago from September 5 23:59:59 -04 to September 6 01:00:00 -03.
+Check those two instants with the pinned runtime, not a constructed nonexistent
+midnight (Go Date does not promise which side of a skipped time it selects).
+
+The helper-line JSON supplies physical adapter RX/TX counters to the native
+worker input. It is not routed application traffic. A clock-tick at the next
+one-second polling deadline drives Poll then Supervise; repeated ticks at the
+same time are ordered callback/barrier observations, not additional samples.
+Check each alias/value against that poll's meter observation. Null counters
+remain unknown. The initial zero sample establishes a baseline; the subsequent
+200-byte sample contributes 200 bytes, not an application flow's 10+2 bytes.
+
+SaveUsage writes usage.json at startup and the minute deadline; Poll updates
+in-memory physical usage. Native routed accounting can also commit before
+ackTotals. usage.recovery.json is written only when recovery state exists;
+an unreadable primary uses a durable recovery record, and a complete recovered
+record is written to the primary before recovery-file removal. These traces
+have no primary read failure, so assert recovery-file absence. The exact file
+cursor must consume each real write/rename once, including native journal work.
+
+## Exhaustion and native closure
+
+SYSTEM-DESIGN §§3.3, 4.6 and 5.7 replace partial lane changes and a second
+connection enumeration with a complete acknowledged revision and a persisted
+closeFlows intent: physical line, selected engine instance and admitted-before
+apply point. Assert the starting live flows, unrelated/main/newer survivors,
+durable intent before apply, matching ack before closure and selected result.
+The event and reached-cap log precede policy publication; the out-of-data
+closure log follows successful closure. Preserve blocked-line and main-line
+exception diagnostics. Do not invent a second native enumeration to imitate
+legacy GET /connections; bind that legacy selection to the fenced closure.
+
+Event IDs require a one-to-one mapping, not blanket string removal. The legacy
+sequences are capMoved 0f0f0f0f0f0f; both all-exhausted traces 151515151515 and
+161616161616; capReset 090909090909, 0a0a0a0a0a0a, 0f0f0f0f0f0f,
+101010101010; midnightGap 090909090909 and 0a0a0a0a0a0a. Associate each with
+the corresponding native ID generator result in event order and assert unique
+keys and values, kind, line, time and text before translating API event IDs.
+
+## HTTP transaction groups
+
+Ledger v2 retains v1 timer-backed groups and adds an explicit `boundary` of
+`response` with `ack: -1`. This means the original trace has no independent
+ack marker. The original HTTP input and API response delimit every member;
+the executing owner must prove a native ack before the real handler returns.
+It does not manufacture an original engine reply, snapshot or timer.
+All rule writes in the interval remain mandatory members, ordered and owned
+by one assertion. Nested HTTP boundaries, extra/omitted members, an ack index
+on response groups and an unknown boundary must fail validation.
+
+## Exercised scope and nearby gaps
+
+Routes: POST /api/combine, POST /api/lines/update (strict and daily cap),
+GET /api/state. Settings: manual 1:3 combining, automatic combining, strict
+secondary, 100-byte daily caps, exhausted main exception and secondary block,
+lane movement, daily reset and Santiago's missing midnight. Existing startup
+session, probe, file and diagnostic contracts are reused per trace.
+Combining's source-port slices become per-flow decisions under §4.4/§5.4;
+settings precede engine mutation under §3.3. Timings are one-second polls,
+duplicate same-time callbacks and the removed 300 ms combine reload barrier.
+
+Not covered: custom/failed probes, stale replies, failed settings/journal writes,
+usage recovery failure, weekly/monthly resets, clock rollback, concurrent API
+requests, live interfaces, actual traffic, installed services or TUN/routes.
+Existing adversarial protocol and durability tests remain necessary.
+
+## Combining checkpoint
+
+The complete combining trace is registered: 178 Control entries, 17 native
+session replacements and two complete-revision cleanup replacements. The
+aggregate reports **683 / 7,894**, with both producers and report exit 0.
+The native 1:3 policy produces 100/300 decisions in 400 flows. Making b2 strict
+disables combining and clears shares (sharesLocked returns no shares with fewer
+than two eligible lines); every unpinned flow then uses main.
+
+Executed mutations, reverted: missing combining receipt leaves producers
+passing but report exit 1 (178 missing entries); failing the subtest refuses
+the receipt and fails both producer/report; dropping the response observation
+fails at the next HTTP input; swapping startup async observations 112/114 fails
+the ordered counterpart cursor. The latter three had producer/report exit 1.
+Response-group regressions additionally reject a fabricated ack, v1 use,
+unknown boundary, reordered/omitted member and crossing the next HTTP request.
+
+## Santiago checkpoint
+
+midnightGap's 188 entries are registered. The aggregate reports **871 / 7,894**,
+producer and report exit 0. The pinned runtime's timezone regression verifies
+both sides of the gap. Two one-second polls ingest the physical baseline and
+200-byte delta; duplicate clock ticks consume completed-poll barriers without
+additional reads. Full events, diagnostics and API output match, with explicit
+event bijection 090909090909 → 000000000009 and
+0a0a0a0a0a0a → 00000000000a. Both native IDs must have come from the generator.
+The blocked revision persists its fenced b2 closure intent before Apply;
+closure is deferred to the next poll, beyond this trace's end. Main remains
+usable. No suffix usage or recovery file is written.
+
+## Daily-reset checkpoint
+
+capReset's 256 entries are registered; aggregate **1,127 / 7,894**, producer and
+report exit 0. Four one-second polls preserve the exhausted state before UTC
+midnight and reset both physical totals at midnight. The pending empty b2
+closure keeps the exhaustion apply point through the reset revision and
+completes after the native connection observation. Both snapshot markers are
+checked against the response time. Reset event mappings are
+0f0f0f0f0f0f → 000000000010 and 101010101010 → 000000000011; exhaustion mappings
+match the Santiago trace. The journal accounts for the different ID sequence.
+
+## Moved-cap checkpoint
+
+capMoved's 222 entries are registered; aggregate **1,349 / 7,894**, producer
+and report exit 0. Its response-bounded cap transaction checks the same real
+handler and durability order as combining. Exhaustion moves b2 to a1 and then
+closes its physical flow using the acknowledged, durably saved cutoff.
+0f0f0f0f0f0f maps to native event 00000000000f. phone-flow maps to
+test-engine:1; owner, physical line, start and bytes stay in the supplied native
+observation. The oracle keeps returning that supplied snapshot after DELETE;
+the replay preserves that observation input, not a claim of socket resurrection.
+
+The named `checkNativePhysicalClosure` replacement also executes the real
+in-memory flow table: establish historical physical flows, apply the complete
+new policy, then close by physical line at its apply point. A later policy
+reopening b2 admits a new b2 flow; it and a new main flow survive the old cutoff.
+The table's point is its own ordered apply point, separate from the Control
+fixture's point, whose exact request and durable intent are checked at closure.
+No real sockets or engine process are used. This replaces the redundant second
+GET and DELETE under §§3.3/4.6; it is not an extra native observation request.
+
+## Blocked secondary and main exception checkpoint
+
+capBlockedAndMainException's 275 entries are registered; aggregate
+**1,624 / 7,894**, producer and report exit 0. Both cap-setting transactions
+have response-bounded groups. Both physical lines exhaust together, but only
+the blocked secondary gets a persisted closure intent. The subsequent poll
+closes blocked-flow while main-flow survives. The real flow-table counterpart
+also checks the newer same-line and main survivors.
+151515151515 → 000000000015 and 161616161616 → 000000000016 are the event
+bijections. main-flow and blocked-flow map respectively to test-engine:1 and
+test-engine:2 in the ordered native observation input.
+
+## Completed slice and validation
+
+combiningNoOpenLine's 298 entries are also registered. All six traces now add
+exactly **1,436 entries**; the aggregate reports **1,922 / 7,894**, with 5,972
+remaining outside this slice. The all-exhausted combined policy retains the
+combining setting but has no eligible shares: unknown and unpinned flows use
+the main lane target. The blocked secondary closes on the following poll.
+Event and flow identity bijections match capBlockedAndMainException.
+
+The complete pure Control, control/engine and ledger suites, plus the selected
+native lifecycle replacement contract, passed with producer/lifecycle/report
+exit codes 0/0/0. The pinned Go runtime used Idle priority, GOMAXPROCS=2 and
+-p 2; go test -json -count=1 streamed directly into replay-report without logs.
+Ledger v2 regressions also reject splitting one group across different owners.
+
+The counterpart cursor now includes physical samples and events, preserving
+event/log adjacency as well as engine and async-result ordering. A further
+reverted mutation swapping combiningNoOpenLine's event/log 213/214 failed at
+the expected event. Removing the real table's cutoff closed two flows instead
+of one and failed; advancing it past the newer flow likewise failed. Callbacks
+return guard errors to the test goroutine rather than invoking FailNow from
+Control's queue worker.
+
+No product behavior change was required. Full literal policies, response
+comparisons and existing startup contracts remain the basis of every receipt.
+Frozen reference and oracle bytes remain unchanged. No engine process, service,
+TUN or route operation ran locally. Independent review and hosted checks remain
+outside this local validation; CI is not watched by this implementation task.
+
+## Review round 1: rule-file evidence
+
+The initial implementation proved native policy semantics but accepted obsolete
+rule-file callbacks by filename prefix. This allowed a rename in place of the
+first writeFile to earn a receipt. The pre-fix reproduction passed in midnightGap
+(176), combining (145), and capMoved (158); frozen fixture bytes were untouched.
+
+The shared file cursor now has an ordered revision projection, used for polling
+and HTTP transactions. Its independent plan is apps-a1.json, apps-b2.json,
+share-b2.json, cut-b2.json. Each file requires a distinct successful writeFile,
+publication, and matching temporary-file rename, in that order. All planned
+files must finish before settings publications or the transaction's end.
+Every plan binds to one distinct, already checked native apply/ack pair; the
+full native policy, durability and decisions are still checked by the caller.
+No fake native adapter file operations are introduced.
+
+Poll intervals covered are combiningNoOpenLine 208–272 (two complete ordered
+sets: its old share refresh and blocked-rule refresh become one native revision),
+capBlockedAndMainException 208–249, capReset 149–190 and 196–239, and midnightGap
+143–184. Other polls require zero rule files. These entries remain translated
+in the ledger: the ordered file-cursor alternative replaces adding a synthetic
+poll acknowledgement entry. HTTP transactions use the same cursor and their
+existing atomic groups. Prefix-only receipt fallbacks are removed for this slice.
+
+Permanent fixture-based mutations reject missing cut files, duplicate share
+files, rename-before-write, missing/duplicate publications, mismatched temporary
+paths, missing native acknowledgement and reused acknowledgement. The original
+three rename mutations now fail at those exact entries. Response-only groups
+also reject any recorded timer-completion or state-snapshot; both regressions
+failed before the validator fix on combining-enable.
+
+Validation after restoration: the full pure Control, control/engine and ledger
+suites plus the selected lifecycle contract report **1,922 / 7,894**, with
+producer/lifecycle/report exits 0/0/0. All 63 file-cursor leaf cases ran (seven
+valid intervals and 56 corruption cases), as did both barrier regressions.
+Temporary full-replay mutations for rename-before-write and replacing cut with
+a duplicate share file failed the aggregate with producer/report exits 1/1 in
+both polling and HTTP paths. Those edits were reverted; frozen bytes are unchanged.
+
+Scenario origins and polling instants now use UnixMilli(...).UTC(). The
+[Go time documentation](https://pkg.go.dev/time#UnixMilli) confirms UnixMilli
+otherwise attaches the machine's local location. Usage still receives the
+explicit scenario location, including America/Santiago.
+
+## Inputs for the next slice
+
+Checked against tests/oracle/traces.mjs and harness.mjs in this revision:
+
+- `input:probes` replaces the per-line probe-answer map. A number is a delay
+  in milliseconds (for example a1:25), not a boolean vote. `false` makes the
+  probe fail with status 503; an absent answer defaults to 18 ms. Drive native
+  probe results with the same delay/outcome and retain round/instance fencing.
+- `input:routes` replaces the explicit default-route list, whose entries have
+  `interfaceAddress`. Without an override, the oracle derives it from IPv4
+  interface addresses. Preserve route-read deadlines; changing the supplied
+  list is not itself a completed route observation or immediate health vote.
+- `input:interfaces` replaces the alias-to-address-list returned by
+  networkInterfaces. Each address keeps family, address and internal fields.
+  Emptying Ethernet removes its addresses; adding/removing IPv6 is separate
+  from adapter identity and the explicit routes override. Do not conflate this
+  input with helper-line physical byte counters.
+- `lostDefaultRoute` has `environment.realDirectoryList: true`. This makes the
+  legacy directory list succeed (the other path records its callback error),
+  and enables probe-vote and state-snapshot observations. Reuse the successful
+  cleanup replacement and preserve every enabled completion. The trace first
+  supplies only Wi-Fi's 192.0.2.2 route, then restores Ethernet's 192.0.2.1 too;
+  its recorded intermediate connected states and later no-default-route state
+  must follow the actual sampling deadlines, not a direct state assignment.

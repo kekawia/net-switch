@@ -1,4 +1,4 @@
-# Native replay semantic ledger v1
+# Native replay semantic ledger v2
 
 2026-10-27, based on main `3c7b26d0`. Implements the accounting boundary in
 NATIVE-REPLAY-RETIREMENT.md, with locked design §§3.3, 4.1, 4.4–4.6 and 5.7.
@@ -7,43 +7,50 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
-Updated 2026-10-29 by completed startup/saved-identity registration in PR #110.
+Updated 2026-10-29 by the six-trace policy/physical-usage slice in PR #112.
 The pure Control, control/engine and ledger suites plus the selected native
-lifecycle contract passed the aggregate locally:
-`covered 486 / 7,894; uncovered 7408; pending map[]` (all exit codes 0).
-The existing five API receipts plus nine startup/replacement receipts cover
-486 entries without an OS restriction. Static inventory still credits zero.
-Missing startup receipt, failing subtest, dropped HTTP behavioural check and
-removal of the startup publication fix all failed the gate and were reverted.
-See [startup replay evidence](m4-native-startup-replay.md).
+lifecycle contract report `covered 1922 / 7,894; uncovered 5972; pending map[]`
+(all exit codes 0). This adds 1,436 entries to the existing 486 startup/API
+entries without an OS restriction. Static inventory still credits zero.
+Missing receipts, failing subtests, dropped HTTP checks and reordered cross-kind
+observations failed the gate in reverted mutations.
+See [policy replay evidence](m4-native-policy-replay.md) and the earlier
+[startup evidence](m4-native-startup-replay.md).
 
 | Measure | Entries |
 | --- | ---: |
 | Hash-verified original entries consumed once by accounting | 7,894 |
-| Proven by native trace assertions in a passing aggregate run | 486 |
-| Uncovered after that run | 7,408 |
+| Proven by native trace assertions in a passing aggregate run | 1,922 |
+| Uncovered after that run | 5,972 |
 | Pending #107 | 0 |
 
 | Checked disposition (coverage is separate) | Entries |
 | --- | ---: |
 | Unchanged external observation | 1,284 |
-| Translated native operation/result | 6,500 |
-| Member of a named atomic revision | 8 |
-| Obsolete representation with a replacement assertion | 102 |
+| Translated native operation/result | 6,309 |
+| Member of a named atomic revision | 36 |
+| Obsolete representation with a replacement assertion | 265 |
 | Total | 7,894 |
 
 The distinction matters: assigning an assertion obligation to a completion or
 log is not proof that native Control produced that completion or log. No feature
 test is credited for entries it never read. The current generic obligations
-remain uncovered, including 2,807 of the 3,003 completion markers. No assertion name
+remain uncovered outside the registered traces. No assertion name
 alone, or a manually edited `covered` status, earns coverage.
 
 ## Implementation and use
 
 `internal/replayledger/mapping.json` is the versioned, machine-readable source.
-It has 25 original SHA-256 keys, eight generic rules with all three startup trace
-bindings, sixteen sequence annotations (seven API and nine startup replacements),
-two atomic groups, and references to existing supporting tests.
+It has 25 original SHA-256 keys, eight generic rules with nine whole-trace
+bindings each, 41 sequence annotations, nine atomic groups, and references to
+existing supporting tests. V2 adds response-bounded HTTP groups with an explicit
+`boundary: response` and `ack: -1`: no fake original acknowledgement is invented.
+Their executing owner proves native acknowledgement before the HTTP return.
+All members must share one owner and scope. V1 timer-backed groups still work.
+Response-only intervals reject recorded timer-completion and state-snapshot
+markers. Poll and HTTP rule-file representations also pass the shared ordered
+revision-file cursor: exact file sets, distinct write/publication/rename pairs,
+and a distinct consumed native acknowledgement are required before receipts.
 It contains no copied fixture payloads. The fixtures and provenance are read
 from their existing `tests/oracle` paths, never regenerated or rewritten.
 
