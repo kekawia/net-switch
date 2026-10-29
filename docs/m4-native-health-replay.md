@@ -21,6 +21,17 @@ No routed byte count is substituted for physical adapter usage.
 The pure aggregate reports `covered 2841 / 7,894; uncovered 5053; pending map[]`,
 producer/lifecycle/report exits 0/0/0.
 
+probeFailover's 749 entries are implemented. Independent deadlines require a1
+rounds at 15, 20, 25, 30, 35 and 40 s, with b2 still on its 15-second cadence.
+The first failed quick check gets two full confirmations; subsequent doubtful
+rounds are full-only. Three failed rounds cause the 26 s poll to publish failover.
+The input changes to 25 ms at 31 s; full rounds at 35 and 40 s each count once,
+and the 41 s poll publishes failback. Both complete HTTP states, all diagnostic
+conditions and generated event identities are checked. No trace output chooses
+Control's health, probe result or lane target.
+The pure aggregate reports `covered 3590 / 7,894; uncovered 4304; pending map[]`,
+producer/lifecycle/report exits 0/0/0.
+
 2026-10-29. Paused at the user's request after implementing failoverFailback.
 The requested slice contains 2,063 entries: failoverFailback 232,
 busyFailedChecks 687, probeFailover 749 and lostDefaultRoute 395.

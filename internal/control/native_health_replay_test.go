@@ -18,7 +18,7 @@ import (
 // probe kinds/operators, counts completed rounds and publishes lane revisions.
 func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, fileCursor *startupFileCursor, start int) map[int]string {
 	t.Helper()
-	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" {
+	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" && trace.Name != "probeFailover" {
 		t.Fatal("health trace not yet implemented", trace.Name)
 	}
 	checked := map[int]string{}
