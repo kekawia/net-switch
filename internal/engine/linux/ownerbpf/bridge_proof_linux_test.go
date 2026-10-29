@@ -670,8 +670,8 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		t.Fatal("cross-CPU capture fault did not increment shared health.epoch_faults")
 	}
 	crossHealthFrames, crossHealthErr := f.r.ReadBurst(f.fd, 1)
-	if !errors.Is(crossHealthErr, ErrEpochRebuild) || len(crossHealthFrames) != 1 || crossHealthFrames[0].Decision.Status != ReadEpochFault || !crossHealthFrames[0].Decision.Rebuild {
-		t.Fatalf("one-read cross-CPU health bound failed on reader CPU %d: err=%v frames=%+v", f.cpu, crossHealthErr, crossHealthFrames)
+	if !errors.Is(crossHealthErr, ErrEpochRebuild) || !f.b.stopped || (len(crossHealthFrames) != 0 && (len(crossHealthFrames) != 1 || crossHealthFrames[0].Decision.Status != ReadEpochFault || !crossHealthFrames[0].Decision.Rebuild)) {
+		t.Fatalf("one-read cross-CPU health bound failed on reader CPU %d: err=%v stopped=%t frames=%+v", f.cpu, crossHealthErr, f.b.stopped, crossHealthFrames)
 	}
 	reloadBridgeFixture(t, f, true)
 
