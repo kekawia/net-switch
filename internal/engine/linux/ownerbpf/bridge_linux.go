@@ -267,6 +267,7 @@ func (b *Bridge) Faults() uint64 { return atomic.LoadUint64((*uint64)(unsafe.Poi
 
 type BridgeReader struct {
 	Measure              bool
+	SkipPostCheck        bool
 	LastSample, LastHold time.Duration
 	b                    *Bridge
 	key                  ReaderKey
@@ -347,14 +348,14 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 	}
 	b.mu.Unlock()
 	if stopped {
-		return nil, ErrEpochRebuild
+		return nil, fmt.Errorf("%w: reader publication gate already stopped", ErrEpochRebuild)
 	}
 	defer b.activeReads.Done()
 	frames := make([]ReadFrame, 0, limit)
 	var readFailure error
 	for len(frames) < limit {
-		if b.Faults() != 0 || r.sequence == ^uint64(0) {
-			readFailure = ErrEpochRebuild
+		if health := b.Faults(); health != 0 || r.sequence == ^uint64(0) {
+			readFailure = fmt.Errorf("%w: before syscall health=%d sequence=%d", ErrEpochRebuild, health, r.sequence)
 			break
 		}
 		r.sequence++
@@ -397,23 +398,30 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 			break
 		}
 	}
-	var sampleStart time.Time
-	if r.Measure {
-		sampleStart = time.Now()
+	valid := true
+	var sampleErr error
+	if !r.SkipPostCheck {
+		var sampleStart time.Time
+		if r.Measure {
+			sampleStart = time.Now()
+		}
+		burstBarrier()
+		var after [3]CounterSample
+		after, sampleErr = b.Sample()
+		if r.Measure {
+			r.LastSample = time.Since(sampleStart)
+		}
+		valid = r.guard.Certify(after, sampleErr)
 	}
-	burstBarrier()
-	after, sampleErr := b.Sample()
-	if r.Measure {
-		r.LastSample = time.Since(sampleStart)
-	}
-	valid := r.guard.Certify(after, sampleErr)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !valid {
 		b.UnknownRecursion.Add(1)
 		b.AffectedPackets.Add(uint64(len(frames)))
 		for i := range frames {
-			frames[i].Decision = ReadDecision{Status: "attribution_unknown_recursion", Rebuild: true}
+			if frames[i].Decision.Status != ReadMissing {
+				frames[i].Decision = ReadDecision{Status: "attribution_unknown_recursion", Rebuild: true}
+			}
 		}
 	}
 	if !valid || b.Faults() != 0 || readFailure != nil || b.stopped {
