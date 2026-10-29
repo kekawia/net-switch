@@ -5,7 +5,9 @@ package ownerbpf
 import (
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -272,7 +274,34 @@ func readyHoldController(t *testing.T, f *bridgeFixture, trigger func() error) <
 	return result
 }
 
+func ensureFullPreempt(t *testing.T) {
+	t.Helper()
+	for _, path := range []string{"/sys/kernel/debug/sched/preempt", "/sys/kernel/tracing/../../debug/sched/preempt"} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		orig := strings.TrimSpace(string(b))
+		t.Logf("P2_PREEMPT_MODE path=%s mode=%q", path, orig)
+		if !strings.Contains(orig, "(full)") {
+			if err := os.WriteFile(path, []byte("full"), 0600); err != nil {
+				t.Logf("P2_PREEMPT_WRITE err=%v", err)
+			} else {
+				after, _ := os.ReadFile(path)
+				t.Logf("P2_PREEMPT_AFTER mode=%q", strings.TrimSpace(string(after)))
+				restore := "voluntary"
+				if strings.Contains(orig, "(none)") {
+					restore = "none"
+				}
+				t.Cleanup(func() { _ = os.WriteFile(path, []byte(restore), 0600) })
+			}
+		}
+		return
+	}
+}
+
 func TestBridgePreemptedReader(t *testing.T) {
+	ensureFullPreempt(t)
 	f := newBridgeFixture(t, true)
 	if runtime.NumCPU() < 2 {
 		t.Fatal("two CPUs required for independent controller")
@@ -425,7 +454,7 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	if err != nil || l.Attrs().Statistics == nil {
 		t.Fatal(err)
 	}
-	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 2000, Limit: 100})
+	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 500, Limit: 100})
 	if err := netlink.QdiscReplace(q); err != nil {
 		t.Fatal("netem positive-control prerequisite", err)
 	}
@@ -439,8 +468,8 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	}
 	defer func() { _ = unix.Munmap(faultBuf) }()
 
-	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=2000us=2ms)
-	// immediately before entering the 20ms kfree_skb hold on f.cpu. Even when
+	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=500us=0.5ms)
+	// immediately before entering the kfree_skb hold on f.cpu. Even when
 	// preemption is disabled on f.cpu, the hrtimer hardirq fires on f.cpu and
 	// runs NET_TX_SOFTIRQ on irq_exit in the interrupted reader task's context.
 	for range 8 {
@@ -550,23 +579,55 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 				t.Fatal("distinct socket cookies required", c1, c2)
 			}
 
-			// Register a second reader r2 while capture is temporarily quiesced so r2's
-			// baseline is sampled BEFORE the kernel recursion skip, then use f.r to
-			// trigger the real nested-free kernel recursion skip.
+			// Register a second reader r2 on its own OS thread while capture is temporarily
+			// quiesced so r2's baseline is sampled BEFORE the kernel recursion skip.
 			f.b.config.Enabled = 0
 			if err := f.b.Collection.Maps["config"].Update(uint32(0), f.b.config, ebpf.UpdateAny); err != nil {
 				t.Fatal(err)
 			}
-			r2, err := f.b.Register()
-			if err != nil {
+			type r2Result struct {
+				frames []ReadFrame
+				err    error
+			}
+			r2Ready := make(chan error, 1)
+			r2Trigger := make(chan bool, 1)
+			r2Out := make(chan r2Result, 1)
+			r2Done := make(chan struct{})
+			go func() {
+				defer close(r2Done)
+				runtime.LockOSThread()
+				defer runtime.UnlockOSThread()
+				var mask unix.CPUSet
+				mask.Set(f.cpu)
+				if err := unix.SchedSetaffinity(0, &mask); err != nil {
+					r2Ready <- err
+					return
+				}
+				r2, err := f.b.Register()
+				if err != nil {
+					r2Ready <- err
+					return
+				}
+				defer func() { _ = r2.Close() }()
+				r2.SkipPostCheck = skipPostCheck
+				r2Ready <- nil
+				doRead := <-r2Trigger
+				if !doRead {
+					return
+				}
+				frames, readErr := r2.ReadBurst(f.fd, 1)
+				r2Out <- r2Result{frames, readErr}
+			}()
+			t.Cleanup(func() {
+				select {
+				case r2Trigger <- false:
+				default:
+				}
+				<-r2Done
+			})
+			if err := <-r2Ready; err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() {
-				if r2 != nil {
-					_ = r2.Close()
-				}
-			})
-			r2.SkipPostCheck = skipPostCheck
 			if err := f.b.Enable(500); err != nil {
 				t.Fatal(err)
 			}
@@ -600,10 +661,6 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			}
 			_, afterHold, _ := triggerNestedFreeHold(t, f, s1, beforeDrops, before)
 
-			// Remove netem qdisc by replacing with pfifo_fast / noqueue via link cycling or draining,
-			// and drain the remaining 499 queued packets from the ring using raw unix.Read.
-			// First reset f.b.stopped (which f.r's EFAULT read set) ONLY so r2 can enter ReadBurst
-			// to test the post-burst counter gate directly.
 			buf := make([]byte, 2048)
 			for range 499 {
 				if _, err := unix.Read(f.fd, buf); err != nil {
@@ -624,7 +681,6 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 				t.Fatalf("kernel recursion skip did not leave retained stale records: len=%d err=%v", len(retainedAddrs), err)
 			}
 			targetAddr := retainedAddrs[0]
-			// Delete the other retained records so only targetAddr remains armed for recurrence.
 			for _, addr := range retainedAddrs[1:] {
 				if err := f.b.Collection.Maps["packets"].Delete(addr); err != nil {
 					t.Fatal(err)
@@ -661,7 +717,10 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 					if observed[f.cpu].Address != targetAddr {
 						t.Fatal("suppression hit without independently observed pointer recurrence")
 					}
-					frames, readErr := r2.ReadBurst(f.fd, 1)
+					r2Trigger <- true
+					res := <-r2Out
+					<-r2Done
+					frames, readErr := res.frames, res.err
 					if len(frames) != 1 {
 						t.Fatalf("expected 1 frame, got %d (err=%v)", len(frames), readErr)
 					}
@@ -670,16 +729,12 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 							t.Fatalf("normal reader accepted stale record or wrong status: err=%v decision=%+v", readErr, frames[0].Decision)
 						}
 						t.Logf("P2_STALE_MUTATION skip_post_check=false address=%x stale_cookie=%d sender_cookie=%d free_recursion_delta=%d decision=%s result=refused", targetAddr, c1, c2, afterHold[2].Misses-before[2].Misses, frames[0].Decision.Status)
-						_ = r2.Close()
-						r2 = nil
 						reloadBridgeFixture(t, f)
 					} else {
 						if readErr != nil || frames[0].Decision.Status != ReadCookie || frames[0].Decision.Packet.Cookie != c1 {
 							t.Fatalf("mutant reader without post-burst check did not accept stale record: err=%v decision=%+v want_cookie=%d", readErr, frames[0].Decision, c1)
 						}
 						t.Logf("P2_STALE_MUTATION skip_post_check=true address=%x stale_cookie=%d sender_cookie=%d accepted_cookie=%d free_recursion_delta=%d result=stale_accepted", targetAddr, c1, c2, frames[0].Decision.Packet.Cookie, afterHold[2].Misses-before[2].Misses)
-						_ = r2.Close()
-						r2 = nil
 					}
 					recurred = true
 					break
