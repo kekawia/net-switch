@@ -592,8 +592,8 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	eintrFrames, eintrErr := f.r.readBurst(f.fd, 1, func(int, []byte) (int, error) {
 		return -1, unix.EINTR
 	})
-	if !errors.Is(eintrErr, unix.EINTR) || len(eintrFrames) != 0 || f.b.Faults() != 0 {
-		t.Fatalf("EINTR burst failed or poisoned epoch: frames=%d err=%v faults=%d", len(eintrFrames), eintrErr, f.b.Faults())
+	if eintrErr != nil || len(eintrFrames) != 0 || f.b.Faults() != 0 || f.b.stopped {
+		t.Fatalf("EINTR burst failed or poisoned epoch: frames=%d err=%v faults=%d stopped=%t", len(eintrFrames), eintrErr, f.b.Faults(), f.b.stopped)
 	}
 	c1 := bridgeSend(t, s, []byte("queued-for-zero-read"))
 	zeroFrames, err := f.r.readBurst(f.fd, 1, func(fd int, _ []byte) (int, error) {
@@ -675,10 +675,11 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	}
 	reloadBridgeFixture(t, f, true)
 
-	// 3c. Shared-skb rejection (users != 1): AF_PACKET TPACKET_V2 TX_RING without TPACKET_CMSG
-	// calls skb_get(skb) in tpacket_fill_skb before po->xmit(skb), so net_dev_start_xmit
-	// observes skb->users == 2, increments state->shared, sets p.status = 0, and CheckRead
-	// refuses the read with ReadInvalid and Rebuild=true.
+	// 3c. Shared-skb rejection (users != 1): AF_PACKET TPACKET_V2 PACKET_TX_RING with
+	// PACKET_TIMESTAMP (SOF_TIMESTAMPING_TX_SOFTWARE) calls skb_get(skb) in
+	// skb_setup_tx_timestamp (tpacket_fill_skb) before packet_xmit(po, skb), so
+	// net_dev_start_xmit observes skb->users == 2, increments state->shared, sets
+	// p.status = 0, and CheckRead refuses the read with ReadMissing/ReadInvalid and Rebuild=true.
 	ethPIP := binary.BigEndian.Uint16([]byte{byte(unix.ETH_P_IP >> 8), byte(unix.ETH_P_IP & 0xff)})
 	pktFD, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM, int(ethPIP))
 	if err != nil {
@@ -687,6 +688,9 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	defer unix.Close(pktFD)
 	if err := unix.SetsockoptInt(pktFD, unix.SOL_PACKET, unix.PACKET_VERSION, unix.TPACKET_V2); err != nil {
 		t.Fatal("PACKET_VERSION TPACKET_V2:", err)
+	}
+	if err := unix.SetsockoptInt(pktFD, unix.SOL_PACKET, unix.PACKET_TIMESTAMP, unix.SOF_TIMESTAMPING_TX_SOFTWARE); err != nil {
+		t.Fatal("PACKET_TIMESTAMP SOF_TIMESTAMPING_TX_SOFTWARE:", err)
 	}
 	req := unix.TpacketReq{
 		Block_size: 4096,
@@ -709,17 +713,14 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if err := unix.Bind(pktFD, sll); err != nil {
 		t.Fatal("bind AF_PACKET:", err)
 	}
-	// TPACKET2_HDRLEN is TPACKET_ALIGN(sizeof(struct tpacket2_hdr)=32) + sizeof(struct sockaddr_ll)=20 = 52;
-	// payload starts at offset 52 (or 32 + 16 = 48? Let's compute TPACKET2_HDRLEN exact kernel formula:
-	// TPACKET_ALIGN(32) = 32; + sizeof(struct sockaddr_ll) (20) = 52).
-	// Write a minimal 28-byte IPv4 UDP packet at offset 52 and set tp_len=28, tp_snaplen=28, tp_status=TP_STATUS_SEND_REQUEST (1).
-	const tpacket2HdrLen = 52
+	// In tpacket_parse_header, off = po->tp_hdrlen - sizeof(struct sockaddr_ll) = TPACKET_ALIGN(sizeof(struct tpacket2_hdr)) = 32.
+	const tpacket2DataOff = 32
 	ipUDP := []byte{
 		0x45, 0x00, 0x00, 0x1c, 0x00, 0x01, 0x00, 0x00, 0x40, 0x11, 0x00, 0x00,
 		198, 18, 0, 1, 198, 18, 0, 2,
 		0x23, 0x28, 0x23, 0x28, 0x00, 0x08, 0x00, 0x00,
 	}
-	copy(ringMem[tpacket2HdrLen:], ipUDP)
+	copy(ringMem[tpacket2DataOff:], ipUDP)
 	*(*uint32)(unsafe.Pointer(&ringMem[0])) = unix.TP_STATUS_SEND_REQUEST
 	*(*uint32)(unsafe.Pointer(&ringMem[4])) = uint32(len(ipUDP))
 	*(*uint32)(unsafe.Pointer(&ringMem[8])) = uint32(len(ipUDP))
@@ -737,6 +738,7 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if !errors.Is(sharedErr, ErrEpochRebuild) || len(sharedFrames) != 1 || (sharedFrames[0].Decision.Status != ReadMissing && sharedFrames[0].Decision.Status != ReadInvalid) || !sharedFrames[0].Decision.Rebuild {
 		t.Fatalf("shared skb (users != 1) was not rejected with ReadMissing/ReadInvalid+Rebuild: err=%v frames=%+v", sharedErr, sharedFrames)
 	}
+	_ = unix.Close(pktFD)
 	reloadBridgeFixture(t, f, true)
 	s, _ = bridgeSocket(t, 0)
 

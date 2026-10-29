@@ -387,7 +387,7 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 			readFailure = errors.Join(ErrEpochRebuild, e)
 			break
 		}
-		if errors.Is(e, unix.EAGAIN) {
+		if errors.Is(e, unix.EAGAIN) || errors.Is(e, unix.EINTR) {
 			break
 		}
 		if e != nil {
