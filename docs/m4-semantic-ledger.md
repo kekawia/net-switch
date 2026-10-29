@@ -7,13 +7,20 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
+Updated 2026-10-29 by the app pin/unpin registration on main cf10c6db.
+The complete Control and ledger test JSON stream passed replay-report locally:
+`covered 23 / 7,894; uncovered 7871; pending map[]` (both exit codes 0).
+The seven annotations produce five receipts, one per test/hash/group; no OS
+restriction applies. Static inventory still credits zero. Missing read receipt,
+failed read subtest, and renamed root test mutations all failed their respective
+gates and were reverted; details are in [the API replay evidence](m4-native-api-replay.md).
+
 | Measure | Entries |
 | --- | ---: |
 | Hash-verified original entries consumed once by accounting | 7,894 |
-| Proven by native trace assertions on this branch | 0 |
-| Uncovered | 7,894 |
-| Of the uncovered entries, pending #107 | 23 |
-| Remaining after #107's 23 assertions land and are connected | 7,871 |
+| Proven by native trace assertions in a passing aggregate run | 23 |
+| Uncovered after that run | 7,871 |
+| Pending #107 | 0 |
 
 | Checked disposition (coverage is separate) | Entries |
 | --- | ---: |
@@ -91,6 +98,7 @@ The existing internal-package test step in `ci.yml` now builds the small report
 command and pipes the same test sweep straight into it (Windows and Linux):
 
 ```powershell
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 $PSNativeCommandUseErrorActionPreference = $false
 go build -o ./bin/replay-report.exe ./internal/replayledger/cmd/replay-report
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -124,8 +132,8 @@ There is no saved log; both native process exit codes are checked explicitly.
 PowerShell preserves the native Windows environment that Git Bash changed;
 see [the CI investigation and separate product follow-up](m4-ledger-ci-environment.md).
 The final line is `covered N / 7,894`, with
-uncovered and per-PR pending counts. The standalone inventory still reports zero
-until the executing native tests are connected; no static `covered` flag exists.
+uncovered and per-PR pending counts. The standalone inventory always reports zero
+covered; only aggregated executing tests earn credit. No static `covered` flag exists.
 
 Bindings may set `"os": "windows"` or `"os": "linux"` for genuinely
 OS-specific tests. Omit it for pure cross-platform replay. The joiner uses its
@@ -220,7 +228,7 @@ to those exact strings. Preserve each rule's kinds, disposition and obligation:
  annotations and groups: unchanged (#107's 23 rows retain their owners/status)
 ```
 
-The effective result is 188 registered appLine rows, with 23 still pending #107;
+The effective result adds 188 registered appLine rows alongside #107's 23 bound rows;
 all other traces remain untouched. This is **not only the 135-entry startup
 prefix**: the appLine subtest must also drive the recorded pin/unpin suffix and
 check its other 53 bookkeeping/completion entries, without emitting #107's 23
@@ -274,7 +282,7 @@ trace entries. `m4-native-lifecycle-replay.md` describes its additional regressi
 tests and limits. The ledger verifies these named test declarations still exist;
 it does not substitute that source check for executing their suites.
 
-PR #107 is read-only input to this work. Its 23 selected entries are pending:
+PR #107 binds these 23 selected entries to the executing cross-platform subtests:
 
 | Assertion | Original appLine sequences | Disposition |
 | --- | --- | --- |
@@ -298,8 +306,8 @@ moves or hides those entries. All rule writes in each interval must be members,
 even if somebody removes both an annotation and its group-member declaration.
 Missing triggers, barriers, publication boundaries, members or groups fail.
 These checks validate the plan's grouping, not the actual native ack semantics.
-#107 stays independent and registers itself after #108 merges. Its registration
-commit changes its seven annotations from `pending #107` to `uncovered`, keeps
+#107 rebases onto #108's merged main cf10c6db. Its registration
+changes its seven annotations from `pending #107` to `uncovered`, keeps
 the exact 23 sequences and test/subtest references, and adds Consume/Receipt
 calls to those passing native assertions. The AST check then requires the file
 and function to exist. Only a passing aggregated run flips those 23 report rows
@@ -308,14 +316,14 @@ relabel its other 188 entries as covered.
 
 ## Exact uncovered inventory
 
-All sequences below are inclusive and uncovered, including pending #107.
+All sequences below are inclusive and remain uncovered after #107's passing run.
 The full JSON report supplies each individual row without maintaining a second
 hand-written trace. Each trace starts at sequence zero.
 
 | Trace | Uncovered sequences | Count |
 | --- | --- | ---: |
 | adapterRename | 0–280 | 281 |
-| appLine | 0–210 | 211 |
+| appLine | 0–210 except the 23 bound sequences above | 188 |
 | busyFailedChecks | 0–686 | 687 |
 | capBlockedAndMainException | 0–274 | 275 |
 | capMoved | 0–221 | 222 |
@@ -339,11 +347,11 @@ hand-written trace. Each trace starts at sequence zero.
 | routingAndReads | 0–267 | 268 |
 | savedVersionOrder | 0–130 | 131 |
 | settingsSetupUpdate | 0–340 | 341 |
-| **Total** | | **7,894** |
+| **Total** | | **7,871** |
 
 | Input kind | Uncovered | Output kind | Uncovered |
 | --- | ---: | --- | ---: |
-| adapter-snapshot | 88 | api | 64 |
+| adapter-snapshot | 88 | api | 61 |
 | adapters | 1 | console | 25 |
 | async-result | 922 | engine | 408 |
 | clock-tick | 506 | event | 17 |
@@ -351,11 +359,11 @@ hand-written trace. Each trace starts at sequence zero.
 | connections | 40 | outside-close | 2 |
 | connectionsStatus | 2 | remove | 27 |
 | counter-sample | 453 | spawn | 33 |
-| directory-list | 17 | write | 368 |
+| directory-list | 17 | write | 356 |
 | engine-reply | 311 | | |
 | file-completion | 913 | | |
 | helper-line | 12 | | |
-| http | 64 | | |
+| http | 61 | | |
 | initial-files | 25 | | |
 | interfaces | 5 | | |
 | probe-result | 97 | | |
@@ -367,8 +375,8 @@ hand-written trace. Each trace starts at sequence zero.
 | release | 1 | | |
 | routes | 2 | | |
 | socket-completion | 116 | | |
-| state-snapshot | 34 | | |
-| timer-completion | 3 | | |
+| state-snapshot | 31 | | |
+| timer-completion | 1 | | |
 | update-reply | 4 | | |
 | updateStatus | 1 | | |
 
@@ -388,7 +396,7 @@ observations, not just their headline feature.
 | Reconnect and flow identity | reconnectPinned 154, reconnectShared 151 | 305 |
 | Lifecycle and read APIs | hungEngine 486, quitFailure 175, routingAndReads 268 | 929 |
 | Settings, setup, updates and migration | settingsSetupUpdate 341, migration 191 | 532 |
-| **Total outside pending #107** | | **7,871** |
+| **Total outside #107's bound entries** | | **7,871** |
 
 Build the shared native boundary and ordered comparator with the startup slice,
 then reuse it. Required follow-ups outside this 7,894-entry denominator remain:

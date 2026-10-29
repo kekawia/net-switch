@@ -125,6 +125,9 @@ func TestRangesAndRuleBindings(t *testing.T) {
 
 func TestPendingCountsPerPR(t *testing.T) {
 	m, traces := load(t)
+	for i := range m.Annotations {
+		m.Annotations[i].Status = "pending #107"
+	}
 	m.Annotations[0].Status = "pending #245"
 	r, err := Build(m, traces)
 	if err != nil {
@@ -178,7 +181,7 @@ func TestAppLineWorkedBindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registered, pending := 0, 0
+	registered, apiOwned := 0, 0
 	for _, row := range r.Rows {
 		if row.Hash != hash {
 			if row.Assertion == consumeIdentity {
@@ -188,13 +191,13 @@ func TestAppLineWorkedBindings(t *testing.T) {
 		}
 		if row.Assertion == consumeIdentity {
 			registered++
-		} else if row.Status == "pending #107" {
-			pending++
+		} else if row.Status == "uncovered" && strings.HasPrefix(row.Assertion, "internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/") {
+			apiOwned++
 		} else {
 			t.Fatal("unassigned worked-example row", row)
 		}
 	}
-	if registered != 188 || pending != 23 {
-		t.Fatal("worked mapping counts", registered, pending)
+	if registered != 188 || apiOwned != 23 {
+		t.Fatal("worked mapping counts", registered, apiOwned)
 	}
 }

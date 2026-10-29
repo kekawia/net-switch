@@ -7,6 +7,7 @@ import (
 	"io"
 	"path"
 	"runtime"
+	"slices"
 	"strings"
 )
 
@@ -129,8 +130,13 @@ func AggregateForOS(input io.Reader, r Report, log io.Writer, goos string) (Repo
 	if err := scanner.Err(); err != nil {
 		return r, err
 	}
-	for importPath := range failedBuilds {
-		return r, fmt.Errorf("build failed: %s", importPath)
+	if len(failedBuilds) != 0 {
+		paths := make([]string, 0, len(failedBuilds))
+		for importPath := range failedBuilds {
+			paths = append(paths, importPath)
+		}
+		slices.Sort(paths)
+		return r, fmt.Errorf("build failed: %s", strings.Join(paths, ", "))
 	}
 	if len(states) == 0 {
 		return r, fmt.Errorf("empty test stream")

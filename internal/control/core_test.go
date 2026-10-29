@@ -40,6 +40,9 @@ type memoryFiles struct {
 	order         []string
 	syncs         []string
 	beforeWrite   func(path string)
+	// Native replay observes the journal and rejects unexpected file effects;
+	// historical replay keeps its original externally visible file selection.
+	observeAllWrites bool
 }
 
 func (f *memoryFiles) recordOrder(kind string) {
@@ -49,7 +52,7 @@ func (f *memoryFiles) recordOrder(kind string) {
 }
 
 func (f *memoryFiles) recordWriteOrder(path string) {
-	if controlFile(path) || engineFile(path) {
+	if f.observeAllWrites || controlFile(path) || engineFile(path) {
 		f.order = append(f.order, "write:"+filepath.Base(path))
 	}
 }
@@ -107,9 +110,13 @@ func (f *memoryFiles) Remove(p string) error {
 }
 
 type fakeClock struct {
-	mu        sync.Mutex
-	at        time.Time
-	beforeNow func()
+	mu         sync.Mutex
+	at         time.Time
+	beforeNow  func()
+	afterCalls atomic.Uint64
+	// Replay can complete waits immediately while still detecting every wait.
+	// Other tests retain the original never-firing timer behavior.
+	afterImmediate bool
 }
 
 func (f *fakeClock) Now() time.Time {
@@ -120,7 +127,14 @@ func (f *fakeClock) Now() time.Time {
 	}
 	return f.at
 }
-func (f *fakeClock) After(time.Duration) <-chan time.Time { return make(chan time.Time) }
+func (f *fakeClock) After(time.Duration) <-chan time.Time {
+	f.afterCalls.Add(1)
+	ch := make(chan time.Time, 1)
+	if f.afterImmediate {
+		ch <- f.Now()
+	}
+	return ch
+}
 func (f *fakeClock) advance(ms int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

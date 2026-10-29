@@ -39,13 +39,13 @@
     {"kinds":["input:timer-completion"],"disposition":"obsolete","assertion":"acknowledgement-replaces-reload-wait"}
   ],
   "annotations": [
-    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[135,158,163,168,170],"disposition":"unchanged","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/pin","status":"pending #107"},
-    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[138,143,148,153],"disposition":"atomic-revision","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/pin","status":"pending #107","group":"appLine-pin"},
-    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[166],"disposition":"obsolete","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/pin","status":"pending #107"},
-    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[171,194,199,204,206],"disposition":"unchanged","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/unpin","status":"pending #107"},
-    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[174,179,184,189],"disposition":"atomic-revision","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/unpin","status":"pending #107","group":"appLine-unpin"},
-    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[202],"disposition":"obsolete","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/unpin","status":"pending #107"},
-    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[207,208,210],"disposition":"unchanged","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/read","status":"pending #107"}
+    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[135,158,163,168,170],"disposition":"unchanged","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/pin","status":"uncovered"},
+    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[138,143,148,153],"disposition":"atomic-revision","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/pin","status":"uncovered","group":"appLine-pin"},
+    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[166],"disposition":"obsolete","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/pin","status":"uncovered"},
+    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[171,194,199,204,206],"disposition":"unchanged","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/unpin","status":"uncovered"},
+    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[174,179,184,189],"disposition":"atomic-revision","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/unpin","status":"uncovered","group":"appLine-unpin"},
+    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[202],"disposition":"obsolete","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/unpin","status":"uncovered"},
+    {"hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","seqs":[207,208,210],"disposition":"unchanged","assertion":"internal/control/native_api_replay_test.go#TestNativeAPIPinReplay/read","status":"uncovered"}
   ],
   "groups": [
     {"name":"appLine-pin","hash":"80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11","members":[138,143,148,153],"begin":135,"end":170,"ack":166},

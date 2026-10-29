@@ -527,6 +527,7 @@ jobs:
       - name: Internal packages and native replay coverage
         shell: pwsh
         run: |
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
           $PSNativeCommandUseErrorActionPreference = $false
           Write-Host "Replay environment: TMP=$env:TMP TEMP=$env:TEMP"
           if ($IsWindows) {

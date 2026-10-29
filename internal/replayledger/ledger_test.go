@@ -39,7 +39,7 @@ func TestNativeSemanticLedger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Counts.Consumed != 7894 || r.Counts.Uncovered != 7894 || r.Counts.Covered != 0 || r.Counts.Pending["#107"] != 23 {
+	if r.Counts.Consumed != 7894 || r.Counts.Uncovered != 7894 || r.Counts.Covered != 0 || len(r.Counts.Pending) != 0 {
 		t.Fatalf("unexpected coverage: %+v", r.Counts)
 	}
 	// Inventory is not a native replay and must never emit coverage receipts.
