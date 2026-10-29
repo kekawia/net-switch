@@ -300,5 +300,5 @@ func TestNativeAPIPinReplay(t *testing.T) {
 	if len(consumed) != 23 {
 		t.Fatalf("mapped %d entries, want exactly 23 (188 explicitly uncovered)", len(consumed))
 	}
-	t.Log("mapping v1: appLine 23 checked entries; 188 uncovered; other 24 traces uncovered")
+	t.Log("mapping v1: appLine 23 checked entries; all other entries belong to separate replay owners")
 }

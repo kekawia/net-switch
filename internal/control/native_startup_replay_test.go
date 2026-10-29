@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 
@@ -29,6 +30,9 @@ type nativeStartupEngine struct {
 	applies    int
 	guardError error
 	probes     atomic.Uint64
+	probeCheck func(engine.ProbeRequest, engine.ProbeResult)
+	probeBegin func(engine.ProbeRequest)
+	desired    *engine.Revision
 }
 
 func twoLineNativeConfig(pins map[string]string) policy.Config {
@@ -56,22 +60,24 @@ func (e *nativeStartupEngine) Start(ctx context.Context, p engine.Policy) (err e
 			e.guardError = err
 		}
 	}()
-	// Service-mode Control prepares its desired revision through Apply before
-	// Start; compiled state may therefore already exist while status is off.
-	if e.Snapshot().Status != "off" {
-		return fmt.Errorf("start precondition: expected off engine")
+	if e.Snapshot().Status != "off" || e.active != nil || e.desired == nil {
+		return fmt.Errorf("start precondition: expected off engine with staged desired revision and no active policy")
 	}
-	// Start's policy has no revision number. Number 1 is only a compiler input;
-	// it is not published as an applied revision or acknowledgement.
-	if _, err = e.compile(engine.Revision{Number: 1, Policy: p}); err != nil {
+	if !reflect.DeepEqual(p, e.desired.Policy) {
+		return fmt.Errorf("start policy differs from staged desired revision")
+	}
+	if _, err = e.compile(*e.desired); err != nil {
 		return err
 	}
 	e.files.recordOrder("native:start")
 	if err = e.fakeEngine.Start(ctx, p); err != nil {
 		return err
 	}
-	if e.Snapshot().Status != "on" || e.Snapshot().Instance == "" || e.Snapshot().AppliedRevision != 0 {
-		return fmt.Errorf("start result guard: missing instance or premature revision publication")
+	if _, err = e.Apply(ctx, *e.desired); err != nil {
+		return err
+	}
+	if e.Snapshot().Status != "on" || e.Snapshot().Instance == "" || e.Snapshot().AppliedRevision != e.desired.Number {
+		return fmt.Errorf("start result guard: missing instance or acknowledged revision")
 	}
 	e.files.recordOrder("native:started")
 	return nil
@@ -86,7 +92,18 @@ func (e *nativeStartupEngine) CloseFlows(context.Context, engine.CloseRequest) (
 
 func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) engine.ProbeResult {
 	e.probes.Add(1)
-	return e.fakeEngine.Probe(ctx, r)
+	if e.probeBegin != nil {
+		e.probeBegin(r)
+	}
+	result := e.fakeEngine.Probe(ctx, r)
+	if e.probeCheck != nil {
+		e.probeCheck(r, result)
+	}
+	return result
+}
+
+func TestNativeStartupReplay(t *testing.T) {
+	t.Run("savedVersionOrder", func(t *testing.T) { replayNativeStartup(t, "savedVersionOrder") })
 }
 
 func (e *nativeStartupEngine) Apply(ctx context.Context, r engine.Revision) (ack engine.Acknowledgement, err error) {
@@ -107,6 +124,13 @@ func (e *nativeStartupEngine) Apply(ctx context.Context, r engine.Revision) (ack
 	compiled, err := e.compile(r)
 	if err != nil {
 		return ack, err
+	}
+	if before.Status != "on" {
+		// Match Remote.Apply: off-state acknowledgement stages desired policy,
+		// but has no apply point and must not publish loaded state.
+		e.desired = &r
+		e.files.recordOrder("native:desired")
+		return engine.Acknowledgement{Number: r.Number, Hash: r.Hash, Instance: before.Instance}, nil
 	}
 	e.files.recordOrder("native:apply")
 	ack, err = e.fakeEngine.Apply(ctx, r)
@@ -130,9 +154,67 @@ func (e *nativeStartupEngine) Apply(ctx context.Context, r engine.Revision) (ack
 // It intentionally cannot issue receipts: the owner must also check the native
 // operation behind each observation before passing it to the ledger cursor.
 type nativeTraceComparator struct {
-	entries []traceEntry
-	next    int
-	err     error
+	entries    []traceEntry
+	next       int
+	err        error
+	effects    *[]string
+	effectNext int
+	replies    map[string]bool
+	groups     map[string]bool
+}
+
+func (c *nativeTraceComparator) Effects(want ...string) error {
+	if c.err != nil {
+		return c.err
+	}
+	if c.effects == nil {
+		return fmt.Errorf("native effect stream is not attached")
+	}
+	got := (*c.effects)[c.effectNext:]
+	if !slices.Equal(got, want) {
+		c.err = fmt.Errorf("native ordered effects: got %v want %v", got, want)
+		return c.err
+	}
+	c.effectNext += len(got)
+	return nil
+}
+
+func (c *nativeTraceComparator) Begin(name string) error {
+	if c.groups == nil {
+		c.groups = map[string]bool{}
+	}
+	if c.groups[name] {
+		return fmt.Errorf("duplicate native group %s", name)
+	}
+	c.groups[name] = true
+	return nil
+}
+
+func (c *nativeTraceComparator) End(name string) error {
+	if !c.groups[name] {
+		return fmt.Errorf("unknown native group %s", name)
+	}
+	delete(c.groups, name)
+	return nil
+}
+
+func (c *nativeTraceComparator) Request(id string) error {
+	if c.replies == nil {
+		c.replies = map[string]bool{}
+	}
+	if id == "" || c.replies[id] {
+		return fmt.Errorf("empty/duplicate native request %s", id)
+	}
+	c.replies[id] = true
+	return nil
+}
+
+func (c *nativeTraceComparator) Reply(id string) error {
+	if !c.replies[id] {
+		return fmt.Errorf("unmatched native reply %s", id)
+	}
+	delete(c.replies, id)
+	return nil
 }
 
 func (c *nativeTraceComparator) Observe(seq int, kind string, actual json.RawMessage) error {
@@ -172,10 +254,52 @@ func (c *nativeTraceComparator) Finish() error {
 	if c.next != len(c.entries) {
 		return fmt.Errorf("missing behavioural observation at %d/%s", c.entries[c.next].Seq, c.entries[c.next].Kind)
 	}
+	if c.effects != nil && c.effectNext != len(*c.effects) {
+		return fmt.Errorf("leftover native effects: %v", (*c.effects)[c.effectNext:])
+	}
+	if len(c.replies) != 0 {
+		return fmt.Errorf("leftover native replies: %v", c.replies)
+	}
+	if len(c.groups) != 0 {
+		return fmt.Errorf("leftover native groups: %v", c.groups)
+	}
 	return nil
 }
 
 func TestNativeTraceComparator(t *testing.T) {
+	for _, kind := range []string{"effect", "reply", "group"} {
+		t.Run("leftover-"+kind, func(t *testing.T) {
+			effects := []string{}
+			c := nativeTraceComparator{effects: &effects}
+			switch kind {
+			case "effect":
+				effects = append(effects, "native:unexpected")
+			case "reply":
+				if err := c.Request("probe-1"); err != nil {
+					t.Fatal(err)
+				}
+			case "group":
+				if err := c.Begin("startup"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := c.Finish(); err == nil {
+				t.Fatal("leftover native evidence accepted")
+			}
+		})
+	}
+	t.Run("settled-native-boundary", func(t *testing.T) {
+		effects := []string{"native:apply", "native:ack"}
+		c := nativeTraceComparator{effects: &effects}
+		for _, err := range []error{c.Begin("revision"), c.Request("apply"), c.Reply("apply"), c.End("revision"), c.Effects("native:apply", "native:ack"), c.Finish()} {
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := c.Reply("apply"); err == nil {
+			t.Fatal("unmatched reply accepted")
+		}
+	})
 	entries := []traceEntry{
 		{Seq: 9, Kind: "write", Value: json.RawMessage(`{"appLines":{"first":"a1","second":"b2"},"optional":null}`)},
 		{Seq: 10, Kind: "api", Value: json.RawMessage(`{"lines":["a1","b2"]}`)},

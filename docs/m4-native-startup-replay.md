@@ -67,68 +67,112 @@ the test goroutine and does not stop other goroutines. Boundary callbacks return
 errors to their caller; the executing test reports them. The aggregate report
 must continue to require the subtest, parents and package to pass.
 
-## Delivered foundation, not a completed replay slice
+## Registered savedVersionOrder trace
 
-The shared `nativeStartupEngine` replaces the pin-only boundary. Both Start and
-Apply now compile and compare full literal native policies; Apply checks a
-monotonically advancing acknowledgement point, revision, hash and instance.
-The existing API replay uses it and retains its 23 receipts. No production
-source or mapping bindings change.
+All 131 entries now have executing owners. The aggregate adds them to the
+existing 23 appLine entries: **covered 154 / 7,894**, with 7,740 uncovered.
+All bindings are cross-platform; these tests use Windows identity rules
+explicitly without starting an engine process, service, listener, TUN or routes.
 
-`TestNativeStartupIdentityEvidence` checks empty pins and saved Discord version
-precedence through real Control and native policy compilation/decisions. It
-also compares the saved-version state API, including explicit nulls, array
-order, headers and absence of read-side effects. Raw saved JSON retains pin
-insertion order. The comparator rejects out-of-order/duplicate/missing entries,
-changed values, absent versus null and changed saved-key order. A failed
-comparison remains failed even if a later call retries it correctly.
+- 112 entries: `TestNativeStartupReplay/savedVersionOrder` in Control.
+- 17 obsolete listener/PID/spawn/version entries (7–8, 21–22, 57–58, 62–65,
+  93–99): `TestNativeStartupSessionReplacement` in lifecycle.
+- Two obsolete failed-cleanup entries (86–87):
+  `TestLegacyEmptyAppsReplacesPinsWithoutASentinel` in control/engine.
 
-This is **not** a completed trace, including the one-trace fallback requested in
-the brief. All 463 requested entries remain unregistered. The comparator checks
-ordered selected JSON observations; native transaction-group/effect/reply
-exhaustion still needs implementation before it can serve the full ledger
-contract. The fake still supplies lifecycle/probe plumbing. There is no proof
-of authenticated native session acquisition, capability negotiation or release.
-No generic callback completion is claimed as checked.
+Each owner selects its original-order rows from the hash-verified shared
+mapping, performs the behavioural checks, then emits its receipt. Existing
+appLine ownership is unchanged. There is no copied 131-entry expectation list.
 
-Continue in this order without adding whole-trace bindings prematurely:
+### Native replacements and guards
 
-1. Finish savedVersionOrder's 131 entries: observable file results from Store
-   construction (including missing files), native session/endpoint replacement,
-   explicit readdir failure replacement, ordered journal/start/apply/ack,
-   physical probe requests/results and diagnostic completions. Extend Finish
-   to reject leftover native effects, replies and groups. Register that trace
-   only when all rows have behavioural evidence.
-2. Reuse that startup driver for legacyCaseOrder (144), preserving ordered
-   migration, generated resource identities and settings/backup/log boundaries.
-3. Replay appLine startup plus its remaining suffix bookkeeping (188), preserving
-   the existing 23 API owners. Then the aggregate target is 486.
+| Original kind / operation | Native evidence and named guard |
+| --- | --- |
+| initial-files | Real Store load retains the saved raw JSON and ordered app identities; `ordered settings read` and `saved setting`. |
+| file-completion: settings, Undo, usage reads | Observe actual read bytes/errors during construction, including fs.ErrNotExist; `actual store read result`. |
+| package read / mkdir | Obsolete representation: host-supplied Core version and constructed settings/journal stores replace package metadata and adapter-directory setup. The API proves the supplied version is exposed. This is not a disk-permissions test. |
+| adapter-snapshot / platform.detectAdapters | Recorded inputs go through RefreshAdapters/ApplyNetwork, not direct final-state assignment; `platform operations` and `production adapter observation`. |
+| counter-sample | Null physical counters remain unknown, with no invented routed bytes; initial Poll and exact usage-file contents. |
+| platform.readDefaultRoutes / readMinimizeConnectionsPolicy / isElevated | One native worker network snapshot consolidates same-time adapter/routes/policy reads; every original result is compared against the resulting state. Elevation runs through CheckElevation. |
+| socket-completion / spawn / PID read-write / version request-reply | Obsolete stand-in mechanisms bound to the named native session contract below, not fake listeners or PID files. |
+| server/usage write and file-completion | Actual atomic write/rename results, persisted JSON, destination and order; `actual atomic native publication`. |
+| apps/share/cut/config writes and completions / lane request-reply | Complete literal native policy, matching acknowledgement, exact lane selectors/results and pin decisions; `complete acknowledged revision`. No adapter file is written. |
+| failed readdir and its completion | Explicit ERR_INVALID_ARG_TYPE remains classified as failure, not a successful list. The existing native flow-table replacement test first proves a pin exists, replaces the complete revision, then proves it disappeared without a sentinel. |
+| probe request / probe-result / delay JSON result | Physical line, unique operation ID, interface index, operator, kind, instance, outcome and 18 ms latency; completed round state before API. The healthy startup takes one successful quick check per line, not an invented full round. |
+| log / log.append result | Ordered native diagnostics and exact callback arguments/null/undefined semantics; pending diagnostic callbacks must drain. Worker-source wording changes under §4.3; conditions and order remain. |
+| log.rotate | Obsolete private child-log representation. The named startup test proves native diagnostic delivery and absence of child log/config/PID artifacts; no fake rotation is introduced. |
+| console | Production PublishSession return, alongside the atomic session write and announcement order. |
+| http / api | Real HTTP handler and complete ordered request/response comparison, including status, headers, nulls and array order. Only §4.5's third default probe is translated. No read-side effects or clock advance. |
+| completion | Original ID/kind/adjacency checked; receipt inherits the already checked completed native operation. Unsupported or unproved operations cannot earn markers. |
 
-## Local validation and mutations
+The native session replacement invokes the existing real in-memory protocol
+tests for hello/instance mapping, required capabilities, Start/Apply points,
+release/reacquisition through reattach, and acknowledged cleanup. It validates
+that its bound original entries are only the explicitly retired kinds.
+Transport trust is supplied by the fixture; net.Pipe is **not** proof of OS peer
+authentication, installed endpoint ACLs or real service cleanup. Those remain
+the existing installed/identity gates. This is the named-contract substitution
+permitted by the handoff; it does not manufacture socket activity inside Control.
 
-Pure Control and ledger tests run at Idle priority, GOMAXPROCS=2, -p 2 with the
-pinned Go 1.27.3. JSON streams go directly into replay-report, with both native
-exit codes checked and no saved logs. Initial helper failures were fixture
-mistakes: service-mode Control prepares an Apply while off before Start, and
-engine owner IDs need the same Windows normalization as the real attribution
-boundary. Correcting these test assumptions required no product change.
+The ordered native stream includes construction reads, logs, journal writes,
+session/usage publication, staged desired policy, Start, Apply/ack and probe
+round boundaries. `Finish` rejects unconsumed effects, outstanding replies,
+open groups and unobserved API entries. Tests deliberately leave each kind of
+remainder behind and require failure. Original callback order is checked
+without independently sorting effect kinds.
 
-Four temporary mutations were run through the aggregate gate and reverted:
+### Startup publication defect found and fixed
 
-- Remove the existing API read receipt: producer 0, report 1, three missing
-  required receipts beginning at appLine:207.
-- Fail that read subtest before Receipt: producer 1, report 1; emission refused
-  for the failed test.
-- Drop the saved-version API Observe call: producer 1, report 1; Finish reports
-  `missing behavioural observation at 130/api`.
-- Reverse the two saved Discord keys in the in-memory input: producer 1,
-  report 1; literal policy guard reports a1 instead of b2 for the normalized
-  Discord identity. Frozen fixture bytes were never edited.
+The previous fake published an Apply while off, then reset its revision during
+Start. Real Remote.Apply only stages desired state while off; native Start
+returns with that revision already loaded. The shared boundary now models
+that contract, also checked by the existing real protocol Start/Apply test.
 
-The first two proofs apply to existing registered rows; the last two prove the
-new supporting checks affect the gate, not that new rows have earned receipts.
+This exposed a product bug in Control's already-applied fast path: it returned
+without publishing lane targets/diagnostics after native Start. Startup lacked
+both lane logs; they appeared later during an unrelated pin request. The fix
+publishes matching lane state on that fast path, after any required journal
+update, with a generation check. Repeating ApplyPolicy produces neither a new
+apply nor repeated logs. This is parity restoration under §§4.1/4.4, not a new
+allowed divergence. Repository issue search found no existing report.
 
-Restored final aggregate: `covered 23 / 7,894; uncovered 7871; pending map[]`,
-producer 0 and report 0. Control passed in 3.109 s and replayledger in 4.029 s.
-The repository dependency graph reported no problems; formatting and diff
-whitespace checks passed. Hosted checks and independent review remain pending.
+### Validation and sensitivity
+
+The pure Control, control/engine and ledger suites, followed by the selected
+native lifecycle contract, stream go test JSON directly into replay-report.
+All commands use pinned Go 1.27.3, Idle priority, GOMAXPROCS=2 and -p 2; both
+producer exit codes and the report exit code are checked. No logs are saved.
+
+The restored final stream reported 154 covered / 7,894, with both producers
+and the report exiting 0. The dependency graph reported no problems, and all
+13 workflow gate tests passed (28,932 evaluated gate cases). Frozen reference
+and oracle bytes remain unchanged.
+
+Mutations executed and reverted on the newly registered trace:
+
+- Remove the startup receipt: producers 0/0, report 1, missing 112 entries
+  starting at savedVersionOrder:0.
+- Fail its subtest after checks: producers 1/0, report 1; Receipt refuses emission.
+- Remove the actual HTTP replay/comparison call: producers 1/0, report 1;
+  Finish reports missing behavioural observation at 129/http.
+- Remove the product fast-path publication fix: producers 1/0, report 1;
+  startup lacks lane logs and the existing pin replay detects delayed logs.
+
+Earlier foundation mutations also showed saved-version key reversal changes
+the compiled pin from b2 to a1 and fails the literal policy guard.
+
+Validation corrections: an initial PowerShell consumer script did not forward
+stdin and the report rejected its empty stream; the corrected pipeline connects
+the native commands directly. New annotations exposed a ledger unit test that
+assumed every annotation belonged to the original 23 API rows; its pending-PR
+fixture now explicitly selects those API annotations. No coverage gate was
+weakened.
+
+### Remaining work
+
+This checkpoint completes 131 of this slice's 463 new entries (28%).
+Continue with legacyCaseOrder (144), then appLine startup and suffix bookkeeping
+(188). Their existing original fixtures, per-kind mapping and native boundary
+are reused; only trace-specific literals, migration identities and suffix
+operations need extending. Target after both: 486 covered. Hosted checks and
+independent review remain pending.

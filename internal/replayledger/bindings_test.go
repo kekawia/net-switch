@@ -126,7 +126,11 @@ func TestRangesAndRuleBindings(t *testing.T) {
 func TestPendingCountsPerPR(t *testing.T) {
 	m, traces := load(t)
 	for i := range m.Annotations {
-		m.Annotations[i].Status = "pending #107"
+		// This fixture splits the original 23 API entries across two PRs.
+		// Later trace registrations must not silently enlarge that fixture.
+		if strings.HasPrefix(m.Annotations[i].Assertion, "internal/control/native_api_replay_test.go#") {
+			m.Annotations[i].Status = "pending #107"
+		}
 	}
 	m.Annotations[0].Status = "pending #245"
 	r, err := Build(m, traces)

@@ -125,3 +125,11 @@ Three temporary mutations were tested and reverted:
 The report now lists all failed build import paths in sorted order, with a
 two-order regression. The shared CI replay step explicitly selects UTF-8.
 Hosted checks at this rebased head remain pending; CI was not watched.
+
+The later [startup replay](m4-native-startup-replay.md) now shares this slice's
+native boundary and registers savedVersionOrder separately. The current
+aggregate is 154 entries; this API test still owns exactly its original 23.
+The startup work also restores initial lane publication when native Start has
+already acknowledged its revision; the failure and reverted mutation are
+documented there. Earlier validation results above describe the API slice at
+the time it first registered.

@@ -7,40 +7,43 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
-Updated 2026-10-29 by the app pin/unpin registration on main cf10c6db.
-The complete Control and ledger test JSON stream passed replay-report locally:
-`covered 23 / 7,894; uncovered 7871; pending map[]` (both exit codes 0).
-The seven annotations produce five receipts, one per test/hash/group; no OS
-restriction applies. Static inventory still credits zero. Missing read receipt,
-failed read subtest, and renamed root test mutations all failed their respective
-gates and were reverted; details are in [the API replay evidence](m4-native-api-replay.md).
+Updated 2026-10-29 by savedVersionOrder registration in PR #110.
+The pure Control, control/engine and ledger suites plus the selected native
+lifecycle contract passed the aggregate locally:
+`covered 154 / 7,894; uncovered 7740; pending map[]` (all exit codes 0).
+The existing five API receipts plus three startup/replacement receipts cover
+154 entries without an OS restriction. Static inventory still credits zero.
+Missing startup receipt, failing subtest, dropped HTTP behavioural check and
+removal of the startup publication fix all failed the gate and were reverted.
+See [startup replay evidence](m4-native-startup-replay.md).
 
 | Measure | Entries |
 | --- | ---: |
 | Hash-verified original entries consumed once by accounting | 7,894 |
-| Proven by native trace assertions in a passing aggregate run | 23 |
-| Uncovered after that run | 7,871 |
+| Proven by native trace assertions in a passing aggregate run | 154 |
+| Uncovered after that run | 7,740 |
 | Pending #107 | 0 |
 
 | Checked disposition (coverage is separate) | Entries |
 | --- | ---: |
 | Unchanged external observation | 1,284 |
-| Translated native operation/result | 6,582 |
+| Translated native operation/result | 6,555 |
 | Member of a named atomic revision | 8 |
-| Obsolete representation with a replacement assertion | 20 |
+| Obsolete representation with a replacement assertion | 47 |
 | Total | 7,894 |
 
 The distinction matters: assigning an assertion obligation to a completion or
 log is not proof that native Control produced that completion or log. No feature
 test is credited for entries it never read. The current generic obligations
-remain uncovered, including all 3,003 completion markers. No assertion name
+remain uncovered, including 2,950 of the 3,003 completion markers. No assertion name
 alone, or a manually edited `covered` status, earns coverage.
 
 ## Implementation and use
 
 `internal/replayledger/mapping.json` is the versioned, machine-readable source.
-It has 25 original SHA-256 keys, eight generic rules, seven sequence annotations
-for #107, two atomic groups, and references to the existing supporting tests.
+It has 25 original SHA-256 keys, eight generic rules with savedVersionOrder
+bindings, ten sequence annotations (seven API and three startup replacements),
+two atomic groups, and references to existing supporting tests.
 It contains no copied fixture payloads. The fixtures and provenance are read
 from their existing `tests/oracle` paths, never regenerated or rewritten.
 
@@ -178,10 +181,10 @@ adapter reordering. Record all effects in one stream through `recordOrder`;
 do not compare separately sorted kind lists. The comparator reports success
 to the test, which then calls Cursor.Consume. Its `Finish` checks no effects,
 replies or groups remain. The [startup foundation](m4-native-startup-replay.md)
-now supplies `nativeStartupEngine` and the selected-value portion of
-`nativeTraceComparator`. Native transaction/effect/reply exhaustion and complete
-startup replay remain unfinished; these helpers earn no new receipts by
-themselves and must not be mistaken for full native startup proof.
+now supplies `nativeStartupEngine`, ordered selected-value/effect comparisons,
+and reply/group exhaustion. savedVersionOrder is registered end to end with
+explicit named lifecycle and stale-state replacement contracts; other traces
+still need their own startup inputs and receipts.
 
 Each subtest calls `DefaultMapping`, `Load("../..", mapping)`, and `Build`, then
 selects the original-order rows whose hash matches its fixture and whose
@@ -318,7 +321,8 @@ relabel its other 188 entries as covered.
 
 ## Exact uncovered inventory
 
-All sequences below are inclusive and remain uncovered after #107's passing run.
+All sequences below are inclusive and remain uncovered after the API and
+savedVersionOrder passing aggregate.
 The full JSON report supplies each individual row without maintaining a second
 hand-written trace. Each trace starts at sequence zero.
 
@@ -347,28 +351,28 @@ hand-written trace. Each trace starts at sequence zero.
 | reconnectPinned | 0–153 | 154 |
 | reconnectShared | 0–150 | 151 |
 | routingAndReads | 0–267 | 268 |
-| savedVersionOrder | 0–130 | 131 |
+| savedVersionOrder | None (0–130 registered) | 0 |
 | settingsSetupUpdate | 0–340 | 341 |
-| **Total** | | **7,871** |
+| **Total** | | **7,740** |
 
 | Input kind | Uncovered | Output kind | Uncovered |
 | --- | ---: | --- | ---: |
-| adapter-snapshot | 88 | api | 61 |
-| adapters | 1 | console | 25 |
-| async-result | 922 | engine | 408 |
+| adapter-snapshot | 86 | api | 60 |
+| adapters | 1 | console | 24 |
+| async-result | 904 | engine | 403 |
 | clock-tick | 506 | event | 17 |
-| completion | 3,003 | log | 279 |
+| completion | 2,950 | log | 272 |
 | connections | 40 | outside-close | 2 |
 | connectionsStatus | 2 | remove | 27 |
-| counter-sample | 453 | spawn | 33 |
-| directory-list | 17 | write | 356 |
-| engine-reply | 311 | | |
-| file-completion | 913 | | |
+| counter-sample | 451 | spawn | 32 |
+| directory-list | 17 | write | 348 |
+| engine-reply | 308 | | |
+| file-completion | 891 | | |
 | helper-line | 12 | | |
-| http | 61 | | |
-| initial-files | 25 | | |
+| http | 60 | | |
+| initial-files | 24 | | |
 | interfaces | 5 | | |
-| probe-result | 97 | | |
+| probe-result | 95 | | |
 | probe-vote | 35 | | |
 | probes | 3 | | |
 | process-exit | 10 | | |
@@ -376,7 +380,7 @@ hand-written trace. Each trace starts at sequence zero.
 | refresh-adapters | 1 | | |
 | release | 1 | | |
 | routes | 2 | | |
-| socket-completion | 116 | | |
+| socket-completion | 112 | | |
 | state-snapshot | 31 | | |
 | timer-completion | 1 | | |
 | update-reply | 4 | | |
@@ -384,21 +388,22 @@ hand-written trace. Each trace starts at sequence zero.
 
 ## Remaining slices
 
-These disjoint counts partition the entire 7,871 entries outside #107. Shared
+These disjoint counts partition the remaining 7,740 entries outside the API
+and savedVersionOrder receipts. Shared
 startup machinery should be implemented once; each trace must still supply and
 consume its own startup entries. Slices include completions and all external
 observations, not just their headline feature.
 
 | Slice | Traces / entries | Total |
 | --- | --- | ---: |
-| Startup and saved app identities | appLine remainder 188, legacyCaseOrder 144, savedVersionOrder 131 | 463 |
+| Startup and saved app identities | appLine remainder 188, legacyCaseOrder 144; savedVersionOrder complete | 332 |
 | Policy transactions, caps and physical usage | combining 197, combiningNoOpenLine 298, capBlockedAndMainException 275, capMoved 222, capReset 256, midnightGap 188 | 1,436 |
 | Health, probes and route votes | failoverFailback 232, busyFailedChecks 687, probeFailover 749, lostDefaultRoute 395 | 2,063 |
 | Live line/IPv6 revisions | adapterRename 281, ipv6 1,153, lineAdd 201, lineOrder 274, lineRemove 234 | 2,143 |
 | Reconnect and flow identity | reconnectPinned 154, reconnectShared 151 | 305 |
 | Lifecycle and read APIs | hungEngine 486, quitFailure 175, routingAndReads 268 | 929 |
 | Settings, setup, updates and migration | settingsSetupUpdate 341, migration 191 | 532 |
-| **Total outside #107's bound entries** | | **7,871** |
+| **Total still uncovered** | | **7,740** |
 
 Build the shared native boundary and ordered comparator with the startup slice,
 then reuse it. Required follow-ups outside this 7,894-entry denominator remain:
@@ -409,8 +414,9 @@ pagination/concurrency replacements, installed parity and removal gates.
 
 ## Validation and review boundary
 
-Pure package only; no runtime code is changed and no engine, service, TUN or
-route is started. The normal internal-package CI sweep includes this package.
+The ledger itself is pure accounting. The startup replay also fixes Control's
+already-applied lane publication; see its evidence doc. No engine, service, TUN
+or route is started locally. The normal internal-package CI sweep includes this package.
 The test checks the original request/reply stream, including all 97 `/delay`
 requests omitted by the old cross-kind comparison, and rejects leftover replies,
 missing responses, unsupported kinds (including future exit), detached/missing

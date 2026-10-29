@@ -43,6 +43,20 @@ type memoryFiles struct {
 	// Native replay observes the journal and rejects unexpected file effects;
 	// historical replay keeps its original externally visible file selection.
 	observeAllWrites bool
+	observeReads     bool
+	reads            []recordedRead
+	fileResults      []recordedFileResult
+}
+
+type recordedFileResult struct {
+	Operation, Path, Destination string
+	Err                          error
+}
+
+type recordedRead struct {
+	Path  string
+	Bytes []byte
+	Err   error
 }
 
 func (f *memoryFiles) recordOrder(kind string) {
@@ -66,17 +80,32 @@ func (f *memoryFiles) ReadFile(p string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	b, ok := f.data[p]
+	if f.observeReads {
+		var err error
+		result := "ok"
+		if !ok {
+			err = fs.ErrNotExist
+			result = "missing"
+		}
+		f.reads = append(f.reads, recordedRead{p, append([]byte(nil), b...), err})
+		f.order = append(f.order, "read:"+filepath.Base(p)+":"+result)
+	}
 	if !ok {
 		return nil, fs.ErrNotExist
 	}
 	return append([]byte{}, b...), nil
 }
-func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) error {
+func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) (err error) {
 	if f.beforeWrite != nil {
 		f.beforeWrite(p)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	defer func() {
+		if f.observeReads {
+			f.fileResults = append(f.fileResults, recordedFileResult{"writeFile", p, "", err})
+		}
+	}()
 	if f.fail || f.failPrefix != "" && strings.HasPrefix(p, f.failPrefix) {
 		return errors.New("disk full")
 	}
@@ -87,9 +116,14 @@ func (f *memoryFiles) WriteFile(p string, b []byte, _ fs.FileMode) error {
 	}
 	return nil
 }
-func (f *memoryFiles) Rename(a, b string) error {
+func (f *memoryFiles) Rename(a, b string) (err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	defer func() {
+		if f.observeReads {
+			f.fileResults = append(f.fileResults, recordedFileResult{"rename", a, b, err})
+		}
+	}()
 	v, ok := f.data[a]
 	if !ok {
 		return fs.ErrNotExist
@@ -384,6 +418,11 @@ func testCore(t *testing.T, initial map[string]any) (*Core, *fakeEngine, *fakeCl
 // over the same data folder.
 func testCoreWithFiles(t *testing.T, files *memoryFiles, clock *fakeClock) (*Core, *fakeEngine, *fakeClock, *memoryFiles) {
 	t.Helper()
+	return testCoreWithFilesMode(t, files, clock, false)
+}
+
+func testCoreWithFilesMode(t *testing.T, files *memoryFiles, clock *fakeClock, serviceMode bool) (*Core, *fakeEngine, *fakeClock, *memoryFiles) {
+	t.Helper()
 	var serial atomic.Uint64
 	id := func() string { return fmt.Sprintf("%012x", serial.Add(1)) }
 	io := settings.Options{Files: files, Now: clock.Now, ID: id, Sleep: func(time.Duration) {}}
@@ -395,8 +434,10 @@ func testCoreWithFiles(t *testing.T, files *memoryFiles, clock *fakeClock) (*Cor
 	undo.FileName = "windows-undo.json"
 	undo.Defaults = map[string]any{"metrics": map[string]any{}, "policy": map[string]any{}}
 	us := settings.New("/test", undo)
-	if _, err := us.Load(); err != nil {
-		t.Fatal(err)
+	if !serviceMode {
+		if _, err := us.Load(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	journal := io
 	journal.SyncFile = func(path string) error {
@@ -407,9 +448,19 @@ func testCoreWithFiles(t *testing.T, files *memoryFiles, clock *fakeClock) (*Cor
 	}
 	journal.FileName = "control-journal.json"
 	journal.Defaults = map[string]any{"revision": float64(0), "closures": []any{}, "desired": map[string]any{}, "settings": map[string]any{}}
+	if serviceMode {
+		// Match lifecycle/control.go: absent desired/settings are not an empty
+		// recovery transaction that rewrites the user's saved settings.
+		journal.Defaults = map[string]any{"revision": float64(0), "closures": []any{}}
+	}
 	j := settings.New("/test", journal)
 	if _, err := j.Load(); err != nil {
 		t.Fatal(err)
+	}
+	if serviceMode {
+		if _, err := us.Load(); err != nil {
+			t.Fatal(err)
+		}
 	}
 	f := &fakeEngine{s: engine.Snapshot{Status: "off", Instance: "test-engine", Policy: engine.Policy{}}}
 	p := &fakePlatform{recordClose: func(v any) {
@@ -418,7 +469,7 @@ func testCoreWithFiles(t *testing.T, files *memoryFiles, clock *fakeClock) (*Cor
 		files.outsideCloses = append(files.outsideCloses, decoded)
 		files.recordOrder("outside-close")
 	}}
-	c, err := New(context.Background(), Options{Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, LineID: func() string { return fmt.Sprintf("%06x", serial.Add(1)) }, Background: func(fn func()) { fn() }, Log: func(s string) {
+	c, err := New(context.Background(), Options{ServiceMode: serviceMode, Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: time.UTC, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, LineID: func() string { return fmt.Sprintf("%06x", serial.Add(1)) }, Background: func(fn func()) { fn() }, Log: func(s string) {
 		files.mu.Lock()
 		files.logs = append(files.logs, s)
 		files.order = append(files.order, traceLogKey(s))
