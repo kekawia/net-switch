@@ -3,6 +3,10 @@
 This is the first coherent part of the 27 October attribution design's PR 1,
 not its completed kernel proof. Nothing here is registered in the engine.
 
+29 October: implementation is stopped at a modern-kernel design gap documented
+in [the raw-tracepoint recursion finding](linux-owner-raw-recursion-blocker.md).
+No bridge or floor guest is qualified by this contract slice.
+
 ## What is implemented
 
 - Native-endian ABI 3 packet record (128 bytes), reader registration (48),
