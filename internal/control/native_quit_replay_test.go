@@ -16,7 +16,20 @@ import (
 )
 
 // Reusable HTTP transport only: Control owns every action and its response.
-func replayNativeHTTP(t *testing.T, c *Core, trace replayledger.Trace, cmp *nativeTraceComparator, begin, end int) {
+type nativeSnapshotRecorder struct {
+	*httptest.ResponseRecorder
+	beforeWrite func()
+}
+
+func (w *nativeSnapshotRecorder) Write(b []byte) (int, error) {
+	if fn := w.beforeWrite; fn != nil {
+		w.beforeWrite = nil
+		fn()
+	}
+	return w.ResponseRecorder.Write(b)
+}
+
+func replayNativeHTTP(t *testing.T, c *Core, trace replayledger.Trace, cmp *nativeTraceComparator, begin, end int, afterSnapshot ...func()) {
 	t.Helper()
 	var in struct {
 		Method, Route string
@@ -31,14 +44,17 @@ func replayNativeHTTP(t *testing.T, c *Core, trace replayledger.Trace, cmp *nati
 	for k, v := range in.Headers {
 		r.Header.Set(k, v)
 	}
-	input := map[string]any{"method": r.Method, "route": r.URL.Path, "headers": in.Headers}
+	input := map[string]any{"method": r.Method, "route": r.URL.RequestURI(), "headers": in.Headers}
 	if len(in.Body) != 0 {
 		input["body"] = replayJSON(t, in.Body)
 	}
 	if err := cmp.Observe(begin, "http", mustStartupJSON(t, input)); err != nil {
 		t.Fatal(err)
 	}
-	w := httptest.NewRecorder()
+	w := &nativeSnapshotRecorder{ResponseRecorder: httptest.NewRecorder()}
+	if len(afterSnapshot) > 0 {
+		w.beforeWrite = afterSnapshot[0]
+	}
 	(&HTTP{Core: c, Port: 47821, Token: "native-replay"}).ServeHTTP(w, r)
 	headers := map[string]string{}
 	for k := range w.Header() {

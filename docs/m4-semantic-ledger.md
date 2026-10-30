@@ -7,6 +7,10 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
+Completed routingAndReads, 2026-10-30: 268 more entries, passing local aggregate
+**7,362 / 7,894** (532 uncovered), exits 0/0/0. Settings/setup/update and
+migration are the only remaining original traces.
+
 Completed hungEngine, 2026-10-30: 486 more entries, passing local aggregate
 **7,094 / 7,894** (800 uncovered), exits 0/0/0. Failed observations preserve
 the native instance and recover without the retired poll-count restart.

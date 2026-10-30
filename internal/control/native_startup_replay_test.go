@@ -120,6 +120,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("routingAndReads", func(t *testing.T) { replayNativeStartup(t, "routingAndReads") })
 	t.Run("hungEngine", func(t *testing.T) { replayNativeStartup(t, "hungEngine") })
 	t.Run("quitFailure", func(t *testing.T) { replayNativeStartup(t, "quitFailure") })
 	t.Run("reconnectPinned", func(t *testing.T) { replayNativeStartup(t, "reconnectPinned") })

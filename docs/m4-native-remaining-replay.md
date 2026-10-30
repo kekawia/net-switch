@@ -1,5 +1,25 @@
 # Remaining native trace slices
 
+## routingAndReads
+
+All 268 entries are registered. Ping, installed apps, missing icon, routing off,
+two off-state ticks, state reads and routing on all execute through real Control
+and HTTP. Full responses include the installed-app array and icon query string.
+The installed-app and app-info calls are ordered and counted. Off intent is
+durable before Stop; two ticks neither restart nor query the stopped engine.
+Control remains uncancelled and keeps the original session bytes throughout.
+
+The second Start stages and acknowledges a complete native revision. Its rule
+files consume a distinct acknowledgement in the existing cursor. Both physical
+checks retain operator rotation and instance/kind fencing. The historical first
+on-response captured b2's ping before its probe completed. The test dispatcher
+defers that probe until response bytes have been constructed, then completes it
+before delivery. It asserts the pending starting condition and exact snapshot
+time; the following state read sees both completed results. No expected response
+field is changed to mask this timing boundary.
+
+Aggregate **7,362 / 7,894**, 532 uncovered, exits **0/0/0**. No product changes.
+
 ## hungEngine
 
 All 486 entries are registered. The existing health driver feeds 20 failed
