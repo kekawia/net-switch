@@ -7,6 +7,11 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
+Completed settingsSetupUpdate: the Windows aggregate now passes at
+**7,894 / 7,894**, zero uncovered, exits 0/0/0/0. Two Windows ACL-policy entries
+are OS-scoped; Linux has 7,892 applicable entries. Acknowledgement and remaining
+lifecycle follow-up verification is recorded below when complete.
+
 Completed migration, 2026-10-30: 191 more entries, passing local aggregate
 **7,553 / 7,894** (341 uncovered), exits 0/0/0. Only settingsSetupUpdate
 remains among the original traces.

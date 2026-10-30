@@ -73,6 +73,9 @@ func newStartupCounterparts(files *memoryFiles, cmp *nativeTraceComparator, firs
 		}
 		add("async-result", op, find(key))
 	}
+	if source := find("platform:autostart"); source >= 0 {
+		add("async-result", "platform.readAutostart", source)
+	}
 	log(i)
 	appendLog(i)
 	i++ // session announcement

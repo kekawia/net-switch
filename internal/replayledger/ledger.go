@@ -90,8 +90,9 @@ type Trace struct {
 	Name     string  `json:"name"`
 	Entries  []Entry `json:"entries"`
 	Scenario struct {
-		Now      *int64 `json:"now"`
-		Timezone string `json:"timezone"`
+		Now         *int64         `json:"now"`
+		Timezone    string         `json:"timezone"`
+		Environment map[string]any `json:"environment"`
 	} `json:"scenario"`
 }
 

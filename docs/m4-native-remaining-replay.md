@@ -1,5 +1,31 @@
 # Remaining native trace slices
 
+## settingsSetupUpdate
+
+The final 341 original entries are registered. Real Control executes autostart
+changes, custom probes, setup, ordered Undo, disabled and forced update checks,
+offer dismissal, release parsing and failed update observation. Inputs supply
+platform outcomes and release responses, never expected state. Every full HTTP
+response, native effect stream, platform argument, publication and callback is
+checked in order. Each request asserts its starting state, including accumulated
+Undo. The native engine snapshot is unchanged throughout.
+
+The settings/Undo file cursor checks each actual write/rename; custom probes
+require the explicit probeTargetsCustom marker in both journal copies. The old
+per-user store maps to the service's unified store, with distinct settings and
+Undo names. The original environment now survives ledger decoding so installed
+autostart eligibility comes from its userDir rather than the response.
+
+The Windows-only protectMachineDir callback and completion are bound to
+TestTrustedMachineSecurity: the native ACL policy accepts trusted owners and
+rejects untrusted owners, null/missing DACLs and dangerous grants. This is pure
+descriptor-policy execution, not installed ACL application. The two rows are
+Windows-scoped; Linux aggregates have 7,892 applicable rows. Installed protection
+remains separately covered by the existing machine-folder tests and CI.
+
+Local Windows aggregate: **7,894 / 7,894**, zero uncovered, producer/lifecycle/
+Windows-policy/report exits **0/0/0/0**. No product behavior or frozen data changed.
+
 ## Gate mutations and current checkpoint
 
 Four new mutations ran through the full pure aggregate and were reverted:

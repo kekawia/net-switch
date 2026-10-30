@@ -48,6 +48,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
+	settingsSlice := name == "settingsSetupUpdate"
 	migration := name == "migration"
 	migrated := name == "legacyCaseOrder" || migration
 	quitSlice := name == "quitFailure" || name == "routingAndReads"
@@ -58,7 +59,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
 	ownerLine := secondLine
-	if name == "appLine" || name == "combining" || usageSlice || healthSlice || liveSlice || reconnectSlice || quitSlice {
+	if name == "appLine" || name == "combining" || usageSlice || healthSlice || liveSlice || reconnectSlice || quitSlice || settingsSlice {
 		pins = map[string]string{}
 		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
 		ownerLine = firstLine
@@ -126,6 +127,22 @@ func replayNativeStartup(t *testing.T, name string) {
 		}
 	}
 	var initial struct{ Settings json.RawMessage }
+	if settingsSlice {
+		if trace.Scenario.Environment["userDir"] != "/oracle/user" {
+			t.Fatal("installed settings scenario")
+		}
+		// Native service stores consolidate the old per-user and machine stores.
+		for i := range trace.Entries {
+			if i == 7 {
+				continue
+			} // Windows ACL evidence owns the original callback.
+			b, err := rewriteTraceStrings(trace.Entries[i].Value, func(s string) string { return strings.ReplaceAll(s, "/oracle/user", "/oracle/data") })
+			if err != nil {
+				t.Fatal(err)
+			}
+			trace.Entries[i].Value = b
+		}
+	}
 	if err := json.Unmarshal(trace.Entries[0].Value, &initial); err != nil {
 		t.Fatal(err)
 	}
@@ -316,6 +333,20 @@ func replayNativeStartup(t *testing.T, name string) {
 	equal("route result", c.routes, routes)
 	equal("policy result", c.policy, policyValue)
 	check("platform effects", cmp.Effects("platform:elevated", "platform:network"))
+	if settingsSlice {
+		c.op.AutostartAllowed = true
+		p.override = func(name string, _ map[string]any) (any, error, bool) {
+			if name == "autostart" {
+				return false, nil, true
+			}
+			return nil, nil, false
+		}
+		c.RefreshAutostart(context.Background())
+		if c.autostart != false {
+			t.Fatal("initial autostart observation")
+		}
+		check("autostart read", cmp.Effects("platform:autostart"))
+	}
 	token := strings.Repeat("01", 24)
 	for _, entry := range trace.Entries {
 		if entry.Kind == "write" {
@@ -492,10 +523,13 @@ func replayNativeStartup(t *testing.T, name string) {
 	if migration {
 		fileCursor.repairAfter = 2
 	}
-	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, migrated, name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice || name == "hungEngine")
+	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, migrated, name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice || name == "hungEngine" || settingsSlice)
 	var pinEvidence map[int]string
-	if liveSlice || name == "ipv6" || reconnectSlice || quitSlice || name == "hungEngine" || migration {
+	if liveSlice || name == "ipv6" || reconnectSlice || quitSlice || name == "hungEngine" || migration || settingsSlice {
 		start, end, names := 66, 86, twoLineRevisionFiles()
+		if settingsSlice {
+			start, end = 70, 90
+		}
 		if migration {
 			start, end, names = 99, 119, []string{"apps-" + firstLine + ".json", "apps-" + secondLine + ".json", "share-" + secondLine + ".json", "cut-" + secondLine + ".json"}
 		}
@@ -521,6 +555,20 @@ func replayNativeStartup(t *testing.T, name string) {
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		if settingsSlice && entry.Kind == "http" {
+			check("startup counterpart exhaustion", counterparts.Finish())
+			if logIndex != len(files.logs) || len(pendingLogs) != 0 {
+				t.Fatal("settings startup leftovers")
+			}
+			for seq, guard := range replayNativeSettings(t, c, e, clock, files, trace, cmp, fileCursor) {
+				checked[seq] = guard
+			}
+			logIndex = len(files.logs)
+			break
+		}
+		if settingsSlice && entry.Seq == 7 {
+			continue
+		}
 		if migration && entry.Seq == 164 {
 			check("startup counterpart exhaustion", counterparts.Finish())
 			if logIndex != len(files.logs) || len(pendingLogs) != 0 {
@@ -655,7 +703,7 @@ func replayNativeStartup(t *testing.T, name string) {
 				}
 				guard = "constructed native stores replace adapter directory setup"
 			case operation == "readdir":
-				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice || name == "hungEngine") && v["ok"] == true) {
+				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice || name == "hungEngine" || settingsSlice) && v["ok"] == true) {
 					t.Fatal("recorded cleanup failure guard")
 				}
 				guard = "complete revision replaces failed adapter directory cleanup"
@@ -734,6 +782,11 @@ func replayNativeStartup(t *testing.T, name string) {
 			case "platform.isElevated":
 				equal("elevation value", v["value"], c.elevated)
 				guard = "production elevation result"
+			case "platform.readAutostart":
+				if !settingsSlice || v["value"] != false || c.autostart != false {
+					t.Fatal("initial autostart result")
+				}
+				guard = "native autostart observation"
 			case "platform.detectAdapters":
 				equal("adapter result", v["value"], replayJSON(t, mustStartupJSON(t, adapters)))
 				guard = "production adapter observation"
@@ -789,7 +842,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			guard = "completed and published physical probe vote"
 		case "directory-list":
-			if (name != "appLine" && name != "capReset" && name != "lostDefaultRoute" && !liveSlice && !quitSlice && name != "hungEngine") || v["directory"] != "/oracle/data" {
+			if (name != "appLine" && name != "capReset" && name != "lostDefaultRoute" && !liveSlice && !quitSlice && name != "hungEngine" && !settingsSlice) || v["directory"] != "/oracle/data" {
 				t.Fatal("unknown directory replacement", v)
 			}
 			guard = "complete revision cleanup contract"
