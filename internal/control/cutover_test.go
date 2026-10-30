@@ -295,6 +295,79 @@ func TestTotalsConsumerSurvivesCrashesAroundTheAck(t *testing.T) {
 	}
 }
 
+func TestTotalsCommitCheckpointRequiresDurableWrite(t *testing.T) {
+	c, e, _, files := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	table := accountingTable(t)
+	acct := &accountingEngine{fakeEngine: e, table: table}
+	c.op.Engine = acct
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Settle the initial instance and compaction before arming a one-shot
+	// barrier. No scheduling or wall-clock race is needed to reproduce it.
+	for range 2 {
+		if err := c.readTotals(ctx, acct, c.generation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hits := 0
+	beforeAck := acct.acks
+	c.op.Checkpoint = func(point string) {
+		if point != "control-after-usage-commit" {
+			return
+		}
+		hits++
+		got := routedUsage(t, files).Apps[apps.AppKey("C:/apps/checkpoint.exe")]
+		if got == nil || got.Up != 3 || got.Down != 4 || acct.acks != beforeAck {
+			t.Fatalf("checkpoint without new durable bytes before ack: got=%+v acks=%d want=%d", got, acct.acks, beforeAck)
+		}
+	}
+	if err := c.readTotals(ctx, acct, c.generation); err != nil {
+		t.Fatal(err)
+	}
+	if hits != 0 {
+		t.Fatal("clean read consumed the commit barrier", hits)
+	}
+	beforeAck = acct.acks
+	transfer(t, table, "C:/apps/checkpoint.exe", 3, 4)
+	files.failPrefix = filepath.Join("/test", "usage.json")
+	if err := c.readTotals(ctx, acct, c.generation); err == nil || hits != 0 {
+		t.Fatal("failed write consumed the commit barrier", err, hits)
+	}
+	files.failPrefix = ""
+	if err := c.readTotals(ctx, acct, c.generation); err != nil || hits != 1 || acct.acks != beforeAck+1 {
+		t.Fatal("unchanged dirty read must commit, checkpoint, then ack", err, hits, acct.acks)
+	}
+}
+
+func TestTotalsSnapshotStartsAfterReadCheckpoint(t *testing.T) {
+	c, e, _, files := testCore(t, map[string]any{"lines": testLines()})
+	c.op.ServiceMode = true
+	table := accountingTable(t)
+	acct := &accountingEngine{fakeEngine: e, table: table}
+	c.op.Engine = acct
+	ctx := context.Background()
+	if err := c.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	paused := false
+	c.op.Checkpoint = func(point string) {
+		if point == "control-before-totals-read" {
+			paused = true
+			transfer(t, table, "C:/apps/paused.exe", 17, 23)
+		}
+	}
+	if err := c.readTotals(ctx, acct, c.generation); err != nil {
+		t.Fatal(err)
+	}
+	got := routedUsage(t, files).Apps[apps.AppKey("C:/apps/paused.exe")]
+	if !paused || got == nil || got.Up != 17 || got.Down != 23 || acct.acks != 1 {
+		t.Fatalf("read did not include bytes established at pause: paused=%t got=%+v acks=%d", paused, got, acct.acks)
+	}
+}
+
 func TestTotalsAreNotAcknowledgedWhenTheCommitFails(t *testing.T) {
 	c, e, clock, files := testCore(t, map[string]any{"lines": testLines()})
 	c.op.ServiceMode = true

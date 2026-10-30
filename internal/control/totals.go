@@ -51,6 +51,7 @@ func (c *Core) scheduleTotals(ctx context.Context, gen uint64) {
 // then is the receipt acknowledged, so the engine retires nothing Control has
 // not already kept. A lost acknowledgement is retried with the same opId.
 func (c *Core) readTotals(ctx context.Context, accounting engine.Accounting, gen uint64) error {
+	c.checkpoint("control-before-totals-read")
 	ctx, cancel := context.WithTimeout(ctx, totalsBudget)
 	defer cancel()
 	cursor, receipt, instance := "", "", ""
@@ -125,8 +126,9 @@ func (c *Core) readTotals(ctx context.Context, accounting engine.Accounting, gen
 		if err := c.SaveUsage(); err != nil {
 			return fmt.Errorf("routed usage not committed; accounting left unacknowledged: %w", err)
 		}
+		// A clean accounting tick must not consume the one-shot commit fault.
+		c.checkpoint("control-after-usage-commit")
 	}
-	c.checkpoint("control-after-usage-commit")
 	opID := "ack-" + receipt
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {

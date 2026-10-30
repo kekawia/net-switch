@@ -19,6 +19,10 @@ func Hit(data, point string) {
 	if err := os.Rename(path, path+".consumed"); err != nil {
 		return
 	}
+	mode, err := os.ReadFile(path + ".consumed")
+	if err != nil {
+		panic(err)
+	}
 	b, _ := json.Marshal(map[string]any{"pid": os.Getpid(), "point": point})
 	f, err := os.OpenFile(filepath.Join(data, "fault-hit.json"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
 	if err != nil {
@@ -32,6 +36,22 @@ func Hit(data, point string) {
 	}
 	if err = f.Close(); err != nil {
 		panic(err)
+	}
+	// A pause barrier lets the hosted test establish its input before the
+	// operation starts. Existing crash barriers remain permanently blocked.
+	if strings.TrimSpace(string(mode)) == "pause" {
+		deadline := time.Now().Add(20 * time.Second)
+		for {
+			if _, err := os.Stat(path + ".consumed"); os.IsNotExist(err) {
+				return
+			} else if err != nil {
+				panic(err)
+			}
+			if time.Now().After(deadline) {
+				panic("fault pause was not released: " + point)
+			}
+			time.Sleep(time.Millisecond)
+		}
 	}
 	select {} // the test kills this exact process after verifying the barrier
 }

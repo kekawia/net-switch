@@ -582,20 +582,77 @@ func observeUntilNativeExit(t *testing.T, conn net.Conn, gone func() bool, obser
 		// recovery's socket retirement when the host itself was frozen and
 		// systemd's watchdog killed it, leaving no host record at all. Logs
 		// may arrive late; the events' own timestamps are compared.
-		decision := nativeSupervisorEvent(data, "NATIVE_TERMINATE", instance)
+		decision, retired := waitNativeTerminationEvidence(func(event string) string {
+			return nativeSupervisorEvent(data, event, instance)
+		}, func(ready func() bool) {
+			wait(t, "host termination or recovery socket retirement recorded", 10*time.Second, ready)
+		})
 		if nativeTerminationPrecedes(decision, terminalAt) {
 			return
 		}
-		var retired string
-		wait(t, "recovery's socket retirement recorded", 10*time.Second, func() bool {
-			retired = nativeSupervisorEvent(data, "NATIVE_SOCKETS_RETIRED", instance)
-			return retired != ""
-		})
 		if !nativeTerminationPrecedes(retired, terminalAt) || !nativeRetirementEnded(retired) {
 			t.Error("held flow ended before proved termination", terminalProblem, decision, retired)
 			return
 		}
 		t.Logf("NATIVE_HELD_END_BY_RECOVERY host_record_absent=%t %s", decision == "", retired)
+	}
+}
+
+// Both writers are asynchronous. Re-read both on every observation; choosing
+// the recovery writer after one missing host line can wait for an event that
+// this platform never emits. Only the event timestamp proves ordering.
+func waitNativeTerminationEvidence(read func(string) string, waitFor func(func() bool)) (decision, retired string) {
+	waitFor(func() bool {
+		decision = read("NATIVE_TERMINATE")
+		retired = read("NATIVE_SOCKETS_RETIRED")
+		// Presence ends the wait; the caller diagnoses late/invalid evidence
+		// with the actual lines instead of hiding it behind a timeout.
+		return decision != "" || retired != ""
+	})
+	return decision, retired
+}
+
+func TestNativeStallTerminationEvidenceRechecksDelayedHost(t *testing.T) {
+	observed := time.Now().UTC()
+	for _, event := range []string{"NATIVE_TERMINATE", "NATIVE_SOCKETS_RETIRED"} {
+		t.Run(event, func(t *testing.T) {
+			published := false
+			decision, retired := waitNativeTerminationEvidence(func(want string) string {
+				if !published || want != event {
+					return ""
+				}
+				return event + " ended=1 at=" + observed.Add(-time.Millisecond).Format(time.RFC3339Nano)
+			}, func(ready func() bool) {
+				if ready() {
+					t.Fatal("accepted missing evidence")
+				}
+				published = true
+				if !ready() {
+					t.Fatal("did not re-read the delayed termination writer")
+				}
+			})
+			if !nativeTerminationPrecedes(decision, observed) && !(nativeTerminationPrecedes(retired, observed) && nativeRetirementEnded(retired)) {
+				t.Fatal("lost termination evidence", decision, retired)
+			}
+		})
+	}
+}
+
+func TestNativeStallLateTerminationReachesDiagnostic(t *testing.T) {
+	observed := time.Now().UTC()
+	late := "NATIVE_TERMINATE at=" + observed.Add(time.Millisecond).Format(time.RFC3339Nano)
+	decision, retired := waitNativeTerminationEvidence(func(event string) string {
+		if event == "NATIVE_TERMINATE" {
+			return late
+		}
+		return ""
+	}, func(ready func() bool) {
+		if !ready() {
+			t.Fatal("present late decision would time out instead of reaching diagnostic")
+		}
+	})
+	if decision != late || retired != "" || nativeTerminationPrecedes(decision, observed) {
+		t.Fatal("late decision was lost or accepted as earlier termination", decision, retired)
 	}
 }
 
