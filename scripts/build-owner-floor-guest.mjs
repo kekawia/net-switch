@@ -223,8 +223,11 @@ async function buildArchKernel(lock, arch, outDir) {
     'rm -rf /tmp/kbuild && mkdir -p /tmp/kbuild',
     'tar -xf /work/linux-5.8.tar.xz -C /tmp/kbuild',
     'cd /tmp/kbuild/linux-5.8',
-    // Upstream v5.8 tools/objtool/elf.h and scripts/dtc can fail on newer binutils/GCC defaults if Werror is active;
-    // pass explicit KCFLAGS and HOSTCFLAGS and merge our pinned fragment on top of base defconfig.
+    // Upstream v5.8 tools/objtool/elf.h, tools/lib/subcmd, and scripts/dtc can fail on GCC 12 defaults if -Werror is active;
+    // also pahole >= 1.24 enables 64-bit BTF enum encoding (kind_flag=1 on BTF_KIND_ENUM) by default, which Linux 5.8's
+    // in-kernel BTF verifier rejects ("Invalid btf_info kind_flag") unless --skip_encoding_btf_enum64 is passed.
+    'sed -i "s/-Werror//g" tools/lib/subcmd/Makefile tools/objtool/Makefile',
+    'sed -i "s/-J /--skip_encoding_btf_enum64 -J /g" scripts/link-vmlinux.sh',
     `make ${cfgProfile.baseDefconfig}`,
     './scripts/kconfig/merge_config.sh -m .config /work/kernel.config',
     'make olddefconfig',

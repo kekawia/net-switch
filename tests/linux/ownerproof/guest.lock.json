@@ -12,7 +12,7 @@
     "configs": {
       "amd64": {
         "path": "tests/linux/ownerproof/kernel-5.8-amd64.config",
-        "sha256": "7d04b402adae90f68bf0fc7eebd91fbae65ae47825d89ea2f0ec471d3e221b71",
+        "sha256": "5925c117146461ded60f4e103219f44d9d9f2625a035b862ee0660d87961b94a",
         "baseDefconfig": "x86_64_defconfig",
         "imageTarget": "bzImage",
         "imageRelativePath": "arch/x86/boot/bzImage",
