@@ -287,26 +287,26 @@
     "bpfGeneratorScript": "scripts/generate-owner-bpf.mjs",
     "bpfObjects": {
       "amd64": {
-        "proof_x86_bpfel.o": "8642e21dca4d75a865a727dc12ffc055ce64c7c6b9f1a2fd6ccf36fa095125a6",
+        "proof_x86_bpfel.o": "369d0c8ba113159dcc18d0d8f4597ccfaefe6c38a73896af813af4e2fd4987b8",
         "bridge_x86_bpfel.o": "d261ab6ce74c6f1a626497a0fd68eeb5ad1f8b6b34e461943efe257c0cb92425",
         "fault_x86_bpfel.o": "c9467a3e10fa396ccf100e38251b0a3b7bd5ea93b68a0d4bff835290a16d4eea"
       },
       "arm64": {
-        "proof_arm64_bpfel.o": "29c2995dec7b62f54d4dfca3c13e6ebc2be5d902d1c1a25752c517679fb904cd",
+        "proof_arm64_bpfel.o": "07aa1228e8f8656c52ae4dcc05d1559425c567d194cee51623edd8c30e89ffbb",
         "bridge_arm64_bpfel.o": "d261ab6ce74c6f1a626497a0fd68eeb5ad1f8b6b34e461943efe257c0cb92425",
         "fault_arm64_bpfel.o": "c9467a3e10fa396ccf100e38251b0a3b7bd5ea93b68a0d4bff835290a16d4eea"
       }
     }
   },
   "outputs": {
-    "reproducibilityStage": "single-build-first-boot-pending",
+    "reproducibilityStage": "double-build-verified",
     "amd64": {
       "kernelImageSha256": "3eb59a8a763a874dd4b8c012846a2c0a34c70b9821d1a286b8134e5b787dd52e",
-      "initramfsSha256": "4c7920d85f69b38c4cfc2620edc32d5e2da80e54da72ca5974fd7e336d66c8c9"
+      "initramfsSha256": "90c9c49868e418d6d9f626aeb77083708357f89fda681f49492a7f6bd25c505e"
     },
     "arm64": {
       "kernelImageSha256": "f578daf914edbf3c6b8d20ad4b033f7d4630784c8cbb152f675c529272331a0d",
-      "initramfsSha256": "c31d9ec966841ad0a099321b6f2ae7025f03ed428ada5ef835d6efbfb8a2970f"
+      "initramfsSha256": "3ed689d5e6f1d536b992980414da7ff14ab0886670449949f132662cc5bf1d01"
     }
   }
 }

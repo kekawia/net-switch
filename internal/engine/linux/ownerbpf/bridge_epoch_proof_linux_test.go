@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -191,11 +193,52 @@ func signalEventFD(efd int) error {
 	return err
 }
 
+type rawMapElemAttr struct {
+	mapFD uint32
+	_     uint32
+	key   uint64
+	value uint64
+	flags uint64
+}
+
+func rawLookupFault(mapFD int, out *BridgeFault) error {
+	var zeroKey uint32
+	attr := rawMapElemAttr{
+		mapFD: uint32(mapFD),
+		key:   uint64(uintptr(unsafe.Pointer(&zeroKey))),
+		value: uint64(uintptr(unsafe.Pointer(out))),
+	}
+	_, _, errno := unix.RawSyscall(unix.SYS_BPF, 1 /* BPF_MAP_LOOKUP_ELEM */, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	runtime.KeepAlive(&zeroKey)
+	runtime.KeepAlive(out)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+func rawUpdateFault(mapFD int, in *BridgeFault) error {
+	var zeroKey uint32
+	attr := rawMapElemAttr{
+		mapFD: uint32(mapFD),
+		key:   uint64(uintptr(unsafe.Pointer(&zeroKey))),
+		value: uint64(uintptr(unsafe.Pointer(in))),
+	}
+	_, _, errno := unix.RawSyscall(unix.SYS_BPF, 2 /* BPF_MAP_UPDATE_ELEM */, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr))
+	runtime.KeepAlive(&zeroKey)
+	runtime.KeepAlive(in)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
 func releaseHold(f *bridgeFixture) {
+	faultsFD := f.b.Collection.Maps["faults"].FD()
 	var state BridgeFault
-	if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &state); err == nil && state.Reserved[0] != 0 && state.Reserved[2] == 0 {
+	if err := rawLookupFault(faultsFD, &state); err == nil && state.Reserved[0] != 0 && state.Reserved[2] == 0 {
 		state.Reserved[1] = 1
-		_ = f.b.Collection.Maps["faults"].Update(uint32(0), state, ebpf.UpdateAny)
+		_ = rawUpdateFault(faultsFD, &state)
 	}
 }
 
@@ -203,6 +246,7 @@ func releaseHold(f *bridgeFixture) {
 // window. Starting a goroutine is not evidence it has run, pinned, or polled.
 func readyHoldController(t *testing.T, f *bridgeFixture, trigger func() error) <-chan error {
 	t.Helper()
+	faultsFD := f.b.Collection.Maps["faults"].FD()
 	ready := make(chan error, 1)
 	result := make(chan error, 1)
 	cancel := make(chan struct{})
@@ -244,14 +288,19 @@ func readyHoldController(t *testing.T, f *bridgeFixture, trigger func() error) <
 		t.Logf("P2_CONTROLLER ready=true tid=%d cpu=%d policy=FIFO priority=30", unix.Gettid(), cpu)
 		ready <- nil
 		deadline := time.Now().Add(time.Second)
-		for time.Now().Before(deadline) {
-			select {
-			case <-cancel:
-				return
-			default:
+		for iter := 0; ; iter++ {
+			if iter&255 == 0 {
+				if !time.Now().Before(deadline) {
+					break
+				}
+				select {
+				case <-cancel:
+					return
+				default:
+				}
 			}
 			var active BridgeFault
-			if err := f.b.Collection.Maps["faults"].Lookup(uint32(0), &active); err != nil {
+			if err := rawLookupFault(faultsFD, &active); err != nil {
 				result <- err
 				return
 			}
@@ -337,6 +386,15 @@ func ensureFullPreempt(t *testing.T) {
 }
 
 func TestBridgePreemptedReader(t *testing.T) {
+	// Ensure at least 8 Go Ps and quiesce GC during the bounded SCHED_FIFO preemption
+	// proof so reader B (blocked in waitEventFD), controller, and holder A never stall
+	// waiting for sysmon P retake or GC assist on a 2-vCPU guest.
+	oldProcs := runtime.GOMAXPROCS(8)
+	t.Cleanup(func() { runtime.GOMAXPROCS(oldProcs) })
+	runtime.GC()
+	oldGC := debug.SetGCPercent(-1)
+	t.Cleanup(func() { debug.SetGCPercent(oldGC) })
+
 	ensureFullPreempt(t)
 	preemptRCU := hasKernelConfig(t, "CONFIG_PREEMPT_RCU")
 	f := newBridgeFixture(t, true)
@@ -348,6 +406,7 @@ func TestBridgePreemptedReader(t *testing.T) {
 	if err := f.b.Collection.Maps["config"].Update(uint32(0), f.b.config, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
+	faultsFD := f.b.Collection.Maps["faults"].FD()
 	wakeFD := newEventFD(t)
 	ready := make(chan error, 1)
 	done := make(chan struct{})
@@ -399,7 +458,7 @@ func TestBridgePreemptedReader(t *testing.T) {
 				return -1, err
 			}
 			n, err := unix.Read(fd, dst)
-			lookupErr = f.b.Collection.Maps["faults"].Lookup(uint32(0), &state)
+			lookupErr = rawLookupFault(faultsFD, &state)
 			releaseHold(f)
 			return n, err
 		})
@@ -430,7 +489,6 @@ func TestBridgePreemptedReader(t *testing.T) {
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), ctl, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
-	controller := readyHoldController(t, f, func() error { return signalEventFD(wakeFD) })
 	if err := setProofPriority(10); err != nil {
 		t.Fatal(err)
 	}
@@ -443,6 +501,7 @@ func TestBridgePreemptedReader(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("P2_HOLDER ready=true tid=%d cpu=%d policy=FIFO priority=10", unix.Gettid(), f.cpu)
+	controller := readyHoldController(t, f, func() error { return signalEventFD(wakeFD) })
 	a, aerr := f.r.ReadBurst(f.fd, 1)
 	if err := setProofPriority(0); err != nil {
 		t.Fatal(err)
@@ -528,11 +587,15 @@ func TestBridgePreemptedReader(t *testing.T) {
 
 func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops uint64, before [3]CounterSample) (BridgeFault, [3]CounterSample, uint64) {
 	t.Helper()
+	runtime.GC()
+	oldGC := debug.SetGCPercent(-1)
+	defer debug.SetGCPercent(oldGC)
+
 	l, err := netlink.LinkByName("nsbridge0")
 	if err != nil || l.Attrs().Statistics == nil {
 		t.Fatal(err)
 	}
-	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 500, Limit: 100})
+	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 2000, Limit: 100})
 	if err := netlink.QdiscReplace(q); err != nil {
 		t.Fatal("netem positive-control prerequisite", err)
 	}
@@ -546,20 +609,28 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	}
 	defer func() { _ = unix.Munmap(faultBuf) }()
 
-	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=500us=0.5ms)
-	// immediately before entering the kfree_skb hold on f.cpu. Even when
+	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=2000us=2ms)
+	// inside readBurst's callback (after the 64KiB buffer allocation has already completed)
+	// immediately before entering the kfree_skb hold (~13.5ms-20ms) on f.cpu. Even when
 	// preemption is disabled on f.cpu, the hrtimer hardirq fires on f.cpu and
 	// runs NET_TX_SOFTIRQ on irq_exit in the interrupted reader task's context.
-	for range 8 {
-		if err := unix.Sendto(s, []byte("timer-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
-			t.Fatal(err)
-		}
-	}
 	called := false
+	var sendErr error
 	_, readErr := f.r.readBurst(f.fd, 1, func(fd int, _ []byte) (int, error) {
+		atomic.StoreUint64(&f.r.slot.Control.Armed, 0)
+		for range 8 {
+			if err := unix.Sendto(s, []byte("timer-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
+				sendErr = err
+				return -1, err
+			}
+		}
+		atomic.StoreUint64(&f.r.slot.Control.Armed, 1)
 		called = true
 		return unix.Read(fd, faultBuf[:64])
 	})
+	if sendErr != nil {
+		t.Fatal(sendErr)
+	}
 	if !errors.Is(readErr, unix.EFAULT) || !errors.Is(readErr, ErrEpochRebuild) {
 		t.Fatalf("copy-fault precondition: syscall_entered=%t health=%d: %v", called, f.b.Faults(), readErr)
 	}
@@ -759,6 +830,8 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 					t.Fatalf("v5.8 guard-free raw tracepoint unexpectedly left %d unretired records", len(retainedAddrs))
 				}
 				_ = netlink.QdiscDel(netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{}))
+				r2Trigger <- false
+				<-r2Done
 				t.Logf("P2_STALE_MUTATION floor58=true raw_recursion_guard=false skip_post_check=%t nested_frees_retired_all=true retained_records=0", skipPostCheck)
 				reloadBridgeFixture(t, f)
 				return

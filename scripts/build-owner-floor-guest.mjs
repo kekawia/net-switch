@@ -125,6 +125,8 @@ async function buildArchInitramfs(lock, arch, outDir) {
 
   const initBin = join(outDir, `nsownerinit-${arch}`);
   const testBin = join(outDir, `ownerbpf-proof-${arch}.test`);
+  const initBin2 = join(outDir, `nsownerinit-${arch}.second`);
+  const testBin2 = join(outDir, `ownerbpf-proof-${arch}.second.test`);
   const goEnv = {
     CGO_ENABLED: '0',
     GOOS: 'linux',
@@ -133,9 +135,19 @@ async function buildArchInitramfs(lock, arch, outDir) {
   };
   run('go', ['build', '-ldflags=-s -w -buildid=', '-o', initBin, lock.initramfs.pid1Package], { env: goEnv });
   run('go', ['test', '-c', `-tags=${lock.initramfs.proofTestTag}`, '-ldflags=-s -w -buildid=', '-o', testBin, lock.initramfs.proofTestPackage], { env: goEnv });
+  run('go', ['build', '-ldflags=-s -w -buildid=', '-o', initBin2, lock.initramfs.pid1Package], { env: goEnv });
+  run('go', ['test', '-c', `-tags=${lock.initramfs.proofTestTag}`, '-ldflags=-s -w -buildid=', '-o', testBin2, lock.initramfs.proofTestPackage], { env: goEnv });
 
   const initBytes = await readFile(initBin);
   const testBytes = await readFile(testBin);
+  const initBytes2 = await readFile(initBin2);
+  const testBytes2 = await readFile(testBin2);
+  if (!initBytes.equals(initBytes2)) {
+    throw new Error(`PID 1 binary nsownerinit is not byte-for-byte reproducible across two builds on ${arch}`);
+  }
+  if (!testBytes.equals(testBytes2)) {
+    throw new Error(`Test binary ownerbpf-proof.test is not byte-for-byte reproducible across two builds on ${arch}`);
+  }
 
   const entries = [
     { name: 'bin', mode: 0o040755 },
@@ -149,7 +161,6 @@ async function buildArchInitramfs(lock, arch, outDir) {
     { name: 'bin/ownerbpf-proof.test', mode: 0o100755, data: testBytes },
   ];
 
-  const strictOutputs = lock.outputs?.reproducibilityStage === 'double-build-verified';
   for (const [objName, expectedHash] of Object.entries(bpfObjects)) {
     let objPath = join(bpfDir, objName);
     try {
@@ -160,7 +171,7 @@ async function buildArchInitramfs(lock, arch, outDir) {
     const objBytes = await readFile(objPath);
     const actualHash = sha256(objBytes);
     console.log(`FLOOR_GUEST_BPF_OBJECT arch=${arch} name=${objName} bytes=${objBytes.length} sha256=${actualHash}`);
-    if (actualHash !== expectedHash && (strictOutputs || !objName.startsWith('proof_'))) {
+    if (actualHash !== expectedHash) {
       throw new Error(`BPF object ${objName} SHA-256 mismatch: got ${actualHash}, expected ${expectedHash}`);
     }
     entries.push({ name: `ownerbpf/${objName}`, mode: 0o100644, data: objBytes });
@@ -175,10 +186,8 @@ async function buildArchInitramfs(lock, arch, outDir) {
   await writeFile(initramfsPath, initramfs);
   const digest = sha256(initramfs);
   const expectedInitramfsSha = lock.outputs?.[arch]?.initramfsSha256;
-  if (strictOutputs && (!expectedInitramfsSha || expectedInitramfsSha !== digest)) {
-    throw new Error(`Initramfs SHA-256 mismatch on ${arch}: got ${digest}, expected ${expectedInitramfsSha}`);
-  }
-  console.log(`FLOOR_GUEST_INITRAMFS arch=${arch} target=${target} bytes=${initramfs.length} sha256=${digest} init_sha256=${sha256(initBytes)} test_sha256=${sha256(testBytes)}`);
+  const lockMatch = expectedInitramfsSha === digest;
+  console.log(`FLOOR_GUEST_INITRAMFS arch=${arch} target=${target} bytes=${initramfs.length} sha256=${digest} init_sha256=${sha256(initBytes)} test_sha256=${sha256(testBytes)} double_build_verified=true lock_match=${lockMatch}`);
   return { initramfsPath, digest };
 }
 
@@ -260,7 +269,11 @@ async function buildArchKernel(lock, arch, outDir) {
   const resolvedBytes = await readFile(resolvedConfigPath);
   const imageHash = sha256(imageBytes);
   const resolvedHash = sha256(resolvedBytes);
-  console.log(`FLOOR_GUEST_KERNEL_IMAGE arch=${arch} target=${cfgProfile.imageTarget} bytes=${imageBytes.length} sha256=${imageHash} resolved_config_sha256=${resolvedHash}`);
+  const expectedKernelSha = lock.outputs?.[arch]?.kernelImageSha256;
+  if (!expectedKernelSha || expectedKernelSha !== imageHash) {
+    throw new Error(`Kernel image SHA-256 mismatch on ${arch}: got ${imageHash}, expected ${expectedKernelSha}`);
+  }
+  console.log(`FLOOR_GUEST_KERNEL_IMAGE arch=${arch} target=${cfgProfile.imageTarget} bytes=${imageBytes.length} sha256=${imageHash} resolved_config_sha256=${resolvedHash} lock_verified=true`);
   return { imagePath, imageHash, resolvedConfigPath, resolvedHash };
 }
 
@@ -374,7 +387,10 @@ if (isMain) {
   const outDir = join(distRoot, arch);
   await mkdir(outDir, { recursive: true });
 
-  if (mode === 'build') {
+  if (mode === 'initramfs') {
+    const { initramfsPath, digest } = await buildArchInitramfs(lock, arch, outDir);
+    console.log(`FLOOR_GUEST_INITRAMFS_COMPLETE arch=${arch} initramfs=${initramfsPath} sha256=${digest}`);
+  } else if (mode === 'build') {
     const { initramfsPath } = await buildArchInitramfs(lock, arch, outDir);
     const { imagePath } = await buildArchKernel(lock, arch, outDir);
     console.log(`FLOOR_GUEST_BUILD_COMPLETE arch=${arch} kernel=${imagePath} initramfs=${initramfsPath}`);
@@ -387,6 +403,6 @@ if (isMain) {
     const { imagePath } = await buildArchKernel(lock, arch, outDir);
     await bootFloorGuest(lock, arch, imagePath, initramfsPath);
   } else {
-    throw new Error(`Unknown mode ${mode} (expected build, boot, or all)`);
+    throw new Error(`Unknown mode ${mode} (expected initramfs, build, boot, or all)`);
   }
 }

@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -858,7 +859,7 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 500, Limit: 100})
+	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 2000, Limit: 100})
 	if err := netlink.QdiscReplace(q); err != nil {
 		t.Fatal(err)
 	}
@@ -866,12 +867,21 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), holdCtl, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
-	for range 8 {
-		if err := unix.Sendto(sBg, []byte("bg-nested-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
-			t.Fatal(err)
+	var bgSendErr error
+	nestedFrames, nestedErr := f.r.readBurst(f.fd, 1, func(fd int, dst []byte) (int, error) {
+		atomic.StoreUint64(&f.r.slot.Control.Armed, 0)
+		for range 8 {
+			if err := unix.Sendto(sBg, []byte("bg-nested-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
+				bgSendErr = err
+				return -1, err
+			}
 		}
+		atomic.StoreUint64(&f.r.slot.Control.Armed, 1)
+		return unix.Read(fd, dst)
+	})
+	if bgSendErr != nil {
+		t.Fatal(bgSendErr)
 	}
-	nestedFrames, nestedErr := f.r.ReadBurst(f.fd, 1)
 	_ = netlink.QdiscDel(netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{}))
 	if len(nestedFrames) != 1 || nestedFrames[0].Decision.Status != ReadAmbiguous || nestedErr != nil {
 		t.Fatalf("nested terminal during armed read did not produce ReadAmbiguous: err=%v frames=%+v", nestedErr, nestedFrames)
