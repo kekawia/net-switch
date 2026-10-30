@@ -68,20 +68,22 @@ func TestWorkerDLLCompatibility(t *testing.T) {
 		}
 	}()
 	for _, variant := range []struct {
-		name string
-		sids []string
+		name          string
+		sids          []string
+		disableSystem bool
 	}{
-		{"null", []string{"S-1-0-0"}},
-		{"restricted", []string{"S-1-5-12"}},
-		{"restricted-and-logon", append([]string{"S-1-5-12"}, logon...)},
-		{"write-restricted", []string{"S-1-5-33"}},
-		{"users", []string{"S-1-5-32-545"}},
-		{"everyone", []string{"S-1-1-0"}},
+		{"null", []string{"S-1-0-0"}, false},
+		{"restricted", []string{"S-1-5-12"}, false},
+		{"restricted-system-deny-only", []string{"S-1-5-12"}, true},
+		{"restricted-and-logon", append([]string{"S-1-5-12"}, logon...), false},
+		{"write-restricted", []string{"S-1-5-33"}, false},
+		{"users", []string{"S-1-5-32-545"}, false},
+		{"everyone", []string{"S-1-1-0"}, false},
 	} {
 		t.Run(variant.name, func(t *testing.T) {
 			p, err := startWithToken(exe, []string{"worker", "app-info"}, nil, windows.DETACHED_PROCESS, workerUILimits,
 				func(source windows.Token) (windows.Token, error) {
-					restricted, err := workerTokenWithSIDs(source, false, variant.sids)
+					restricted, err := constructWorkerToken(source, false, variant.sids, variant.disableSystem)
 					if err == nil {
 						logWorkerDesktopAccess(t, restricted)
 					}
@@ -131,12 +133,13 @@ func logWorkerDesktopAccess(t *testing.T, token windows.Token) {
 	station, _, _ := user32.NewProc("GetProcessWindowStation").Call()
 	desktop, _, _ := user32.NewProc("GetThreadDesktop").Call(uintptr(windows.GetCurrentThreadId()))
 	for _, object := range []struct {
-		name   string
-		handle uintptr
-		rights []uint32
+		name    string
+		handle  uintptr
+		rights  []uint32
+		mapping [4]uint32
 	}{
-		{"window-station", station, []uint32{0x2, 0x8, 0x20}},
-		{"desktop", desktop, []uint32{0x1, 0x2, 0x80}},
+		{"window-station", station, []uint32{0x2, 0x8, 0x20}, [4]uint32{0x20303, 0x2001c, 0x20060, 0xf037f}},
+		{"desktop", desktop, []uint32{0x1, 0x2, 0x80}, [4]uint32{0x20041, 0x200be, 0x20100, 0xf01ff}},
 	} {
 		sd, err := windows.GetSecurityInfo(windows.Handle(object.handle), windows.SE_WINDOW_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 		if err != nil {
@@ -145,7 +148,10 @@ func logWorkerDesktopAccess(t *testing.T, token windows.Token) {
 		}
 		t.Logf("%s SDDL=%s", object.name, sd.String())
 		for _, access := range object.rights {
-			mapping := [4]uint32{0x20000, 0x20000, 0x20000, 0xf0000}
+			// WRITE_RESTRICTED needs the object's real generic-write mapping.
+			// The queried station bits have the same classification on both
+			// interactive and service window stations.
+			mapping := object.mapping
 			privileges := new([64]uint64)
 			size := uint32(unsafe.Sizeof(*privileges))
 			var granted, allowed uint32

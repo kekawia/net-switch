@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +29,7 @@ type metadataAnswer struct {
 func TestMain(m *testing.M) {
 	if len(os.Args) > 2 && os.Args[1] == "worker" && os.Args[2] == "acl-proof" {
 		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+			fmt.Fprintln(os.Stderr, "metadata attacker fixture requires GITHUB_ACTIONS=true and RUNNER_ENVIRONMENT=github-hosted")
 			os.Exit(2)
 		}
 		os.Exit(runMetadataProof())
@@ -222,7 +224,9 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			}
 			var ready metadataAnswer
 			if err := decoder.Decode(&ready); err != nil || !ready.Ready || !ready.CertificateDenied {
-				t.Fatalf("Medium worker could not acquire the original grant: %+v %v", ready, err)
+				_ = p.Kill()
+				stderr, _ := io.ReadAll(io.LimitReader(p.Errors(), 65536))
+				t.Fatalf("Medium attacker could not acquire the original grant: %+v decode=%v exit=%v stderr=%s", ready, err, p.Wait(), stderr)
 			}
 			if test.hideGrant {
 				// The retained handle now has authority absent from today's ACL.

@@ -105,12 +105,39 @@ func TestWorkerNetworkOperations(t *testing.T) {
 	server.StartTLS()
 	defer server.Close()
 	t.Setenv("NETSWITCH_TEST_ROOT_CERT", base64.StdEncoding.EncodeToString(der))
+	originalDebug := os.Getenv("GODEBUG")
 	t.Setenv("GODEBUG", strings.TrimPrefix(os.Getenv("GODEBUG")+",x509usefallbackroots=1", ","))
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := worker.Supervisor{Executable: exe}
+	t.Run("line-check-HTTPS-system-trust", func(t *testing.T) {
+		// The local certificate fixture exercises validation, but deliberately
+		// bypasses Windows' system verifier. Qualify that real path separately.
+		t.Setenv("NETSWITCH_TEST_ROOT_CERT", "")
+		t.Setenv("GODEBUG", originalDebug)
+		const target = "1.1.1.1:443" // the product's existing Cloudflare full-check endpoint
+		baseline := checkLine(uint32(index), target, false, false)
+		if baseline.Outcome != engine.OK {
+			t.Fatalf("external HTTPS positive control unavailable; cannot qualify system trust: %+v", baseline)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		value, err := s.Once(ctx, "line-check", map[string]any{"index": index, "target": target, "quick": false, "custom": false})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result engine.ProbeResult
+		if err = json.Unmarshal(b, &result); err != nil || result.Outcome != engine.OK {
+			t.Fatalf("system-trust worker HTTPS failed after parent success: %s %v", b, err)
+		}
+		t.Logf("system-trust HTTPS interface=%d target=%s result=%s", index, target, b)
+	})
 	t.Run("metrics", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()

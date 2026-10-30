@@ -78,6 +78,11 @@ func TestWorkerNetworkFenceMutation(t *testing.T) {
 	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		t.Skip("requires disposable hosted Windows")
 	}
+	root := t.TempDir()
+	previousRoot := imageRoot
+	imageRoot = func() (string, error) { return root, nil }
+	defer func() { imageRoot = previousRoot }()
+	t.Setenv("NETSWITCH_WORKER_TEST_ROOT", root)
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
@@ -130,7 +135,7 @@ func TestWorkerNetworkFenceMutation(t *testing.T) {
 	defer current.Close() // Keep its filter present during the controls below.
 	got := authorityAnswer(t, current, input)
 	t.Logf("current SID=%s result=%+v", user.User.Sid.String(), got)
-	if !got.OutboundDenied || !got.RegistryDenied || !got.ProcessDenied || !got.TCPDenied {
+	if !got.OutboundDenied || !got.RegistryDenied || !got.RegistryDACDenied || !got.ProcessDenied || !got.TCPDenied {
 		t.Error("current worker retained forbidden authority")
 	}
 	probe, err := Start(exe, []string{"worker", "probe"})
@@ -147,17 +152,55 @@ func TestWorkerNetworkFenceMutation(t *testing.T) {
 		t.Fatal("parent affected by worker filter", err)
 	}
 	parent.Close()
-	mutated, err := startWithToken(exe, []string{"worker", "query", "app-info"}, nil, windows.DETACHED_PROCESS, workerUILimits, legacyReadToken)
+	mutated, err := startWithToken(current.(*process).image.executable, []string{"worker", "query", "app-info"}, nil, windows.DETACHED_PROCESS, workerUILimits, legacyReadToken)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mutated.Close()
 	old := authorityAnswer(t, mutated, input)
-	if old.OutboundCode != "<nil>" {
-		t.Fatalf("old token did not reproduce outbound authority: %+v", old)
+	if !old.OutboundDenied || len(old.Restricted) != 0 {
+		t.Fatalf("token mutation must retain the independent image fence and remove restricting SIDs: %+v", old)
 	}
 	if user.User.Sid.String() == "S-1-5-18" && (old.RegistryDenied || old.TCPDenied) {
 		t.Fatalf("old SYSTEM token did not reproduce write authority: %+v", old)
 	}
-	fmt.Printf("OLD_TOKEN_MUTATION_REPRODUCED parent=%s registryDenied=%t tcpDeleteDenied=%t outboundDenied=%t; production constructor unchanged\n", user.User.Sid.String(), old.RegistryDenied, old.TCPDenied, old.OutboundDenied)
+	fmt.Printf("OLD_TOKEN_MUTATION_REPRODUCED parent=%s registryDenied=%t tcpDeleteDenied=%t outboundDenied=%t restrictedSIDs=%v; production constructor unchanged\n", user.User.Sid.String(), old.RegistryDenied, old.TCPDenied, old.OutboundDenied, old.Restricted)
+	// Remove only this fixture's network rules, retain the current token and
+	// exact same image, then restore the rules and prove denial returns.
+	concrete := current.(*process)
+	if err := concrete.fence.close(); err != nil {
+		t.Fatal(err)
+	}
+	concrete.fence = nil
+	launchCurrent := func() Process {
+		p, err := startWithToken(concrete.image.executable, []string{"worker", "app-info"}, nil, windows.DETACHED_PROCESS, workerUILimits, func(source windows.Token) (windows.Token, error) {
+			return workerTokenWithSIDs(source, false, workerReadSIDs("app-info"))
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = p.Close() })
+		return p
+	}
+	unfencedProcess := launchCurrent()
+	unfenced := authorityAnswer(t, unfencedProcess, input)
+	if err := unfencedProcess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if unfenced.OutboundCode != "<nil>" || !unfenced.RegistryDenied || !unfenced.ProcessDenied {
+		t.Fatalf("network-only mutation did not isolate the fence: %+v", unfenced)
+	}
+	concrete.fence, err = fenceWorkerNetwork(concrete.image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restoredProcess := launchCurrent()
+	restored := authorityAnswer(t, restoredProcess, input)
+	if err := restoredProcess.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !restored.OutboundDenied {
+		t.Fatalf("restored fence did not restore denial: %+v", restored)
+	}
+	t.Log("NETWORK_FENCE_MUTATION_REPRODUCED: same image and current token connected with fixture rules removed; denied again after restoration")
 }

@@ -26,7 +26,7 @@ func TestWorkerRestrictingSIDs(t *testing.T) {
 		{"outside", true, false, nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			token, err := workerTokenWithSIDs(source, test.admin, workerReadSIDs(test.name, ""))
+			token, err := workerTokenWithSIDs(source, test.admin, workerReadSIDs(test.name))
 			if err != nil {
 				t.Fatal(err)
 			}

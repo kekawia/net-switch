@@ -1,215 +1,167 @@
 # Windows worker authority
 
-Candidate design, 2026-10-30. Hosted qualification and independent security review
-are required before this can merge.
+Implementation candidate, 2026-10-30. Not merge-ready until hosted qualification
+and independent security review pass. The previous pilot's complete failure
+inventory and actual results are in [windows-worker-pilot-failures.md](windows-worker-pilot-failures.md).
 
-## Current WMI and network candidate
+## Threat model and required authority
 
-Both native-services jobs on 2c3b4a9 (123944520917 and 123944520716) reached
-ExecQuery and returned WBEM_E_ACCESS_DENIED, 0x80041003. This is distinct from
-the earlier loader failure. The class returns per-template dynamic and auto-reuse
-ranges, including inherited nulls. Searches did not establish a documented
-GetDynamicPortRange API or registry mapping preserving this entire result.
-[MSFT_NetTCPSetting](https://learn.microsoft.com/en-us/windows/win32/fwp/wmi/nettcpipprov/msft-nettcpsetting)
-is the documented source. Do not substitute a global range and claim parity.
-
-[Microsoft's namespace-security documentation](https://learn.microsoft.com/en-us/windows/win32/wmisdk/access-to-wmi-namespaces)
-describes token/namespace ACL checks, default Authenticated Users membership and
-Enable Account read permission. The candidate adds Authenticated Users to the
-restricting set for tcp-port-configuration only. It retains SYSTEM/admin
-deny-only, stripped privileges and Medium integrity. This must pass the native
-provider oracle without changing any namespace ACL or restoring HKLM writes.
-
-Chosen network mechanism: two WFP ALE_AUTH_CONNECT filters per read worker,
-covering IPv4 and IPv6, installed before worker execution. Each matches the
-executable plus a token descriptor containing a deny ACE for a fresh worker SID.
-The descriptor's failed MATCH_FILTER check is matched with NOT_EQUAL; Control,
-probes and other workers must continue to pass the descriptor. That matching
-behavior is a **hosted proof obligation**, not yet a successful result.
-[Microsoft's application/user filtering documentation](https://learn.microsoft.com/en-us/windows/win32/fwp/permitting-and-blocking-applications-and-users)
-documents the descriptor access check and application-ID condition. GUIDs and
-enum values were checked in Microsoft's WinSDK metadata headers, not guessed.
-
-Each worker has its own sublayer. Normal close waits for the child before
-removing filters. Filters are static, not dynamic: [WFP object lifetimes](https://learn.microsoft.com/en-us/windows/win32/fwp/object-management)
-say a dynamic session disappears on parent exit, which would race job cleanup.
-Static filters survive parent exit but disappear when BFE stops. **Crash-orphan
-reclamation still needs implementation and qualification before merge.** A
-static filter only targets its random token marker; it must never be generalized
-to block every process running the shared executable.
-
-[AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
-without network capabilities was evaluated: it provides network isolation but
-runs at Low integrity and requires independent file/COM grants. WFP was chosen
-to preserve Medium integrity and native metadata access. If descriptor matching
-does not identify the intended restricted token reliably, this candidate must
-not ship; adding a broad executable block would also break Control and probes.
-
-The pilot adds actual bound TCP and certificate-verified HTTPS checks using a
-generated test certificate, with no machine certificate-store changes. It also
-substitutes the original main-branch token constructor into a disposable child
-while the current filter remains active. This is an in-test constructor
-mutation; it does not edit production source or constitute completed mutation
-evidence until both current-policy success and old-policy failure execute.
-
-The retained-metadata-handle test now launches an ordinary Medium adversary,
-not a product-sandbox worker. That test must acquire WRITE_DAC before hardening
-to prove quarantine protects against an already-held handle. The stronger
-worker token had prevented its attack precondition. No product exception was
-added for that fixture.
-
-## Boundary and evidence
-
-Assume a helper is compromised after parsing untrusted OS metadata. It must not
-gain Control's write authority through its inherited SYSTEM identity. Control,
-administrative mutation helpers, and the OS remain trusted. Jobs limit lifetime,
-process count, memory and UI; they are not a substitute for token restrictions.
-
-Hosted jobs 123920681774 and 123920681383 both show read helpers opening the HKLM
-fixture for write and succeeding at SetTcpEntry under SYSTEM. The old test's TCP
-check means deleting another connection, not outbound networking. Both are now
-tested separately; timeout or connection refusal is not counted as access denial.
-
-## Contract
+Assume arbitrary code execution in a read helper after it consumes OS metadata.
+Control, the OS security mechanisms and administrative mutation workers remain
+trusted. A read helper must not write protected HKLM data, inject into Control,
+delete another process's TCP connection, remove its network fence, or open
+outbound TCP. Network probes need outbound TCP/HTTPS but none of those privileged
+writes. A local administrator modifying binaries or OS security is outside this
+boundary.
 
 SYSTEM-DESIGN.md section 2 calls workers “blocking OS reads (adapter scans, outside
-connections, Wi-Fi)” and gives their identity as “same as Control”. It requires
-creation suspended, job assignment, then resume. It does not specify individual
-network permissions. The narrower authority below records this hardening decision.
+connections, Wi-Fi)” with identity “same as Control”. Its worker job containment
+contract requires assignment before execution. Section 4.5 specifies “Quick
+check (TCP)” and “Full check (HTTPS”; it also requires a full HTTPS success to
+restore a failed line. These establish the probe and line-check network need.
+The owner explicitly approved the same network exception for line-check.
 
-| Worker | Outbound TCP/HTTPS | HKLM write | Other process write/injection | Delete TCP connection | Integrity |
-| --- | --- | --- | --- | --- | --- |
-| app-info, installed-apps | deny | deny | deny | deny | Medium |
-| meters, network | deny | deny | deny | deny | Medium |
-| probe | allow | deny | deny | deny | Medium |
-| line-check | allow | deny | deny | deny | Medium |
-| outside | inherited administrative authority | allow | allow | allow | parent's High or System |
-| policy-set, metrics-set/restore, protect-directory, stop-process, close-tcp, autostart-set/upgrade | inherited administrative authority | allow | allow | allow | parent's High or System |
-| other modes | deny | deny | deny | deny | Medium |
+| Worker | Network | HKLM write / process injection / TCP deletion | Integrity |
+| --- | --- | --- | --- |
+| app-info, installed-apps, meters, network | deny outbound TCP, both families | deny | Medium |
+| architecture, policy, metrics, port-holder, tcp-identity, autostart | deny outbound TCP, both families | deny | Medium |
+| tcp-port-configuration | local WMI read; deny outbound TCP | deny | Medium |
+| probe, line-check | allow bound outbound TCP and HTTPS | deny | Medium |
+| outside | existing administrative authority for EStats | existing authority | parent's High or System |
+| policy-set, metrics-set/restore, protect-directory, stop-process, close-tcp, autostart-set/upgrade | existing administrative authority | existing authority | parent's High or System |
 
-For probe and line-check, section 4.5 requires “Quick check (TCP)” and “Full check
-(HTTPS” and says a down line recovers only after HTTPS passes. The implementation
-uses bound outbound TCP sockets in both helpers; line-check additionally performs
-HTTPS. There is no narrower token-level network distinction between those two.
-Their destination validation remains the responsibility of the operation parser;
-the token is not an endpoint allowlist. The owner explicitly approved the same
-network exception for line-check on 2026-10-30.
+The table is a contract, not a claim that the current candidate has passed.
 
-The read-only modes need no outbound sockets. Outside enables TCP EStats and
-therefore remains administrative, consistent with section 2's identity contract.
-This is not a claim that outside is a sandbox against arbitrary code execution.
-The harness must expect System integrity for SYSTEM and High for elevated admin,
-not weaken the expectation to any integrity label.
+This WFP rule covers direct socket creation by the private image. It does not
+by itself cover service-mediated egress or a broker creating a different image.
+Microsoft specifically notes that WMI-created processes are not automatically
+associated with the caller's job. Those paths need separate security review;
+the direct-connect and job-count tests must not be called a general Windows
+sandbox proof.
 
-## Mechanism and alternatives
+## Token construction and native compatibility
 
-Use CreateRestrictedToken with DISABLE_MAX_PRIVILEGE, elevated groups deny-only,
-SYSTEM user deny-only, Medium integrity, and WRITE_RESTRICTED for non-admin modes.
-Read-only workers use RESTRICTED as the sole restricting SID; network probes
-also include Builtin Users. No SYSTEM, Administrators, Everyone or logon SID is added to
-the restricting list. These are candidate grants, subject to hosted startup and
-functional compatibility checks. Existing explicit pipe inheritance and detached,
-suspended launch remain in place.
+Non-administrative workers keep their normal user identity for native reads,
+disable privileged group grants, remove privileges except SeChangeNotifyPrivilege,
+and run at Medium integrity. WRITE_RESTRICTED adds an independent restricting-SID
+check for writes. The restricting set never contains SYSTEM or Administrators:
+it contains RESTRICTED, plus Users for probes, and Authenticated Users for the
+TCP-settings query. Retaining SYSTEM in the normal identity is now compared
+against SYSTEM deny-only in the hosted diagnostic; privileged operations must
+still be denied by the real tests, including registry WRITE_DAC.
 
-[Microsoft's API reference](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)
-documents that DISABLE_MAX_PRIVILEGE retains SeChangeNotifyPrivilege, deny-only
-can apply to the user SID, and WRITE_RESTRICTED applies the additional check to
-writes. [Restricted tokens](https://learn.microsoft.com/en-us/windows/win32/secauthz/restricted-tokens)
-require both normal and restricting-SID access checks to succeed. Merely removing
-privileges does not remove an ACL's SYSTEM grant.
+[CreateRestrictedToken](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)
+documents the independent normal/restricting access checks and WRITE_RESTRICTED
+semantics. Disabling SYSTEM in the normal identity is not equivalent to removing
+it from the restricting set. Our prior SYSTEM coverage was missing, so the
+identity choice remains subject to hosted functional and denial proofs.
 
 [CreateProcessAsUser](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessasuserw)
-normally requires increase-quota and sometimes assign-primary-token privileges;
-using a restricted version of the caller's primary token exempts assign-primary.
-The launcher keeps the parent token and creates the restricted child in the same
-session. DETACHED_PROCESS avoids the previously reproduced console initialization
-failure with CREATE_NO_WINDOW and lowered integrity.
+exempts restricted versions of the caller's token from the usual assign-primary
+privilege requirement. DETACHED_PROCESS avoids the previously reproduced console
+initialization failure. Only the three explicit I/O pipes are inherited.
 
-[AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation)
-provides explicit capability-based network isolation. It is the alternative if
-the restricted-token candidate cannot enforce socket denial without breaking
-required reads. It also changes file, registry, process and device access, so
-all native metadata APIs would need compatibility qualification.
+The earlier Null-SID candidate broke OLE32/USER32 initialization. RESTRICTED
+restored all six tested DLLs under elevated admin. SYSTEM service logs still
+showed error 1114; no report claims that an unobserved native object denial has
+been identified. The replacement SYSTEM relay and identity variants are required
+to close that gap.
 
-[Chromium's sandbox design](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/design/sandbox.md)
-uses a broker, restricted tokens, jobs, integrity and desktops; its strongest
-targets rely on broker-supplied handles. Its lowbox/AppContainer layer explicitly
-adds network denial. Chromium is a user-browser broker example, not evidence
-that its policy works unchanged for a SYSTEM service. No implementation code is
-copied. Our read helpers still need native metadata access, which is why full
-read restrictions or Chromium's fully locked-down policy are not adopted blindly.
+## TCP settings
 
-## Qualification still required
+Both jobs 123944520917 and 123944520716 reached WMI ExecQuery and returned
+0x80041003 after DLL initialization was repaired for the elevated-runner case.
+The query returns per-template dynamic and auto-reuse ranges, including nulls.
+Searches did not establish a documented GetDynamicPortRange API or registry
+mapping that preserves this complete result.
 
-### Results from diagnostic run 41016341189
+[MSFT_NetTCPSetting](https://learn.microsoft.com/en-us/windows/win32/fwp/wmi/nettcpipprov/msft-nettcpsetting)
+is the documented source. [WMI namespace security](https://learn.microsoft.com/en-us/windows/win32/wmisdk/access-to-wmi-namespaces)
+describes ordinary Authenticated Users read permission. Adding that SID only to
+this query's restricting set passed the real native read under elevated admin
+on both architectures in accadb41. No namespace ACL is changed, and the worker
+does not regain administrator group grants. SYSTEM parity remains a gate.
 
-The x64 diagnostic (job 123933429628) demonstrates that RESTRICTED alone lets
-all six tested DLLs initialize. Null, Users, Everyone and write-restricted SID
-alone fail USER32 and consequently OLE32/SHELL32 initialization. Adding the logon
-SID to RESTRICTED is not necessary for this observed x64 result. The production
-candidate now includes RESTRICTED; the exact underlying object denial is still
-unproven. The next diagnostic evaluates the actual station and desktop ACLs
-against each token rather than claiming that error 1114 identifies an object.
+## Network fence: private image identity
 
-**Network isolation is not implemented by this candidate.** Every x64 variant,
-including Null, successfully opened the outbound socket. No network-denial
-assertion has been removed or relaxed. A successful DLL fix must not be reported
-as successful worker isolation. The authority table above remains the required
-contract, not a statement of achieved protection.
+The accadb41 SID-based WFP predicate failed: every read worker connected.
+It has been removed. The replacement uses WFP's documented executable-path
+condition. Each read worker receives a private executable copy beneath a fresh,
+random, admin-owned ProgramData directory. The file permits read/execute but not
+write by ordinary principals and has a High mandatory label. Control and probes
+keep their original image path.
 
-The ARM64 pilot (123933429866) did not run the tests: -race is unsupported and
-PSTools did not contain the assumed PsExec64a.exe. The workflow now applies race
-checks only on x64 and uses the signed x64 launcher for both runners. The x64
-empty restricted-SID query exposed an allocation smaller than the Go
-TOKEN_GROUPS struct; the test now reserves at least the typed structure size.
-SYSTEM output was incomplete with the prior PsExec invocation, so the launch
-now explicitly selects session 0 with interactive I/O, as its usage documents.
-These are harness repairs, not evidence of SYSTEM qualification.
+This is a separate copy, not a hard link: changing a hard link's ACL changes the
+original file's ACL too, and a mapped executable can prevent deleting its hard
+links. Source binaries and machine-store ACLs are never modified. The copy cost
+must be measured in qualification before merge.
 
-The same OLE32/CLSIDFromString package-init stack appears in native-services
-ARM64 job 123933410231 and initial network scans in lifecycle jobs 123933496511
-and 123933496437. Other failures must still be checked after the loader repair.
-No shared or Linux source is changed; Linux job 123934294693 is outside scope.
+[FwpmGetAppIdFromFileName](https://learn.microsoft.com/en-us/windows/win32/api/fwpmu/nf-fwpmu-fwpmgetappidfromfilename0)
+provides the application's identifier.
+[Microsoft's application filtering example](https://learn.microsoft.com/en-us/windows/win32/fwp/permitting-and-blocking-applications-and-users)
+documents ALE_APP_ID matching. Each private image gets IPv4 and IPv6
+ALE_AUTH_CONNECT block filters in its own sublayer before its suspended process
+is resumed. No broad rule is added for the shared Control/probe executable.
 
-### Loader failure found in the first candidate
+[AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+without network capabilities was considered. It changes integrity to Low and
+requires independent file/COM grants. The image-based WFP approach preserves the
+required Medium integrity and existing metadata APIs. Chromium's
+[sandbox design](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/design/sandbox.md)
+is a reference for separating broker authority from helper authority; none of
+its implementation code was copied.
 
-Job 123928118497 failed before the TCP-settings worker reached its operation:
-`winengine.init -> mustGUID -> windows.GUIDFromString -> clsidFromString ->
-LazyProc.mustFind`. The vendored wrapper binds CLSIDFromString to **ole32.dll**.
-This is DLL initialization failure (1114), not a missing entry point. Our
-production flags include WRITE_RESTRICTED, so it is incorrect to infer that
-ordinary read access was denied merely because the token has restricting SIDs.
-The failing internal object has not yet been identified.
+## Lifetime and crash cleanup
 
-[Chromium's token policy source](https://raw.githubusercontent.com/chromium/chromium/main/sandbox/win/src/restricted_token_utils.cc)
-adds the logon SID for BaseNamedObjects creation in USER_LIMITED. Its
-[token construction](https://raw.githubusercontent.com/chromium/chromium/main/sandbox/win/src/restricted_token.cc)
-also adjusts the default DACL; a restricting-SID list alone is not the complete
-compatibility recipe. [Microsoft's service SID description](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_sid_info)
-lists World, service logon and write-restricted SIDs for restricted services.
-That policy is not equivalent to a worker forbidden outbound networking.
+The private directory name includes the owner PID, its creation time and a
+random nonce. A durable policy record contains fresh filter/sublayer keys before
+any WFP object is added. Native objects also carry a directory-specific ownership
+tag. All writes to this state occur inside the new private directory.
 
-| Candidate grant | Compatibility reason to test | Boundary risk |
-| --- | --- | --- |
-| RESTRICTED (S-1-5-12) | Objects explicitly accessible to restricted code | Grants every matching object's writes, not only loader objects |
-| actual logon SID | Named objects within that logon | Other objects shared with that session; absent in some SYSTEM tokens |
-| Everyone | Common object grants | May restore sockets and world-writable objects |
-| Users | Ordinary application access | Intended for probes, potentially too permissive for metadata workers |
-| write-restricted SID (S-1-5-33) | Windows service compatibility | Needs measured object access, not an assumption |
+[JOB_LIST](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-updateprocthreadattribute)
+assigns the child to its unnamed, kill-on-close job atomically at process creation.
+This prevents parent death from stranding a suspended child before assignment.
+The job retains its one-process, memory and UI restrictions.
 
-The next two-job pilot compares these without changing production policy. It
-reports named DLL initialization errors, anonymous event creation, registry and
-process write denial, and outbound socket access. It also runs real native read
-operations separately from synthetic authority probes. A candidate's diagnostic
-completion is **not** a passing isolation result. The production test now covers
-every named worker mode's token, and fails on any tested DLL initialization error.
-No candidate is promoted until the original denials and functional calls pass.
+Filters are static rather than dynamic: [WFP object lifetimes](https://learn.microsoft.com/en-us/windows/win32/fwp/object-management)
+say dynamic filters disappear on session/parent exit, which would race child
+termination. Normal cleanup waits for child exit, removes filters, then removes
+the private image and record.
 
-The focused dispatch uses two jobs total: x64 and ARM64. Each exercises elevated
-admin, then SYSTEM using Microsoft's signed PsExec on the disposable runner only.
-The SYSTEM test asserts its actual user SID. No local service, engine or TUN runs.
+On the next worker launch, recovery validates the directory without following
+reparse points, checks its owner and exact private ACL, and checks the recorded
+parent incarnation when preparation has not completed. It retains protection while
+the durably recorded child incarnation is alive, and can reclaim an exited child
+even when its parent continues running. The child record is flushed before WFP
+installation and resume. No named job is exposed that a worker could open to
+keep it alive. [Microsoft's job lifetime](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)
+ties cleanup to closing handles and terminating associated processes.
+The executable is removed before the fence; a sharing failure retains the rules
+and record for a later sweep. Recovery validates WFP ownership tags before deleting the recorded keys. It
+never recursively deletes directories or deletes an arbitrary path from a record.
 
-Before merging: prove denial and legitimate read/probe functionality under both
-identities, prove the old-token mutation fails and revert it, and obtain an
-independent security review. TCP socket success alone does not prove HTTPS or
-interface binding, and a token-layout unit test alone does not prove isolation.
+## Qualification
+
+The two-job pilot covers x64 and ARM64, each under elevated admin and a scheduled
+SYSTEM task. Output is relayed directly in memory to the runner; no PsExec
+console assumptions or saved log files are involved. A missing PASS or missing
+SYSTEM identity is failure.
+
+Tests cover native reads, metadata comparison (so empty fallback results cannot
+pass), bound TCP and certificate-verified HTTPS, per-mode authority, IPv4 and IPv6
+outbound denial, registry WRITE_DAC, Control-handle duplication, and attempts to
+delete the worker's own WFP filters. The local TLS fixture changes no machine
+certificate store. A separate HTTPS check uses Windows' real system trust and
+the product's existing Cloudflare endpoint, with a parent positive control and
+no retries; the local fallback-root fixture cannot stand in for that check.
+
+The old constructor is substituted into a disposable child while keeping the
+image fence: its missing restricting SIDs and original SYSTEM write authority
+must be exposed. A separate network mutation removes only that fixture's rules,
+proves the same image/current token can connect, restores the rules, and proves
+denial returns. No production constructor override is exposed.
+
+The crash test first proves the live owner and child exist, confirms recovery
+leaves them alone, kills the owner, waits for job termination, then proves the
+image and WFP objects still exist. Only then does it credit recovery for their
+removal. Independent security review and all hosted results remain required.

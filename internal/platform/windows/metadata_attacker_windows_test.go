@@ -3,6 +3,7 @@ package winplatform
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"syscall"
@@ -62,6 +63,9 @@ func startMetadataAttacker(exe string) (_ *metadataAttacker, err error) {
 		return nil, err
 	}
 	cmd := exec.Command(exe, "worker", "acl-proof")
+	// With SysProcAttr.Token and a nil Env, os/exec builds the token user's
+	// environment instead of inheriting ours. Preserve the hosted-test guards.
+	cmd.Env = os.Environ()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Token: syscall.Token(token), CreationFlags: windows.DETACHED_PROCESS}
 	p := &metadataAttacker{cmd: cmd}
 	defer func() {
