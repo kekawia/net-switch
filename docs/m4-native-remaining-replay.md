@@ -26,7 +26,7 @@ remains separately covered by the existing machine-folder tests and CI.
 Local Windows aggregate: **7,894 / 7,894**, zero uncovered, producer/lifecycle/
 Windows-policy/report exits **0/0/0/0**. No product behavior or frozen data changed.
 
-## Gate mutations and current checkpoint
+## Earlier checkpoint before settingsSetupUpdate
 
 Four new mutations ran through the full pure aggregate and were reverted:
 missing migration receipt rejected 172 required rows (exits 0/0/1); a failed
@@ -66,12 +66,11 @@ Hosted race checks and independent review remain.
   Native lease exits, failure identity and reattachment execute in the selected
   lifecycle aggregate. These remain pure protocol evidence.
 
-Still open: settingsSetupUpdate (341 entries), lost/mismatched native Apply
-acknowledgements, and the remaining native invalid-start/pagination/concurrency
-replacement audit. Installed parity and removal gates are separate. The settings
-trace's protectMachineDir callback needs an explicit native protected-store
-replacement; no protection result is credited merely because a memory store was
-constructed. No partial settings trace was registered in this checkpoint.
+That checkpoint left settingsSetupUpdate, Apply acknowledgements and lifecycle
+replacements open. They are now complete; the final named-test mapping and
+product change are in [the ledger](m4-semantic-ledger.md). Installed parity and
+removal gates remain separate. The Windows protection callback is bound to
+executed ACL-policy checks, not construction of a memory store.
 
 ## migration
 

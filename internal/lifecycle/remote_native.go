@@ -25,8 +25,8 @@ import (
 
 // The native engine speaks spec §5.10 directly: revisions carry the compiled
 // policy.Config, flows are paged records, probes name a target and kind, and
-// accounting is paged and acknowledged. The temporary adapter dialect stays
-// selectable from the hello capabilities until the removal PR deletes it.
+// accounting is paged and acknowledged. Production rejects the adapter dialect;
+// historical fixtures select it explicitly until the removal PR deletes it.
 var nativeRequired = []string{"revisions", "lease", "status", "paged-totals", "totals-ack", "terminal-stop", "probe-options"}
 
 // adapterLostPendingBound caps how long Control waits for the stopped engine's
@@ -40,7 +40,7 @@ func nativeDialect(capabilities []string) (adapter bool, err error) {
 		have[v] = true
 	}
 	if have["singbox-adapter-v1"] {
-		return true, nil
+		return false, errors.New("adapter-only engine is incompatible with native Control")
 	}
 	for _, v := range nativeRequired {
 		if !have[v] {
