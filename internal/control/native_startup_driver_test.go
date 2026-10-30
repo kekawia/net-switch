@@ -48,7 +48,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
-	liveSlice := name == "lineOrder"
+	liveSlice := name == "lineOrder" || name == "lineRemove"
 	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute"
 	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException" || name == "combiningNoOpenLine"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
@@ -132,6 +132,11 @@ func replayNativeStartup(t *testing.T, name string) {
 				t.Fatal(err)
 			}
 			operatorStateExpectation(response["body"].(map[string]any), false)
+			if name == "lineRemove" {
+				// A live revision does not clear the surviving line's completed
+				// probe when the old restart would reset its health bookkeeping.
+				response["body"].(map[string]any)["lines"].([]any)[0].(map[string]any)["ping"] = float64(18)
+			}
 			value = mustStartupJSON(t, response)
 		}
 		cmp.entries = append(cmp.entries, traceEntry{Seq: entry.Seq, Kind: entry.Kind, Direction: entry.Direction, Value: value})

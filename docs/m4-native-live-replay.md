@@ -1,9 +1,9 @@
 # Live line and IPv6 replay
 
-2026-10-30. Work in progress. The lineOrder trace adds 274 checked entries to
-the previous 3,985. Its aggregate passes at **4,259 / 7,894**, with
-producer/lifecycle/report exits 0/0/0. adapterRename (281), ipv6 (1,153),
-lineAdd (201) and lineRemove (234) remain unregistered.
+2026-10-30. Work in progress. lineOrder (274) and lineRemove (234) add 508
+checked entries to the previous 3,985. The aggregate passes at **4,493 / 7,894**,
+with producer/lifecycle/report exits 0/0/0. adapterRename (281), ipv6 (1,153)
+and lineAdd (201) remain unregistered.
 
 The shared startup driver, native compiler boundary, HTTP transaction executor,
 ordered counterpart and exactly-once file cursor are reused. Startup rule files
@@ -42,13 +42,22 @@ or weakening the v2 boundary validator.
 
 ## Scope and limits
 
+lineRemove reuses the same executor and retired-operation plan. It removes b2
+through POST /api/lines/remove, checks the complete single-line policy and both
+API responses, and proves that new and held main flows stay on a1. It also
+checks the removed b2 rule files and retained settings publication. The surviving
+line's completed 18 ms ping stays visible: the old restart reset it to null.
+This is an explicit health-bookkeeping replacement under §5.7, checked from
+the healthy starting condition and absence of any extra probe or restart.
+The trace has no supplied held b2 flow; installed traffic evidence is separate.
+
 Exercised settings: two equally weighted lines, empty pins, combining and IPv6
 off, reordered main and unchanged physical lane targets. Both lines start up
 with completed 18 ms quick probes. Timing is the original unchanged instant;
 response snapshots follow the acknowledged live revision. Diagnostics include
 startup and line order; retired restart diagnostics are explicit replacements.
 
-Nearby gaps: add/remove/rename, IPv6 transitions, failed durable writes or Apply,
+Nearby gaps: add/rename, IPv6 transitions, failed durable writes or Apply,
 concurrent requests, active probe races, installed services and actual traffic.
 No new hook runs on probe goroutines in this checkpoint. Existing synchronized
 startup callbacks are reused. Hosted race checks and independent review remain.

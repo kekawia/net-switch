@@ -34,8 +34,17 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 	}
 	want := twoLineNativeConfig(map[string]string{})
 	want.Lines = []platform.Line{{ID: "b2", Interface: "Wi-Fi"}, {ID: "a1", Interface: "Ethernet"}}
+	end, read, configSeq, pidSeq := 269, 270, 222, 228
+	note := "line order: Wi-Fi, Ethernet"
+	if trace.Name == "lineRemove" {
+		want.Lines = []platform.Line{{ID: "a1", Interface: "Ethernet"}}
+		want.Lanes = map[string]string{"a1": "a1"}
+		want.Shares = map[string]uint64{}
+		end, read, configSeq, pidSeq = 229, 230, 210, 216
+		note = "removed Wi-Fi (Wi-Fi)"
+	}
 	calls := len(e.calls)
-	checked := replayNativePolicySteps(t, c, e, clock, files, trace, cmp, fc, []nativePolicyStep{{135, 269, 158, want}, {270, 273, -1, want}})
+	checked := replayNativePolicySteps(t, c, e, clock, files, trace, cmp, fc, []nativePolicyStep{{135, end, 158, want}, {read, read + 3, -1, want}})
 	if !reflect.DeepEqual(e.calls[calls:], []string{"apply"}) || e.Snapshot().Instance != before.Instance || e.Snapshot().Status != "on" {
 		t.Fatal("live revision must retain engine instance without stop/start", e.calls[calls:])
 	}
@@ -70,7 +79,7 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 		add("file-completion", v)
 	}
 	remove := func(name string) { add("remove", map[string]any{"file": "/oracle/data/" + name}) }
-	log("line order: Wi-Fi, Ethernet")
+	log(note)
 	add("log", map[string]any{"text": "routing stopping"})
 	add("process-exit", map[string]any{"pid": 456, "code": 0})
 	remove("engine.pid")
@@ -83,11 +92,19 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 	file("readFile", "engine.pid", false)
 	add("socket-completion", map[string]any{"operation": "listen", "port": 49000})
 	add("socket-completion", map[string]any{"operation": "close", "port": 49000})
-	add("directory-list", map[string]any{"directory": "/oracle/data", "names": []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "apps-b2.json", "share-b2.json", "cut-b2.json", "engine-config.json", "settings.json.bak", "share-a1.json", "cut-a1.json"}})
+	names := []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "apps-b2.json", "share-b2.json", "cut-b2.json", "engine-config.json", "settings.json.bak"}
+	if trace.Name == "lineOrder" {
+		names = append(names, "share-a1.json", "cut-a1.json")
+	}
+	add("directory-list", map[string]any{"directory": "/oracle/data", "names": names})
 	file("readdir", "", true)
 	// The directory is /oracle/data, without a trailing separator.
 	plan[len(plan)-1].Value = mustStartupJSON(t, map[string]any{"operation": "readdir", "file": "/oracle/data", "ok": true})
-	for _, name := range []string{"share-b2.json", "cut-b2.json"} {
+	removed := []string{"share-b2.json", "cut-b2.json"}
+	if trace.Name == "lineRemove" {
+		removed = append([]string{"apps-b2.json"}, removed...)
+	}
+	for _, name := range removed {
 		remove(name)
 		file("rm", name, true)
 	}
@@ -99,7 +116,11 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 	add("engine", map[string]any{"route": "/version", "method": "GET"})
 	add("engine-reply", map[string]any{"route": "/version", "status": 200, "body": map[string]any{}})
 	log("routing on")
-	for i, line := range []struct{ id, label string }{{"b2", "Wi-Fi"}, {"a1", "Ethernet"}} {
+	probeLines := []struct{ id, label string }{{"b2", "Wi-Fi"}, {"a1", "Ethernet"}}
+	if trace.Name == "lineRemove" {
+		probeLines = nil
+	}
+	for i, line := range probeLines {
 		lane, probe := "/proxies/lane-"+line.id, "/proxies/line-"+line.id+"/delay"
 		add("engine", map[string]any{"route": lane, "method": "PUT", "body": map[string]any{"name": "line-" + line.id}})
 		add("engine-reply", map[string]any{"route": lane, "status": 200, "body": map[string]any{}})
@@ -112,7 +133,11 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 		log(line.label + "'s apps now use " + line.label)
 		async("engine."+probe+".json", []any{}, map[string]any{"delay": 18}, false)
 	}
-	add("probe-vote", map[string]any{"line": "a1", "result": true, "at": clock.Now().UnixMilli()})
+	if len(probeLines) > 0 {
+		add("probe-vote", map[string]any{"line": "a1", "result": true, "at": clock.Now().UnixMilli()})
+	} else {
+		async("platform.readDefaultRoutes", []any{}, []map[string]string{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}, false)
+	}
 	next, completion := 0, 0
 	for _, x := range trace.Entries[:135] {
 		if x.Kind == "completion" {
@@ -155,7 +180,7 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 					t.Fatal(err)
 				}
 			case "engine.pid":
-				if v.Text != "456" || seq != 228 {
+				if v.Text != "456" || seq != pidSeq {
 					t.Fatal("retired PID publication", seq)
 				}
 			case "engine-config.json":
@@ -166,11 +191,16 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 				if err := json.Unmarshal([]byte(v.Text), &config); err != nil {
 					t.Fatal(err)
 				}
-				if seq != 222 || len(config.Outbounds) != 4 || config.Route.Final != "lane-b2" {
+				final, outbounds := "lane-"+want.Lines[0].ID, 2*len(want.Lines)
+				if len(want.Lines) == 1 {
+					final = "line-a1"
+					outbounds = 1
+				}
+				if seq != configSeq || len(config.Outbounds) != outbounds || config.Route.Final != final {
 					t.Fatal("retired config line order")
 				}
 				for i, line := range want.Lines {
-					if config.Outbounds[i]["tag"] != "line-"+line.ID || config.Outbounds[i]["bind_interface"] != line.Interface || config.Outbounds[i+2]["default"] != "line-"+want.Lanes[line.ID] || config.Outbounds[i+2]["interrupt_exist_connections"] != false {
+					if config.Outbounds[i]["tag"] != "line-"+line.ID || config.Outbounds[i]["bind_interface"] != line.Interface || len(want.Lines) > 1 && (config.Outbounds[i+2]["default"] != "line-"+want.Lanes[line.ID] || config.Outbounds[i+2]["interrupt_exist_connections"] != false) {
 						t.Fatal("retired config binding/lane", i)
 					}
 				}
@@ -225,7 +255,7 @@ func checkLiveOrderHeldFlows(t *testing.T, before, after policy.Config) {
 	}
 	admit(40001)
 	current, err := table.Page("")
-	if err != nil || len(current.Flows) != 2 || current.Flows[1].Line != "b2" || current.Flows[1].Revision != 2 {
+	if err != nil || len(current.Flows) != 2 || current.Flows[1].Line != after.Lines[0].ID || current.Flows[1].Revision != 2 {
 		t.Fatal("new flow did not follow reordered main", current, err)
 	}
 }

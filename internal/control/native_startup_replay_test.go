@@ -108,6 +108,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("lineRemove", func(t *testing.T) { replayNativeStartup(t, "lineRemove") })
 	t.Run("lineOrder", func(t *testing.T) { replayNativeStartup(t, "lineOrder") })
 	t.Run("lostDefaultRoute", func(t *testing.T) { replayNativeStartup(t, "lostDefaultRoute") })
 	t.Run("probeFailover", func(t *testing.T) { replayNativeStartup(t, "probeFailover") })

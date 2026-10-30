@@ -150,7 +150,7 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 		order := []string{"api"}
 		if step.settings >= 0 {
 			order = []string{"write:control-journal.json", "write:control-journal.json.bak", "write:settings.json", "write:settings.json.bak", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "api"}
-			if trace.Name == "lineOrder" {
+			if trace.Name == "lineOrder" || trace.Name == "lineRemove" {
 				order = append(order[:len(order)-1], "log", "api")
 			}
 			if e.applies != applies+1 || e.Snapshot().AppliedPoint <= before.AppliedPoint {
@@ -167,13 +167,19 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			ruleFiles = twoLineRevisionFiles()
 		}
 		ruleEntries := trace.Entries[step.begin+1 : step.end]
-		if trace.Name == "lineOrder" && step.settings >= 0 {
+		if (trace.Name == "lineOrder" || trace.Name == "lineRemove") && step.settings >= 0 {
 			// One live revision replaces both the old pre-save rule refresh and
 			// the restart's complete compilation. The restart checker below
 			// checks their positions relative to settings and other effects.
-			ruleFiles = append(ruleFiles, "apps-b2.json", "apps-a1.json", "share-a1.json", "cut-a1.json")
+			last := 212
+			if trace.Name == "lineRemove" {
+				ruleFiles = append(ruleFiles, "apps-a1.json")
+				last = 197
+			} else {
+				ruleFiles = append(ruleFiles, "apps-b2.json", "apps-a1.json", "share-a1.json", "cut-a1.json")
+			}
 			ruleEntries = append([]replayledger.Entry{}, trace.Entries[136:156]...)
-			ruleEntries = append(ruleEntries, trace.Entries[192:212]...)
+			ruleEntries = append(ruleEntries, trace.Entries[192:last]...)
 		}
 		proof, err := fileCursor.CheckRevision(ruleEntries, ruleFiles, cmp, effectStart)
 		if err != nil {
@@ -183,9 +189,13 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			checked[seq] = guard
 		}
 		wantLogs := logs
-		if trace.Name == "lineOrder" && step.settings >= 0 {
+		if (trace.Name == "lineOrder" || trace.Name == "lineRemove") && step.settings >= 0 {
 			wantLogs++
-			if files.logs[logs] != "line order: Wi-Fi, Ethernet" || e.Snapshot().Instance != before.Instance || !reflect.DeepEqual(e.calls[len(e.calls)-1:], []string{"apply"}) {
+			note := "line order: Wi-Fi, Ethernet"
+			if trace.Name == "lineRemove" {
+				note = "removed Wi-Fi (Wi-Fi)"
+			}
+			if files.logs[logs] != note || e.Snapshot().Instance != before.Instance || !reflect.DeepEqual(e.calls[len(e.calls)-1:], []string{"apply"}) {
 				t.Fatal("live line order changed session or diagnostic")
 			}
 		}
