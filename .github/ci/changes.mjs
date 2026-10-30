@@ -30,6 +30,8 @@ const isCode = path => /\.(?:go|mjs|ps1)$/.test(path);
 
 // The area of a code file, by where it lives and what it builds for.
 function codeArea(path) {
+  // The cross-platform ledger parses this Windows-only test's declaration.
+  if (path === 'internal/platform/windows/security_windows_test.go') return 'go_shared';
   // Node's trace coverage test reads this Go source. drift.test.mjs fails if
   // a test or script reads another mapped file its area wouldn't select.
   if (path === 'internal/control/http.go') return null;

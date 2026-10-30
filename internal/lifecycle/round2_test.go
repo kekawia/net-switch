@@ -40,6 +40,7 @@ func fakeRemote(t *testing.T, version string) (*Remote, *atomic.Int32) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	r := NewRemote(ctx, func(string) {})
+	r.testDialect = func([]string) (bool, error) { return true, nil }
 	attachments := &atomic.Int32{}
 	r.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
 		server, client := net.Pipe()

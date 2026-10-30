@@ -279,8 +279,8 @@ func TestRemoteRefusesEnginesMissingRequiredCapabilities(t *testing.T) {
 	if adapter, err := nativeDialect([]string{"revisions", "lease", "status"}); err == nil || adapter {
 		t.Fatal("an engine without paged accounting was accepted", adapter, err)
 	}
-	if adapter, err := nativeDialect([]string{"singbox-adapter-v1", "revisions", "lease"}); err != nil || !adapter {
-		t.Fatal("the temporary adapter dialect must stay selectable until its removal", adapter, err)
+	if adapter, err := nativeDialect([]string{"singbox-adapter-v1", "revisions", "lease"}); err == nil || adapter {
+		t.Fatal("adapter-only capabilities must be rejected by native Control", adapter, err)
 	}
 }
 

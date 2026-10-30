@@ -1,61 +1,43 @@
 # Native replay semantic ledger v2
 
-2026-10-27, based on main `3c7b26d0`. Implements the accounting boundary in
-NATIVE-REPLAY-RETIREMENT.md, with locked design §§3.3, 4.1, 4.4–4.6 and 5.7.
-This is an inventory and assertion-receipt mechanism, not the missing replay.
-It authorizes no retirement or deletion.
+Updated 2026-10-30. Implements NATIVE-REPLAY-RETIREMENT and the locked design
+§§2–3, 4.1, 4.4–4.6 and 5.7. The 25 frozen traces now have complete native
+assertion bindings. This document does not authorize installed-harness retirement
+or deletion of frozen references.
 
-## Measured result
+## Final measured result
 
-Completed live line/IPv6 slice, 2026-10-30: adapterRename, ipv6, lineAdd,
-lineOrder and lineRemove add 2,143 entries, bringing the passing local
-aggregate to **6,128 / 7,894** (1,766 uncovered). Gate mutations fail and were
-reverted. Hosted race checks and independent review remain. See
-[live replay evidence](m4-native-live-replay.md). Earlier checkpoints follow.
-
-Completed health slice, 2026-10-30: failoverFailback, busyFailedChecks,
-probeFailover and lostDefaultRoute add 2,063 entries, bringing the passing local
-aggregate to **3,985 / 7,894** (3,909 uncovered). All four requested gate mutations
-failed and were reverted. Hosted race checks and independent review remain.
-See [health replay evidence](m4-native-health-replay.md). The policy slice totals
-below describe the preceding checkpoint.
-
-Updated 2026-10-29 by the six-trace policy/physical-usage slice in PR #112.
-The pure Control, control/engine and ledger suites plus the selected native
-lifecycle contract report `covered 1922 / 7,894; uncovered 5972; pending map[]`
-(all exit codes 0). This adds 1,436 entries to the existing 486 startup/API
-entries without an OS restriction. Static inventory still credits zero.
-Missing receipts, failing subtests, dropped HTTP checks and reordered cross-kind
-observations failed the gate in reverted mutations.
-See [policy replay evidence](m4-native-policy-replay.md) and the earlier
-[startup evidence](m4-native-startup-replay.md).
+The restored local Windows aggregate reports **7,894 / 7,894**, zero uncovered
+and no pending entries. All four producers and replay-report exit **0**.
+Static inventory alone still credits zero: only receipts from passing tests count.
 
 | Measure | Entries |
 | --- | ---: |
-| Hash-verified original entries consumed once by accounting | 7,894 |
-| Proven by native trace assertions in a passing aggregate run | 1,922 |
-| Uncovered after that run | 5,972 |
-| Pending #107 | 0 |
-
-| Checked disposition (coverage is separate) | Entries |
-| --- | ---: |
+| Hash-verified original entries | 7,894 |
+| Covered in the passing Windows aggregate | 7,894 |
+| Uncovered / pending | 0 / 0 |
 | Unchanged external observation | 1,284 |
-| Translated native operation/result | 6,309 |
-| Member of a named atomic revision | 36 |
-| Obsolete representation with a replacement assertion | 265 |
-| Total | 7,894 |
+| Translated native operation/result | 5,215 |
+| Named atomic revision member | 36 |
+| Obsolete representation with replacement assertion | 1,359 |
 
-The distinction matters: assigning an assertion obligation to a completion or
-log is not proof that native Control produced that completion or log. No feature
-test is credited for entries it never read. The current generic obligations
-remain uncovered outside the registered traces. No assertion name
-alone, or a manually edited `covered` status, earns coverage.
+Exactly two entries, settingsSetupUpdate 7–8, describe Windows machine-store
+protection. They are scoped to the existing native Windows ACL-policy test
+`TestTrustedMachineSecurity`. Linux requires and credits 7,892 entries; the
+other two remain outside that job's scope, never falsely credited. The Windows
+test checks owner/DACL/write-grant policy, not installed ACL application.
+
+The final trace uses the existing driver, ordered counterpart/file cursors and
+ledger v2. See [final slice evidence](m4-native-remaining-replay.md),
+[reconnect](m4-native-reconnect-replay.md), [live revisions](m4-native-live-replay.md),
+[health](m4-native-health-replay.md), [policy](m4-native-policy-replay.md) and
+[startup](m4-native-startup-replay.md).
 
 ## Implementation and use
 
 `internal/replayledger/mapping.json` is the versioned, machine-readable source.
-It has 25 original SHA-256 keys, eight generic rules with nine whole-trace
-bindings each, 41 sequence annotations, nine atomic groups, and references to
+It has 25 original SHA-256 keys, eight generic rules with 25 whole-trace
+bindings each, 90 sequence annotations, nine atomic groups, and references to
 existing supporting tests. V2 adds response-bounded HTTP groups with an explicit
 `boundary: response` and `ack: -1`: no fake original acknowledgement is invented.
 Their executing owner proves native acknowledgement before the HTTP return.
@@ -173,7 +155,7 @@ OS scope; unknown OS strings fail mapping validation.
 
 The shared startup replay belongs in package `control`, in
 `internal/control/native_startup_replay_test.go`, to reuse its pure Control
-fixtures without importing Control from lifecycle. It will be one
+fixtures without importing Control from lifecycle. It is one
 `TestNativeStartupReplay` with 25 named per-trace subtests, sharing setup code
 but replaying each trace's own startup inputs and ordered assertions.
 
@@ -205,7 +187,7 @@ now supplies `nativeStartupEngine`, ordered selected-value/effect comparisons,
 and reply/group exhaustion. All three startup/saved-identity traces are
 registered with explicit lifecycle and stale-state replacement contracts.
 Ordered native counterpart and exactly-once file cursors reject reordered or
-reused observations; the other 22 traces still need their own startup receipts.
+reused observations; all 25 traces now consume their own startup entries.
 
 Each subtest calls `DefaultMapping`, `Load("../..", mapping)`, and `Build`, then
 selects the original-order rows whose hash matches its fixture and whose
@@ -278,9 +260,9 @@ use `{ "test": T, "os": "windows" }`; annotation overrides likewise accept
 | `no-stale-compiled-lines-or-pins` | Successful directory-list purpose replaced by complete-revision cleanup; old callback failures remain separately accounted for through async results. |
 | `acknowledgement-replaces-reload-wait` | Native acknowledgement barrier, without an artificial 300 ms sleep, at each of the three original waits. |
 
-These are named **uncovered obligations**, not invented passing tests. Mixed
-kinds such as file completions, writes and engine requests remain translated
-until their value-specific mapping and complete transaction assertions exist.
+These obligations are now backed by registered native tests. Mixed kinds such
+as file completions, writes and engine requests keep value-specific mappings
+and complete transaction assertions.
 No claim is made that every such entry has the same native representation.
 
 For `file-completion`, **translated** means a native Control I/O operation's
@@ -292,8 +274,8 @@ not enough. For `completion`, the original boundary ID/kind and adjacency remain
 checked, and the replay must assert the corresponding native operation completed
 on that side of the next observable effect. Go need not reproduce a JavaScript
 callback ID, but it must prove the operation, result, null/undefined semantics
-where relevant and order before consuming the marker. Current generic bindings
-do not yet supply those behavioral assertions and remain uncovered.
+where relevant and order before consuming the marker. The per-trace bindings now supply those behavioral assertions; every applicable
+row must receive its executing owner's receipt.
 
 PR #105 proves the twelve config families, six pin/share families and empty-app
 policy from `test/fixtures/windows-golden.json` inputs, through literal native
@@ -341,176 +323,109 @@ and function to exist. Only a passing aggregated run flips those 23 report rows
 to covered; merely merging the file or changing the status does not. Its other 188 entries were subsequently registered by the startup replay;
 no API receipt was duplicated.
 
-## Exact uncovered inventory
+## Follow-ups outside the 7,894-entry count
 
-All sequences below are inclusive and remain uncovered after the API and
-all three startup traces' passing aggregate.
-The full JSON report supplies each individual row without maintaining a second
-hand-written trace. Each trace starts at sequence zero.
+“New” means added by this PR; “mapped” means an existing named native test.
+All named tests below passed locally, in the pure aggregate or the focused
+protocol suite. Startup replacements also execute their named subtests. Control tests are in
+`internal/control`, lifecycle tests in `internal/lifecycle`, and the invalid
+start test in `internal/engine`.
 
-| Trace | Uncovered sequences | Count |
-| --- | --- | ---: |
-| adapterRename | 0–280 | 281 |
-| appLine | None (0–210 registered across its owners) | 0 |
-| busyFailedChecks | 0–686 | 687 |
-| capBlockedAndMainException | 0–274 | 275 |
-| capMoved | 0–221 | 222 |
-| capReset | 0–255 | 256 |
-| combining | 0–196 | 197 |
-| combiningNoOpenLine | 0–297 | 298 |
-| failoverFailback | 0–231 | 232 |
-| hungEngine | 0–485 | 486 |
-| ipv6 | 0–1152 | 1,153 |
-| legacyCaseOrder | None (0–143 registered) | 0 |
-| lineAdd | 0–200 | 201 |
-| lineOrder | 0–273 | 274 |
-| lineRemove | 0–233 | 234 |
-| lostDefaultRoute | 0–394 | 395 |
-| midnightGap | 0–187 | 188 |
-| migration | 0–190 | 191 |
-| probeFailover | 0–748 | 749 |
-| quitFailure | 0–174 | 175 |
-| reconnectPinned | 0–153 | 154 |
-| reconnectShared | 0–150 | 151 |
-| routingAndReads | 0–267 | 268 |
-| savedVersionOrder | None (0–130 registered) | 0 |
-| settingsSetupUpdate | 0–340 | 341 |
-| **Total** | | **7,408** |
+| Follow-up | Disposition and evidence |
+| --- | --- |
+| node.json authentication, malformed and invalid actions | **New:** `TestNativeNodeNegativeHTTPContracts` checks all 12 negative routes' full status/headers/body and absence of native mutation. |
+| Seven Undo cases | **New:** `TestNativeUndoFailureOracle` executes damaged-policy, damaged-metrics, policy-failure, save-failure, partial-ordered, empty-record and legacy-ordered; compares remaining records, calls and diagnostics. ServiceMode does not affect this Undo path and supplies no additional evidence. |
+| Failed native Apply closes nothing | **New:** `TestNativeRejectedApplyAndAtomicLaneCommit` sends Apply through the native protocol to a real flows.Table, refuses its persistence step, and proves the held records, applied number/hash/point and client snapshot remain unchanged. The older fake-engine test only supplements this with Control retry behavior. |
+| Atomic apply replaces partial lane PUT | **New:** `TestNativeRejectedApplyAndAtomicLaneCommit` changes two lane targets in one revision. While persistence is held, both old targets remain visible; refusal leaves both unchanged; a successful retry publishes both targets and new flows use both new lanes. Held flows stay unchanged throughout. |
+| Lost Apply acknowledgement | **New:** `TestNativeApplyAcknowledgementRecovery/lost` commits through the real protocol/flow table, holds the reply, cancels its caller, then delivers it late. The client does not publish it; retry returns the same apply point and keeps the held flow. |
+| Mismatched Apply acknowledgement | **New:** `TestNativeApplyAcknowledgementRecovery/number` and `/hash` corrupt the actual protocol reply after commit. Both are rejected without snapshot publication; retry is idempotent. |
+| Closure retry identity | **Mapped:** `TestReconnectPersistsItsOriginalSelectionBeforeClose` retains the exact durable request across a lost answer and newly opened flow. This is Control boundary evidence. |
+| Closure instance fencing | **Mapped:** `TestClosureIsFencedToItsOriginalInstance` rejects stale instance IDs and replacement between capture/send through native IPC while preserving the unrelated flow. |
+| Journal versus settings-mirror failure | **Mapped:** `TestServiceJournalFailureDoesNotReachEngine` and `TestServiceSettingsMirrorFailureKeepsCommittedSettings` distinguish refusal before commit from repair after authoritative commit. |
+| Exact totals recovery | **Mapped:** `TestTotalsConsumerSurvivesCrashesAroundTheAck` and `TestTotalsAreNotAcknowledgedWhenTheCommitFails` reconstruct Control across write/ack boundaries using production flow accounting and independent exact byte totals. |
+| Version rejected before attach | **New:** `TestNativeHelloRejectionBeforeAttach/version` changes only native hello; the first subsequent valid attach must still receive epoch 1. |
+| Adapter-only and missing-native capabilities | **New:** `TestNativeHelloRejectionBeforeAttach/adapter` and `/missing`; **mapped:** `TestRemoteRefusesEnginesMissingRequiredCapabilities`. The rejected Attach(false) publishes no attachment and consumes no epoch; it does not establish a runtime-start claim. |
+| Invalid native start | **New:** `TestNativeInvalidStartHasNoPlatformEffects` checks six invalid revisions. LiveState stays off with no start time; TUN-open, TCP/UDP socket and ownership-lookup counters stay zero; routes, stack and applied policy remain untouched. `TestOwnersCountsTCPAndUDPCalls` verifies the ownership counter itself. |
+| Native pagination beyond one frame | **New:** `TestNativeFlowPaginationReplacement` establishes 4,096 records, proves the unpaged encoding exceeds 1 MiB (about 2.5 MB), then checks all ordered IDs, owners and counters through Remote.Connections. |
+| Four clients × fifteen Run actions | **New:** `TestNativeRunFourClientsFifteenActions` runs actual Core.Run with the native protocol and flow table: one app-line client, one reconnect client, and two State-read clients complete 60 actions. The app-line action advances the applied revision/point and changes the pin from b2 to a1; streams/probes/discovery, shutdown, joined workers and absence of fatal logs are checked. |
+| Unknown methods, epoch fencing and protocol concurrency | **Mapped:** `TestUnknownMethodRejected`, `TestEngineAssignsEpochs`, `TestRevisionProtocol`, `TestDecodeLimitsAndUnknownFields`, `TestSlowApplyAllowsRenewalButSerializesAttach` and `TestConcurrentProbeIdempotencyDoesNotBlockRenew` in `internal/engine/protocol`; the focused pure suite passes. |
 
-| Input kind | Uncovered | Output kind | Uncovered |
-| --- | ---: | --- | ---: |
-| adapter-snapshot | 82 | api | 59 |
-| adapters | 1 | console | 22 |
-| async-result | 867 | engine | 393 |
-| clock-tick | 506 | event | 17 |
-| completion | 2,807 | log | 257 |
-| connections | 40 | outside-close | 2 |
-| connectionsStatus | 2 | remove | 27 |
-| counter-sample | 447 | spawn | 30 |
-| directory-list | 16 | write | 330 |
-| engine-reply | 302 |  |  |
-| file-completion | 819 |  |  |
-| helper-line | 12 |  |  |
-| http | 59 |  |  |
-| initial-files | 22 |  |  |
-| interfaces | 5 |  |  |
-| probe-result | 91 |  |  |
-| probe-vote | 33 |  |  |
-| probes | 3 |  |  |
-| process-exit | 10 |  |  |
-| quitFailure | 2 |  |  |
-| refresh-adapters | 1 |  |  |
-| release | 1 |  |  |
-| routes | 2 |  |  |
-| socket-completion | 104 |  |  |
-| state-snapshot | 31 |  |  |
-| timer-completion | 1 |  |  |
-| update-reply | 4 |  |  |
-| updateStatus | 1 |  |  |
+The eight historical fakeRemote consumers are explicitly accounted for:
 
-## Remaining slices
+| Historical consumer | Native replacement |
+| --- | --- |
+| TestTransportFailureReattachesWithoutEngineFailure | **Mapped:** TestNativeRecoveryReplayReattach, with exact epoch advance and no false failure identity. |
+| TestTransportInterruptionIsStartingUntilReattached | **Mapped:** TestNativeRecoveryReplayReattach, with the dial held before publication. |
+| TestOldStoppedQueryCannotFailReplacement | **Mapped:** TestNativeRecoveryReplayStaleServiceQuery. |
+| TestOneFailureIdentityPerEngineInstance | **Mapped:** TestNativeRecoveryReplayFailureIdentity. |
+| TestVersionMismatchRefusedBeforeAttach | **New:** TestNativeHelloRejectionBeforeAttach/version. |
+| TestForgetLaneDoesNotPerformIPC | **Mapped:** TestNativeRecoveryReplayForgetLane proves no IPC and that the lane is KEPT. Native has no independent lane cache to invalidate; this deliberately replaces the historical lane-removal assertion. |
+| TestAcknowledgedStopHasDeadlineAndForcesFailOpen | **Mapped:** TestNativeRecoveryReplayAcknowledgedStop. |
+| TestLeaseExitAfterRepeatedStandbyNeverBecomesCrash | **Mapped:** TestNativeRecoveryReplaySevenLeaseExits, retaining accumulated state through seven exits. |
 
-These disjoint counts partition the remaining 7,408 entries outside the API
-and completed startup receipts. Shared
-startup machinery should be implemented once; each trace must still supply and
-consume its own startup entries. Slices include completions and all external
-observations, not just their headline feature.
+The two adapter_test replacements are the new invalid-start and pagination tests.
+The old four-client adapter Run test is retained beside its new native replacement.
+Additional mapped regression coverage includes TestNativeRecoveryReplayOverlappingStops
+and TestNativeRecoveryReplayTransportLostDuringStop.
 
-| Slice | Traces / entries | Total |
-| --- | --- | ---: |
-| Startup and saved app identities | Complete: appLine remainder 188, legacyCaseOrder 144, savedVersionOrder 131 | 0 |
-| Policy transactions, caps and physical usage | combining 197, combiningNoOpenLine 298, capBlockedAndMainException 275, capMoved 222, capReset 256, midnightGap 188 | 1,436 |
-| Health, probes and route votes | failoverFailback 232, busyFailedChecks 687, probeFailover 749, lostDefaultRoute 395 | 2,063 |
-| Live line/IPv6 revisions | adapterRename 281, ipv6 1,153, lineAdd 201, lineOrder 274, lineRemove 234 | 2,143 |
-| Reconnect and flow identity | reconnectPinned 154, reconnectShared 151 | 305 |
-| Lifecycle and read APIs | hungEngine 486, quitFailure 175, routingAndReads 268 | 929 |
-| Settings, setup, updates and migration | settingsSetupUpdate 341, migration 191 | 532 |
-| **Total still uncovered** | | **7,408** |
+## Product change and evidence limits
 
-Build the shared native boundary and ordered comparator with the startup slice,
-then reuse it. Required follow-ups outside this 7,894-entry denominator remain:
-node.json authentication/malformed/invalid actions, all seven Undo cases, native
-failed applies and lost/mismatched acks, closure retry/fencing, journal/settings
-failure distinction, exact totals recovery, lifecycle capability/invalid-start/
-pagination/concurrency replacements, installed parity and removal gates.
+The hello test reproduced a real gap: production Remote accepted an adapter-only
+engine and consumed attach epoch 1. Native Control now rejects that hello before
+attach, as required by the retirement handoff. Historical adapter fixtures use an
+explicit unexported test hook; production never sets it. This is the only product
+change in this PR. The sole production NewRemote caller is ControlService.
 
-## Validation and review boundary
+The native runtime fixture uses the production protocol and flow table over
+memory pipes. Platform outcomes are staged inputs. No engine process, real
+service, TUN, capture or host route was run locally. Invalid-start testing uses
+an opener that can only record an erroneous call and return an error.
 
-The ledger itself is pure accounting. The startup replay also fixes Control's
-already-applied lane publication; see its evidence doc. No engine, service, TUN
-or route is started locally. The normal internal-package CI sweep includes this package.
-The test checks the original request/reply stream, including all 97 `/delay`
-requests omitted by the old cross-kind comparison, and rejects leftover replies,
-missing responses, unsupported kinds (including future exit), detached/missing
-completion markers, invalid mappings and incomplete revision groups.
-Reply pairing is **per-route FIFO only**: these traces carry a route but no
-request ID. It rejects leftovers and missing results, but cannot distinguish
-two outstanding requests to the same route whose results are swapped. This is
-a trace-format limit, not a claim of native operation-ID verification.
+**Still separate:** installed parity, actual protected-store installation,
+Linux attribution/integrity release gates, and adapter/binary removal. These
+are not silently marked complete by replay coverage. Hosted race checks and
+independent review remain required before merging; this PR remains a draft.
 
-Mutation cases operate on freshly decoded in-memory copies, never frozen bytes.
-The five required mutations are unknown kind, duplicate disposition, removed
-disposition rule, reply with no matching request, and missing revision member.
-Additional cases reject coordinated member/annotation removal, unknown rules,
-unearned coverage, changed fixture hashes, missing fixture sets, stale assertions
-and out-of-order consumption. A temporary positive expectation is used to show
-the five required mutations make a real test run fail, then reverted.
+## Validation and gate evidence
 
-The initial five mutated positive cases failed with their specific diagnostics;
-the initial restored suite passed 25 leaf cases. All Go commands use
-Go 1.27.3, Idle priority, GOMAXPROCS=2 and `-p 2`. The first full dependency-check
-attempt exposed an unresolved computed test-source path. Explicit read-site
-declarations now cover the fixtures, provenance and three supporting test files.
-After that correction, the actual dependency graph reports no problems, both
-here and on the main baseline. The entire classifier mutation suite was not
-rerun in that round; hosted checks and independent logic review remain pending.
-The declaration list remains unchanged in round 1. A dedicated dependency test
-fails if `supportingEvidence` adds a source file outside its declared reads.
+Pinned Go 1.27.3, Idle priority, GOMAXPROCS=2 and -p 2. The complete pure Control,
+control/engine and ledger suites plus selected lifecycle, native invalid-start
+and Windows ACL-policy tests stream go test -json -count=1 directly into
+replay-report. No saved logs. Final coverage is 7,894 with all five exits zero.
 
-Round 1 validation: 61 passing leaf cases, with one subprocess-only fixture
-skipped in the outer run (its passing, failed and late-cleanup-failure modes all
-ran in bounded child processes). The real test binary's receipt passed through
-the pinned `test2json` converter and aggregator; prior failure refused emission,
-and a cleanup failure after emission invalidated coverage. The streaming command
-ended with `covered 0 / 7,894; uncovered 7894; pending map[#107:23]`. Static checks,
-the dependency graph and 14 dependency/gate tests passed. No log file was saved.
+The final settings gate mutations are run and reverted: missing receipt,
+failing subtest, dropped full-response check and reordered observations. Earlier
+slice mutation evidence remains in their linked documents. Restoring adapter
+acceptance makes the hello test fail; dropping native acknowledgement validation
+makes both mismatch cases fail. The restored suites pass.
 
-Requested source mutations were run and reverted:
+The missing settings receipt rejected 318 required rows (0/0/0/0/1). A failed
+settings subtest refused its receipt; dropping the response check failed at
+160/http expecting 159/api; swapping autostart results failed at 142. Each of
+those three aggregates exited 1/0/0/0/1. No mutated source or fixture remains.
 
-- Rename `TestConsumeIdentity`: Consume failed with the old expected binding and
-  the actual `TestConsumeIdentityRenamed` identity.
-- Delete that function: `TestBindingTargets` failed with the missing
-  `*testing.T` test declaration.
-- Change the absent #107 target's status to uncovered: `TestNativeSemanticLedger`
-  failed opening its missing source file. Pending references alone still pass.
+The requested CI dependency tests,
+`node --test .github/ci/ledger.test.mjs .github/ci/drift.test.mjs`, pass all
+17 tests. The new Windows binding is declared in drift.mjs and classified as
+shared because Linux also parses that test declaration.
+The final staged-tree run also includes changes.test.mjs: 41 pass, zero failures
+or skips. All eight historical fakeRemote consumers pass with explicit test-only
+adapter selection; the production capability check remains strict.
 
-The settings-write mutation also fails at appLine sequence 158: it is not an
-apps/share/cut rule-write member. Counterexamples for unknown and repeated
-receipts, failed/skipped tests, failed parents/packages, incomplete streams,
-range overlaps, and partial groups remain in the ordinary suite. The hosted
-full internal sweep and independent re-review are still pending.
+Hosted race coverage comes from [ci.yml's generic Race detector step](../.github/workflows/ci.yml#L575):
+`go test -race -v -timeout=15m ./internal/... ./cmd/... ./tests/...` on Linux
+x64/ARM64 and Windows x64. That selection includes these new tests. This cites
+the configured coverage; local runs do not substitute for its hosted results.
 
-Round 2 adds a hard completeness gate for all applicable registered rows.
-Two temporary mutations each made `TestReceiptRuntimeProof/pass` fail at the
-joiner with `missing required receipts for 1 registered entries on windows`:
-excluding the registered child test with a non-matching test filter, and
-removing its Receipt call while leaving the test itself passing. Both mutations
-are reverted. Ordinary regressions retain those cases plus skips, excluded
-packages, and required/mismatched Windows and Linux bindings. A real 1.27.3
-compile failure was recorded into `testdata/build-failure.json`; its
-`build-output` diagnostics and `build-fail` ImportPath are both asserted.
-The subprocess converter now comes from `exec.LookPath("go")`; local runs put
-the pinned toolchain on PATH just as CI does.
+Review follow-up mutations were run and reverted: closing all held flows after
+SaveApplied refusal fails the native flow-preservation assertion; publishing
+only a1's new target before persistence fails the old-target assertion; an
+ownership lookup during invalid-start rejection fails all six zero-lookup
+cases; changing LiveState to starting before rejecting fails all six off-state
+cases. Each focused mutated run exits 1. Restored tests and aggregate pass.
 
-The restored PowerShell pipeline passed the pure suite (77 leaf cases plus the
-outer subprocess-fixture skip), static checks and the streaming report. Separate
-native-process probes returned 7 for producer=7/consumer=0, 9 for
-producer=0/consumer=9, and 0 only for both=0. No output file was used. The next
-hosted Windows test counts remain a separate pending check.
-
-Review this document with the ledger package and the two existing evidence docs:
-can a fresh reader connect the next slice without guessing what counts as proof;
-does any machinery duplicate the existing replay unnecessarily; and do these
-counts, pending sequences and evidence limits match the code? This change only
-adds shared accounting, not a second replay implementation. Full native replay
-and M4 retirement remain incomplete.
+The ledger continues to reject changed hashes, duplicate/missing dispositions,
+unpaired replies, incomplete groups, unearned receipts, failed/skipped parents
+and incomplete streams. Original replies are only per-route FIFO: the frozen
+format has no request IDs, so same-route outstanding replies cannot be uniquely
+distinguished. Native operation IDs and instance fencing are tested separately.

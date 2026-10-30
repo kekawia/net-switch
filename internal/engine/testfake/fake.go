@@ -16,12 +16,14 @@ import (
 )
 
 type Owners struct {
+	Calls atomic.Uint64
 	Value platform.Owner
 	Err   error
 	Gate  <-chan struct{}
 }
 
 func (o *Owners) get(ctx context.Context) (platform.Owner, error) {
+	o.Calls.Add(1)
 	if o.Gate != nil {
 		select {
 		case <-o.Gate:

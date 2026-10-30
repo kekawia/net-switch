@@ -66,13 +66,13 @@ below add separate startup preservation and harness polling evidence. The error/
 transport-recovery/forced-stop log conditions are checked, not frozen log text.
 No claim is made about real lease-clock expiry or installed cleanup.
 
-Still required: the eighth consumer (version rejection before attach), the
-adapter-only/missing-capability boundary, both adapter test replacements
-(invalid start and multi-frame pagination), four-client × fifteen-action Run
-concurrency, and the full hash-keyed exact-once native semantic ledger. Keep
-the original traces, node.json and seven Undo cases. Native goldens are being
-handled separately. Installed harness replacement and physical deletion come
-later; this slice does not complete M4.
+Completed by PR #115: the eighth consumer (version rejection before attach),
+adapter-only/missing-capability rejection, invalid-start and multi-frame
+pagination replacements, four-client × fifteen-action native Run, and all
+hash-keyed replay entries. See [the final named-test mapping](m4-semantic-ledger.md).
+The original traces, node.json and seven Undo cases remain unchanged. Installed
+harness replacement and physical deletion remain separate; replay alone does
+not complete M4.
 
 ## Validation and review handoff
 

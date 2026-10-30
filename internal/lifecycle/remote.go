@@ -61,10 +61,12 @@ type Remote struct {
 	forceStop               func(context.Context, string) error
 	wakeGrace               time.Time
 	exitReason              func(string) (string, error)
-	// native is set by a hello that advertised the native engine's contract.
-	// Until then, and after a hello that advertised the temporary sing-box
-	// dialect, requests use the adapter payload.
+	// native is set by a validated native hello. Only historical fixtures
+	// select the adapter payload after attachment through testDialect below.
 	native bool
+	// Historical adapter fixtures inject their dialect explicitly. Production
+	// leaves this nil and rejects adapter-only capabilities before attach.
+	testDialect func([]string) (bool, error)
 	// outcome reads a stopped native instance's cleanup result (host.ReadOutcome).
 	outcome func(string) (host.Outcome, error)
 }
@@ -349,7 +351,11 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	if hello.Version != buildinfo.String() {
 		return fmt.Errorf("engine version %q is incompatible with Control %q", hello.Version, buildinfo.String())
 	}
-	adapter, err := nativeDialect(hello.Capabilities)
+	classify := nativeDialect
+	if r.testDialect != nil {
+		classify = r.testDialect
+	}
+	adapter, err := classify(hello.Capabilities)
 	if err != nil {
 		return err
 	}

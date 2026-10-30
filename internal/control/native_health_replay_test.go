@@ -19,7 +19,7 @@ import (
 // probe kinds/operators, counts completed rounds and publishes lane revisions.
 func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, fileCursor *startupFileCursor, start int) map[int]string {
 	t.Helper()
-	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" && trace.Name != "probeFailover" && trace.Name != "lostDefaultRoute" && trace.Name != "ipv6" {
+	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" && trace.Name != "probeFailover" && trace.Name != "lostDefaultRoute" && trace.Name != "ipv6" && trace.Name != "hungEngine" {
 		t.Fatal("health trace not yet implemented", trace.Name)
 	}
 	checked := map[int]string{}
@@ -42,9 +42,15 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 	var supplied []engine.Connection
 	wire := any([]any{})
 	reads, polls := 0, 0
+	hung := trace.Name == "hungEngine"
+	connectionStatus := 200
+	initialSnapshot := e.Snapshot()
 	e.fakeEngine.readConnections = func(context.Context) ([]engine.Connection, error) {
 		reads++
 		files.recordOrder("native:connections")
+		if connectionStatus != 200 {
+			return nil, fmt.Errorf("flow observation returned %d", connectionStatus)
+		}
 		return append([]engine.Connection{}, supplied...), nil
 	}
 	type answer struct {
@@ -128,6 +134,18 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 	for pos := start; pos < len(trace.Entries); {
 		x := trace.Entries[pos]
 		switch x.Kind {
+		case "connectionsStatus":
+			if !hung || x.Seq != 135 && x.Seq != 469 {
+				t.Fatal("unexpected observation fault input")
+			}
+			if err := json.Unmarshal(x.Value, &connectionStatus); err != nil {
+				t.Fatal(err)
+			}
+			if x.Seq == 135 && connectionStatus != 503 || x.Seq == 469 && connectionStatus != 200 {
+				t.Fatal("observation fault ordering")
+			}
+			checked[pos] = "staged native observation failure/recovery"
+			pos++
 		case "interfaces":
 			if err := json.Unmarshal(x.Value, &interfaces); err != nil {
 				t.Fatal(err)
@@ -219,7 +237,7 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 					if next.Now != tick.Now {
 						break
 					}
-				} else if entry.Direction == "input" && (entry.Kind == "http" || entry.Kind == "interfaces" || entry.Kind == "routes" || entry.Kind == "probes" || entry.Kind == "connections") {
+				} else if entry.Direction == "input" && (entry.Kind == "http" || entry.Kind == "interfaces" || entry.Kind == "routes" || entry.Kind == "probes" || entry.Kind == "connections" || entry.Kind == "connectionsStatus") {
 					break
 				}
 				end++
@@ -307,6 +325,21 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 			}
 			if reads != polls {
 				t.Fatal("poll duplicated/missing connection read", reads, polls)
+			}
+			if hung {
+				failures := polls
+				if connectionStatus == 200 {
+					failures = 0
+				}
+				if c.monitorFailures != failures || !reflect.DeepEqual(e.Snapshot(), initialSnapshot) || e.applies != 1 || len(e.calls) != 2 || !c.WantsRouting() || c.retryAttempts != 0 {
+					t.Fatal("failed observation invented death or failed recovery", polls, c.monitorFailures, e.calls)
+				}
+				if (c.State()["routing"].(map[string]any)["measuring"] == true) != (failures < 3) {
+					t.Fatal("observation measuring threshold")
+				}
+				if polls == 3 && (len(files.logs) != logsAt+1 || files.logs[logsAt] != "speed readings stopped: the engine is not answering") {
+					t.Fatal("third failure diagnostic")
+				}
 			}
 			if trace.Name == "lostDefaultRoute" {
 				misses := 0
@@ -480,12 +513,18 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				order = append(order, "log", "event", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "lane-log")
 			}
 			order = append(order, "native:connections")
+			if hung && polls == 3 {
+				order = append(order, "log")
+			}
 			if trace.Name == "busyFailedChecks" && polls == 2 {
 				order = append(order, "platform:app-info")
 			}
 			probeLogs := len(files.logs) - logsAt
 			if changed {
 				probeLogs -= 2
+			}
+			if hung && polls == 3 {
+				probeLogs--
 			}
 			for _, id := range []string{"a1", "b2"} {
 				if len(answers[id]) == 0 {
@@ -517,6 +556,8 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				part := trace
 				part.Entries = trace.Entries[:retiredEnd]
 				checkNativeLiveEntries(t, part, clock, fileCursor, retiredStart-1, configSeq, pidSeq, want, checked, nativeLiveRestartPlan(t, clock, "ipv6", note))
+			} else if hung && polls == 20 {
+				checkNativeHungRestartReplacement(t, trace, clock, fileCursor, checked)
 			} else if _, err := fileCursor.CheckRevision(trace.Entries[pos+1:end], nil, cmp, effectAt); err != nil {
 				t.Fatal(err)
 			}
@@ -685,7 +726,11 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				appendLog(logsAt+1, "lane-log")
 			}
 			add("engine", "GET /connections", map[string]any{"method": "GET", "route": "/connections"}, "native:connections")
-			add("engine-reply", "/connections", map[string]any{"route": "/connections", "status": 200, "body": map[string]any{"connections": wire}}, "native:connections")
+			add("engine-reply", "/connections", map[string]any{"route": "/connections", "status": connectionStatus, "body": map[string]any{"connections": wire}}, "native:connections")
+			if hung && polls == 3 {
+				log(logsAt, "log")
+				appendLog(logsAt, "log")
+			}
 			if probeLogs > 0 {
 				if probeLogs != 1 {
 					t.Fatal("unexpected probe diagnostics")
@@ -693,14 +738,16 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				log(len(files.logs)-1, "log")
 				appendLog(len(files.logs)-1, "log")
 			}
-			if trace.Name == "lostDefaultRoute" {
+			if trace.Name == "lostDefaultRoute" || hung {
 				for _, id := range []string{"a1", "b2"} {
 					if len(answers[id]) > 0 {
 						add("probe-vote", id, map[string]any{"line": id, "result": true, "at": tick.Now}, "native:probe-result:"+id)
 					}
 				}
 			}
-			async("engine./connections.json", map[string]any{"connections": wire}, "native:connections")
+			if connectionStatus == 200 {
+				async("engine./connections.json", map[string]any{"connections": wire}, "native:connections")
+			}
 			next := 0
 			for seq := pos; seq < end; seq++ {
 				entry := trace.Entries[seq]
@@ -712,7 +759,7 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 					completion = checkHealthCompletion(t, trace, seq, completion, checked)
 					continue
 				}
-				if ipv6 && checked[seq] != "" {
+				if (ipv6 || hung) && checked[seq] != "" {
 					continue
 				}
 				if ipv6 && entry.Kind == "file-completion" {
@@ -784,6 +831,9 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 	}
 	if err := fileCursor.skipNative(); err != nil {
 		t.Fatal(err)
+	}
+	if hung && (polls != 21 || reads != 21 || c.monitorFailures != 0 || e.probes.Load() != 4) {
+		t.Fatal("observation failure/recovery exhaustion", polls, reads, e.probes.Load())
 	}
 	if ipv6 && (len(deferredSources) != 0 || polls != 62 || reads != 62 || e.applies != 3 || e.probes.Load() != 10) {
 		t.Fatal("IPv6 interval exhaustion", deferredSources, polls, reads, e.applies, e.probes.Load())

@@ -1,12 +1,15 @@
 package winplatform
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/replayledger"
 	"golang.org/x/sys/windows"
 )
 
@@ -46,6 +49,55 @@ func TestTrustedMachineSecurity(t *testing.T) {
 				t.Fatal("dangerous non-admin grant was trusted")
 			}
 		})
+	}
+	// The old runtime protectMachineDir call is replaced by the native
+	// trusted-store policy tested above. Actual installation/ACL application
+	// remains covered by the machine-folder tests, not this pure policy test.
+	m, err := replayledger.DefaultMapping()
+	if err != nil {
+		t.Fatal(err)
+	}
+	traces, err := replayledger.Load("../../..", m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := replayledger.Build(m, traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []replayledger.Row{}
+	for _, r := range report.Rows {
+		if r.Assertion == "internal/platform/windows/security_windows_test.go#"+t.Name() {
+			rows = append(rows, r)
+		}
+	}
+	if len(rows) != 2 {
+		t.Fatal("protected-store callback binding count", len(rows))
+	}
+	cursor := replayledger.NewCursor(rows)
+	for _, r := range rows {
+		x := traces[r.Hash].Entries[r.Seq]
+		var value any
+		if err := json.Unmarshal(x.Value, &value); err != nil {
+			t.Fatal(err)
+		}
+		var want any
+		if r.Seq == 7 {
+			want = map[string]any{"operation": "platform.protectMachineDir", "args": []any{"/oracle/data", "/oracle/user/server.log"}, "ok": true, "value": nil, "undefined": true}
+		} else if r.Seq == 8 {
+			want = map[string]any{"id": float64(4), "kind": "async-result"}
+		} else {
+			t.Fatal("unknown protected store replacement")
+		}
+		if !reflect.DeepEqual(value, want) {
+			t.Fatal("protected store callback", value)
+		}
+		if err := cursor.Consume(t, r.Hash, r.Seq, r.Disposition); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := cursor.Receipt(t); err != nil {
+		t.Fatal(err)
 	}
 }
 
