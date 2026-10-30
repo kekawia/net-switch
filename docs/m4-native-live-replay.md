@@ -171,3 +171,87 @@ Remaining scope outside these traces: physical IPv6 address validity and
 deprecation, real sockets and route reconciliation, custom/failed probes during
 the live change, lost acknowledgements, concurrent HTTP, and installed service
 life cycles. Existing failure, platform and hosted engine tests remain required.
+
+## Review round 1: first durable live-add revision
+
+The first patch sampled the new lane only after save had committed a desired
+revision. That recorded an unsampled fallback to main, then minted a second
+revision after sampling. A crash between them recovered the wrong target.
+saveWithAddedLine now synchronizes and samples the new lane under the same
+state lock that publishes its settings, before policyLocked and the first
+persistRevision. Journal refusal discards the prepared lane and settings.
+This preserves §3.3's complete durable revision and §5.7's live update.
+
+Six new leaf cases check successful add, a crash at
+control-after-desired-commit, pending address loss, pending route loss,
+reattachment before the first Poll, and refused journal writes. The crash
+captures the actual files before the settings mirror changes, constructs a
+fresh Core from them, and requires Desired.Lanes[c3] == c3 and revision N+1.
+The uninterrupted case also requires only one minted revision. The checkpoint
+checks the prepared lane before calling State, so read-side sampling cannot
+hide the defect. Tests invoke the core transaction directly to interrupt it
+before the HTTP response's State call; the full trace still tests real HTTP.
+
+Selective sampling now sets initialSampled only when only == "". Both existing
+lines stay untouched during a live add; the next normal poll observes staged
+address/route loss. A reattached Core still performs its first complete sample
+in Supervise. No concurrent hook was added: checkpoint capture and counters
+run on the direct transaction caller; file copies take memoryFiles.mu.
+
+Three actual temporary mutations were run and reverted (each test exit 1):
+
+- Restored post-save preparation: two commits on successful add; the crash
+  recovered c3:a1 and exposed connected:false.
+- Disabled the only filter: both address and route cases observed an early
+  health vote on a1.
+- Made initialSampled unconditional: reattachment skipped the supervisor's
+  initial sampling, leaving both original lines unsampled.
+
+## Expected streams for the remaining replay slices
+
+These are implementation notes from current source, not new coverage claims.
+Keep one ordered stream and reuse the existing cursors and journal observers.
+
+**Reconnect (actions.go reconnect, revision.go saveIntent/completeIntent):**
+first resolve any pending policy. For pinned traffic, select the original
+off-target routed IDs and outside tuples. Persist the closure intent and backup,
+call native CloseFlows with the same instance/IDs, persist intent completion
+after success, then call platform close-tcp, log counts and return the response.
+Prove selected flows exist and newer/on-target flows survive. Shared unpinned
+traffic selects no routed IDs: no native close or closure journal is invented;
+close only the selected outside sockets. Preserve failed/gone counts and retry
+identity, not a new selection on retry.
+
+**quitFailure and routing off (core.go Shutdown/Routing):** commitIntent writes
+wanted:false before Engine.Stop. Check stopping/status diagnostics in order.
+A failed Quit logs `quit failed: ...`, resets quitting, returns HTTP 400 through
+the ClientError path, and does not delete the session or claim cleanup. The
+successful retry stops the engine, saves usage, removes server.json, cancels
+Control, logs `quit`, and returns {ok:true}. Routing off commits the same intent
+but keeps Control serving; it is not the successful Quit cleanup sequence.
+
+**hungEngine:** Poll's third failed connection read resets speed tracking and
+logs `speed readings stopped: the engine is not answering`. Further failed
+observations must not invent death. The retirement handoff explicitly retires
+the old 20-poll restart in ServiceMode. Bind its lifecycle purpose to existing
+lease/reattach/failure-identity evidence (including
+TestNativeRecoveryReplaySevenLeaseExits and TestNativeRecoveryReplayReattach),
+and prove the instance survives failed observations and recovers readings.
+Never restore the old restart threshold to make the historical stream match.
+
+**settingsSetupUpdate:** configure AutostartAllowed from the scenario's userDir
+and seed the autostart read. Model autostart-set then autostart and its log;
+settings persistence follows. Supply platform metrics, metric-setting, policy,
+policy-setting and network results for setup/undo, retaining undo-file ordering.
+Install CheckUpdate from staged release/updateStatus inputs and call the real
+CheckUpdate path; preserve disabled checks, forced checks, dismissal, failure
+logs and response result/version. The historical replay's harness wiring is a
+reference for inputs, not permission to drive state from expected responses.
+
+**migration:** migrate setupUndo into the undo store before deleting setupUndo
+from settings. Existing undo values override legacy values while preserving
+alias/key order. Then migrate mainAlias/mainGuid, secondAlias/secondGuid,
+secondLabel/secondKind, secondApps and cableApps into ordered lines/pins (and
+waitingApps where needed), remove the legacy keys, and retain unknown settings.
+Check native journal/settings mirrors, the migration log, GET/state and Quit.
+Do not treat this as only the previously registered case/order pin migration.
