@@ -267,8 +267,8 @@ func TestNativeHelloRejectionBeforeAttach(t *testing.T) {
 			f.remote.mu.Lock()
 			rpc, epoch := f.remote.rpc, f.remote.epoch
 			f.remote.mu.Unlock()
-			if rpc != nil || epoch != 0 || f.runtime.starts.Load() != 0 {
-				t.Error("rejected hello published an attachment or started runtime")
+			if rpc != nil || epoch != 0 {
+				t.Error("rejected hello published an attachment")
 			}
 			// The first valid attachment must still receive epoch 1. This would be
 			// 2 if the rejected handshake reached attach on the real server.

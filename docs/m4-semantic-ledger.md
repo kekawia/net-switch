@@ -334,8 +334,9 @@ start test in `internal/engine`.
 | Follow-up | Disposition and evidence |
 | --- | --- |
 | node.json authentication, malformed and invalid actions | **New:** `TestNativeNodeNegativeHTTPContracts` checks all 12 negative routes' full status/headers/body and absence of native mutation. |
-| Seven Undo cases | **New:** `TestNativeUndoFailureOracle` executes damaged-policy, damaged-metrics, policy-failure, save-failure, partial-ordered, empty-record and legacy-ordered in service mode; compares remaining records, calls and diagnostics. |
-| Failed native Apply | **Mapped:** `TestServiceLiveUpdateFailureRetriesWithoutStopping` injects preparation refusal through Poll and Supervise, retains the snapshot and retries the same durable number/hash. |
+| Seven Undo cases | **New:** `TestNativeUndoFailureOracle` executes damaged-policy, damaged-metrics, policy-failure, save-failure, partial-ordered, empty-record and legacy-ordered; compares remaining records, calls and diagnostics. ServiceMode does not affect this Undo path and supplies no additional evidence. |
+| Failed native Apply closes nothing | **New:** `TestNativeRejectedApplyAndAtomicLaneCommit` sends Apply through the native protocol to a real flows.Table, refuses its persistence step, and proves the held records, applied number/hash/point and client snapshot remain unchanged. The older fake-engine test only supplements this with Control retry behavior. |
+| Atomic apply replaces partial lane PUT | **New:** `TestNativeRejectedApplyAndAtomicLaneCommit` changes two lane targets in one revision. While persistence is held, both old targets remain visible; refusal leaves both unchanged; a successful retry publishes both targets and new flows use both new lanes. Held flows stay unchanged throughout. |
 | Lost Apply acknowledgement | **New:** `TestNativeApplyAcknowledgementRecovery/lost` commits through the real protocol/flow table, holds the reply, cancels its caller, then delivers it late. The client does not publish it; retry returns the same apply point and keeps the held flow. |
 | Mismatched Apply acknowledgement | **New:** `TestNativeApplyAcknowledgementRecovery/number` and `/hash` corrupt the actual protocol reply after commit. Both are rejected without snapshot publication; retry is idempotent. |
 | Closure retry identity | **Mapped:** `TestReconnectPersistsItsOriginalSelectionBeforeClose` retains the exact durable request across a lost answer and newly opened flow. This is Control boundary evidence. |
@@ -343,10 +344,10 @@ start test in `internal/engine`.
 | Journal versus settings-mirror failure | **Mapped:** `TestServiceJournalFailureDoesNotReachEngine` and `TestServiceSettingsMirrorFailureKeepsCommittedSettings` distinguish refusal before commit from repair after authoritative commit. |
 | Exact totals recovery | **Mapped:** `TestTotalsConsumerSurvivesCrashesAroundTheAck` and `TestTotalsAreNotAcknowledgedWhenTheCommitFails` reconstruct Control across write/ack boundaries using production flow accounting and independent exact byte totals. |
 | Version rejected before attach | **New:** `TestNativeHelloRejectionBeforeAttach/version` changes only native hello; the first subsequent valid attach must still receive epoch 1. |
-| Adapter-only and missing-native capabilities | **New:** `TestNativeHelloRejectionBeforeAttach/adapter` and `/missing`; **mapped:** `TestRemoteRefusesEnginesMissingRequiredCapabilities`. No attachment or runtime start is permitted. |
-| Invalid native start | **New:** `TestNativeInvalidStartHasNoPlatformEffects` checks six invalid revisions. None calls the fake TUN opener, touches routes, creates a stack or publishes policy. |
-| Native pagination beyond one frame | **New:** `TestNativeFlowPaginationReplacement` establishes 4,096 records, proves the unpaged encoding exceeds 1 MiB, then checks all ordered IDs, owners and counters through Remote.Connections. Measured sample: 2,541,823 bytes. |
-| Four clients × fifteen Run actions | **New:** `TestNativeRunFourClientsFifteenActions` runs actual Core.Run with the native protocol and flow table; all 60 actions complete, app discovery, streams/probes and at least ten reads occur, shutdown unloads policy, workers join, and fatal logs are absent. |
+| Adapter-only and missing-native capabilities | **New:** `TestNativeHelloRejectionBeforeAttach/adapter` and `/missing`; **mapped:** `TestRemoteRefusesEnginesMissingRequiredCapabilities`. The rejected Attach(false) publishes no attachment and consumes no epoch; it does not establish a runtime-start claim. |
+| Invalid native start | **New:** `TestNativeInvalidStartHasNoPlatformEffects` checks six invalid revisions. LiveState stays off with no start time; TUN-open, TCP/UDP socket and ownership-lookup counters stay zero; routes, stack and applied policy remain untouched. `TestOwnersCountsTCPAndUDPCalls` verifies the ownership counter itself. |
+| Native pagination beyond one frame | **New:** `TestNativeFlowPaginationReplacement` establishes 4,096 records, proves the unpaged encoding exceeds 1 MiB (about 2.5 MB), then checks all ordered IDs, owners and counters through Remote.Connections. |
+| Four clients × fifteen Run actions | **New:** `TestNativeRunFourClientsFifteenActions` runs actual Core.Run with the native protocol and flow table: one app-line client, one reconnect client, and two State-read clients complete 60 actions. The app-line action advances the applied revision/point and changes the pin from b2 to a1; streams/probes/discovery, shutdown, joined workers and absence of fatal logs are checked. |
 | Unknown methods, epoch fencing and protocol concurrency | **Mapped:** `TestUnknownMethodRejected`, `TestEngineAssignsEpochs`, `TestRevisionProtocol`, `TestDecodeLimitsAndUnknownFields`, `TestSlowApplyAllowsRenewalButSerializesAttach` and `TestConcurrentProbeIdempotencyDoesNotBlockRenew` in `internal/engine/protocol`; the focused pure suite passes. |
 
 The eight historical fakeRemote consumers are explicitly accounted for:
@@ -358,7 +359,7 @@ The eight historical fakeRemote consumers are explicitly accounted for:
 | TestOldStoppedQueryCannotFailReplacement | **Mapped:** TestNativeRecoveryReplayStaleServiceQuery. |
 | TestOneFailureIdentityPerEngineInstance | **Mapped:** TestNativeRecoveryReplayFailureIdentity. |
 | TestVersionMismatchRefusedBeforeAttach | **New:** TestNativeHelloRejectionBeforeAttach/version. |
-| TestForgetLaneDoesNotPerformIPC | **Mapped:** TestNativeRecoveryReplayForgetLane. |
+| TestForgetLaneDoesNotPerformIPC | **Mapped:** TestNativeRecoveryReplayForgetLane proves no IPC and that the lane is KEPT. Native has no independent lane cache to invalidate; this deliberately replaces the historical lane-removal assertion. |
 | TestAcknowledgedStopHasDeadlineAndForcesFailOpen | **Mapped:** TestNativeRecoveryReplayAcknowledgedStop. |
 | TestLeaseExitAfterRepeatedStandbyNeverBecomesCrash | **Mapped:** TestNativeRecoveryReplaySevenLeaseExits, retaining accumulated state through seven exits. |
 
@@ -410,6 +411,18 @@ shared because Linux also parses that test declaration.
 The final staged-tree run also includes changes.test.mjs: 41 pass, zero failures
 or skips. All eight historical fakeRemote consumers pass with explicit test-only
 adapter selection; the production capability check remains strict.
+
+Hosted race coverage comes from [ci.yml's generic Race detector step](../.github/workflows/ci.yml#L575):
+`go test -race -v -timeout=15m ./internal/... ./cmd/... ./tests/...` on Linux
+x64/ARM64 and Windows x64. That selection includes these new tests. This cites
+the configured coverage; local runs do not substitute for its hosted results.
+
+Review follow-up mutations were run and reverted: closing all held flows after
+SaveApplied refusal fails the native flow-preservation assertion; publishing
+only a1's new target before persistence fails the old-target assertion; an
+ownership lookup during invalid-start rejection fails all six zero-lookup
+cases; changing LiveState to starting before rejecting fails all six off-state
+cases. Each focused mutated run exits 1. Restored tests and aggregate pass.
 
 The ledger continues to reject changed hashes, duplicate/missing dispositions,
 unpaired replies, incomplete groups, unearned receipts, failed/skipped parents

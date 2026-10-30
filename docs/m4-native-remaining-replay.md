@@ -45,15 +45,16 @@ Hosted race checks and independent review remain.
   malformed/oversized input, missing endpoints and invalid actions. The oversized
   request is 65,537 spaces; record.mjs hashes its JSON encoding. Initial Poll
   precedes Start, matching the recorded initialized lane state.
-- `TestNativeUndoFailureOracle` runs all seven unchanged undo.json cases in
-  service mode: damaged-policy, damaged-metrics, policy-failure, save-failure,
+- `TestNativeUndoFailureOracle` runs all seven unchanged undo.json cases:
+  damaged-policy, damaged-metrics, policy-failure, save-failure,
   partial-ordered, empty-record and legacy-ordered. Comparisons check status/error,
   remaining ordered Undo data, policy, every platform call and failure diagnostic.
-  The original non-service tests remain too.
-- Native failed Apply maps to `TestServiceLiveUpdateFailureRetriesWithoutStopping`.
-  It injects preparation refusal through Poll and Supervise, checks the unchanged
-  snapshot and exact apply-only calls, then requires the original revision/hash
-  and durable desired policy on recovery. It runs in the aggregate.
+  ServiceMode does not affect this Undo path. The original tests remain too.
+- `TestNativeRejectedApplyAndAtomicLaneCommit` proves rejected native Apply closes
+  nothing and keeps the old revision using the protocol server and real flow
+  table. Two lane targets remain old until persistence succeeds, then both change
+  together while held records survive. `TestServiceLiveUpdateFailureRetriesWithoutStopping`
+  supplements this with fake-engine Control retry evidence only.
 - Journal/settings failure distinction maps to `TestServiceJournalFailureDoesNotReachEngine`
   and `TestServiceSettingsMirrorFailureKeepsCommittedSettings`. The former checks
   no engine call or revision advance after journal refusal; the latter retains

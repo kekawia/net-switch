@@ -186,6 +186,10 @@ func TestNativeRunFourClientsFifteenActions(t *testing.T) {
 		return len(state["apps"].([]any)) > 0 && remote.reads.Load() >= 10 && platform.streams.Load() >= 6 && probes.Load() >= 2
 	})
 	var clients sync.WaitGroup
+	beforeActions := remote.Snapshot()
+	if len(beforeActions.Policy.AppLines) != 1 || beforeActions.Policy.AppLines[0].LineID != "b2" {
+		t.Fatal("app-line starting pin")
+	}
 	var completed atomic.Int64
 	for client := 0; client < 4; client++ {
 		clients.Add(1)
@@ -214,6 +218,10 @@ func TestNativeRunFourClientsFifteenActions(t *testing.T) {
 	clients.Wait()
 	if completed.Load() != 60 {
 		t.Fatal("missing concurrent actions", completed.Load())
+	}
+	afterActions := remote.Snapshot()
+	if afterActions.AppliedRevision <= beforeActions.AppliedRevision || afterActions.AppliedPoint <= beforeActions.AppliedPoint || len(afterActions.Policy.AppLines) != 1 || afterActions.Policy.AppLines[0].LineID != "a1" {
+		t.Fatal("app-line actions did not advance the applied revision and pin", beforeActions, afterActions)
 	}
 	if err := c.Shutdown(context.Background()); err != nil {
 		t.Fatal(err)
