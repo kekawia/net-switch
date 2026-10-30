@@ -1,5 +1,33 @@
 # Remaining native trace slices
 
+## hungEngine
+
+All 486 entries are registered. The existing health driver feeds 20 failed
+native connection reads, then one successful read, at the original times.
+Every poll checks the identical running instance, policy and revision, unchanged
+failure budget, and no restart or extra apply. The third failed observation
+disables measuring and emits its exact diagnostic once; successful recovery
+clears the failure counter and restores measuring. Physical probes retain
+their 15-second cadence and complete native operation/instance checks.
+
+The old restart at 20 seconds is explicitly obsolete under SYSTEM-DESIGN 2-3
+and NATIVE-REPLAY-RETIREMENT. Its complete ordered stream is checked against
+the existing restart plan. Repeated rule publications compare every field to
+the already checked startup compilation, changing only the four enumerated
+temporary identities. They earn no invented new native acknowledgement.
+The first response now correctly has measuring:false until observations recover.
+This implements an existing design decision, not a product change in this PR.
+
+True-death evidence remains separate: TestNativeRecoveryReplaySevenLeaseExits,
+TestNativeRecoveryReplayFailureIdentity and the startup replacement's reattach
+case execute in the local aggregate. Restored aggregate: **7,094 / 7,894**,
+800 uncovered, exits **0/0/0**. Hosted race checks and review remain pending.
+
+A reverted mutation restoring the actual poll-count restart failed at the
+second Start. Merely removing the two poll-count guards initially still passed:
+the service-mode branch continued to do an idempotent live Apply, so it had not
+restored a restart. The effective mutation also bypassed that live branch.
+
 ## quitFailure
 
 The 175 entries use the shared startup driver and ledger v2. Both original

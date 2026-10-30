@@ -51,7 +51,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	quitSlice := name == "quitFailure"
 	reconnectSlice := name == "reconnectPinned" || name == "reconnectShared"
 	liveSlice := name == "lineOrder" || name == "lineRemove" || name == "lineAdd" || name == "adapterRename"
-	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute" || name == "ipv6"
+	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute" || name == "ipv6" || name == "hungEngine"
 	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException" || name == "combiningNoOpenLine"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
@@ -145,6 +145,11 @@ func replayNativeStartup(t *testing.T, name string) {
 				t.Fatal(err)
 			}
 			operatorStateExpectation(response["body"].(map[string]any), false)
+			if name == "hungEngine" && entry.Seq == 468 {
+				// Retirement handoff / SYSTEM-DESIGN 2-3: failed observations
+				// stay unknown until recovery, without a poll-count restart.
+				response["body"].(map[string]any)["routing"].(map[string]any)["measuring"] = false
+			}
 			if reconnectSlice {
 				operatorStateExpectation(response["body"].(map[string]any)["state"].(map[string]any), false)
 			}
@@ -468,9 +473,9 @@ func replayNativeStartup(t *testing.T, name string) {
 	// Compare external observations in trace order and associate each callback
 	// with its checked native operation. No default handler can earn a receipt.
 	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
-	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice)
+	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice || name == "hungEngine")
 	var pinEvidence map[int]string
-	if liveSlice || name == "ipv6" || reconnectSlice || quitSlice {
+	if liveSlice || name == "ipv6" || reconnectSlice || quitSlice || name == "hungEngine" {
 		start, end, names := 66, 86, twoLineRevisionFiles()
 		if name == "lineAdd" {
 			start, end, names = 62, 67, []string{"apps-a1.json"}
@@ -538,7 +543,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			logIndex = len(files.logs)
 			break
 		}
-		if healthSlice && (entry.Kind == "clock-tick" || name == "ipv6" && entry.Kind == "interfaces") {
+		if healthSlice && (entry.Kind == "clock-tick" || name == "ipv6" && entry.Kind == "interfaces" || name == "hungEngine" && entry.Kind == "connectionsStatus") {
 			check("startup counterpart exhaustion", counterparts.Finish())
 			if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 {
 				t.Fatal("startup observation leftovers")
@@ -606,7 +611,7 @@ func replayNativeStartup(t *testing.T, name string) {
 				}
 				guard = "constructed native stores replace adapter directory setup"
 			case operation == "readdir":
-				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice) && v["ok"] == true) {
+				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice || name == "hungEngine") && v["ok"] == true) {
 					t.Fatal("recorded cleanup failure guard")
 				}
 				guard = "complete revision replaces failed adapter directory cleanup"
@@ -740,7 +745,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			guard = "completed and published physical probe vote"
 		case "directory-list":
-			if (name != "appLine" && name != "capReset" && name != "lostDefaultRoute" && !liveSlice && !quitSlice) || v["directory"] != "/oracle/data" {
+			if (name != "appLine" && name != "capReset" && name != "lostDefaultRoute" && !liveSlice && !quitSlice && name != "hungEngine") || v["directory"] != "/oracle/data" {
 				t.Fatal("unknown directory replacement", v)
 			}
 			guard = "complete revision cleanup contract"

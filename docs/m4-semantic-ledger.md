@@ -7,6 +7,10 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
+Completed hungEngine, 2026-10-30: 486 more entries, passing local aggregate
+**7,094 / 7,894** (800 uncovered), exits 0/0/0. Failed observations preserve
+the native instance and recover without the retired poll-count restart.
+
 Completed quitFailure, 2026-10-30: 175 more entries, passing local aggregate
 **6,608 / 7,894** (1,286 uncovered), exits 0/0/0. See
 [remaining slice evidence](m4-native-remaining-replay.md).

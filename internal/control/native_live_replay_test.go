@@ -222,6 +222,9 @@ func nativeLiveRestartPlan(t *testing.T, clock *fakeClock, name, note string) []
 	add("socket-completion", map[string]any{"operation": "listen", "port": 49000})
 	add("socket-completion", map[string]any{"operation": "close", "port": 49000})
 	names := []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "apps-b2.json", "share-b2.json", "cut-b2.json", "engine-config.json", "settings.json.bak"}
+	if name == "hungEngine" {
+		names = names[:len(names)-1]
+	}
 	if name == "lineAdd" {
 		names = []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "engine-config.json", "settings.json.bak", "apps-000001.json", "share-000001.json", "cut-000001.json"}
 	}
@@ -235,7 +238,7 @@ func nativeLiveRestartPlan(t *testing.T, clock *fakeClock, name, note string) []
 		add("file-completion", map[string]any{"operation": "readdir", "file": "/oracle/data", "ok": true})
 	}
 	removed := []string{"share-b2.json", "cut-b2.json"}
-	if name == "lineAdd" || name == "adapterRename" || name == "ipv6" {
+	if name == "lineAdd" || name == "adapterRename" || name == "ipv6" || name == "hungEngine" {
 		removed = nil
 	}
 	if name == "lineRemove" {
@@ -254,7 +257,7 @@ func nativeLiveRestartPlan(t *testing.T, clock *fakeClock, name, note string) []
 	add("engine-reply", map[string]any{"route": "/version", "status": 200, "body": map[string]any{}})
 	log("routing on")
 	probeLines := []struct{ id, label string }{{"b2", "Wi-Fi"}, {"a1", "Ethernet"}}
-	if name == "adapterRename" || name == "ipv6" {
+	if name == "adapterRename" || name == "ipv6" || name == "hungEngine" {
 		probeLines = []struct{ id, label string }{{"a1", "Ethernet"}, {"b2", "Wi-Fi"}}
 	}
 	if name == "lineAdd" {
