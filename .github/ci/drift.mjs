@@ -33,6 +33,14 @@ export const narrowed = [{
 // the site exactly as the guard reports it; sites is how many such call sites
 // the file has. Each needs a reason and must still match.
 export const declared = [{
+  from: 'tests/lifecycle/installed_startup_windows_test.go', call: 'os.ReadFile(file)', sites: 2,
+  outside: 'the disposable installed enrollment file or live-store sentinel, both beneath the hosted fixture root',
+  why: 'the real owner denial child receives NETSWITCH_INSTALLED_STORE from its parent; the single-instance case reads its own sentinel, not repository input',
+}, {
+  from: 'tests/lifecycle/installed_startup_windows_test.go', call: 'os.OpenFile(file)',
+  outside: 'owner.json in the disposable installed store named by NETSWITCH_INSTALLED_STORE',
+  why: 'the unelevated child must receive a real permission denial when opening the existing enrollment for write; it never writes bytes',
+}, {
   from: 'internal/replayledger/ledger.go', call: 'os.ReadFile(filepath.Join(root, "tests/oracle/provenance.json"))',
   reads: ['tests/oracle/provenance.json'],
   why: 'Load receives the repository root from its test and verifies the frozen provenance sidecar',

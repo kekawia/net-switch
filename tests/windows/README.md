@@ -48,6 +48,15 @@ accepted as evidence.
 
 ## Launch contract
 
+The Go Control jobs now use the disposable installed-service fixture in
+`tests/lifecycle/installed_*_windows_test.go`, not the launcher described below.
+They require real SCM/IPC/child identities, native flow evidence, the full
+startup/routing/TUN assertion inventory and all named PASS results. See
+[the installed migration and exact assertion mapping](../../docs/m4-installed-harness.md).
+The following launcher and Clash descriptions apply only to historical baseline
+jobs and the separately labelled standalone acceptance driver. They are never a
+fallback for a failed installed native test.
+
 The runner takes `--server-exe` (also `--server-executable`), optional
 `--server-entry`, and `--engine-exe` (also `--engine-executable`).
 Today acceptance selects Node, the test launcher for the shipped server factory,

@@ -36,7 +36,16 @@ const native = async (name, args = {}) => {
 };
 let count = 0;
 let failures = 0;
+const installedStartup = process.argv.includes('--installed-startup-suite');
+const movedStartup = new Set([
+  'single-instance lock prevents a second Control from quarantining data',
+  'Control serves its API after quarantining planted root and staging names',
+]);
 async function check(name, fn) {
+  if (installedStartup && movedStartup.has(name)) {
+    console.log(`moved to required TestInstalledNativeStartup (not counted as a worker pass): ${name}`);
+    return;
+  }
   count++;
   try { await fn(); console.log(`ok ${count} - ${name}`); }
   catch (error) { failures++; console.error(`not ok ${count} - ${name}\n${error.stack}`); }
