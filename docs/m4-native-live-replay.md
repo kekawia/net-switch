@@ -1,9 +1,9 @@
 # Live line and IPv6 replay
 
-2026-10-30. Work in progress. lineOrder (274) and lineRemove (234) add 508
-checked entries to the previous 3,985. The aggregate passes at **4,493 / 7,894**,
-with producer/lifecycle/report exits 0/0/0. adapterRename (281), ipv6 (1,153)
-and lineAdd (201) remain unregistered.
+2026-10-30. Work in progress. lineOrder (274), lineRemove (234) and lineAdd
+(201) add 709 checked entries to the previous 3,985. The aggregate passes at
+**4,694 / 7,894**, with producer/lifecycle/report exits 0/0/0.
+adapterRename (281) and ipv6 (1,153) remain unregistered.
 
 The shared startup driver, native compiler boundary, HTTP transaction executor,
 ordered counterpart and exactly-once file cursor are reused. Startup rule files
@@ -57,7 +57,7 @@ with completed 18 ms quick probes. Timing is the original unchanged instant;
 response snapshots follow the acknowledged live revision. Diagnostics include
 startup and line order; retired restart diagnostics are explicit replacements.
 
-Nearby gaps: add/rename, IPv6 transitions, failed durable writes or Apply,
+Nearby gaps: rename, IPv6 transitions, failed durable writes or Apply,
 concurrent requests, active probe races, installed services and actual traffic.
 No new hook runs on probe goroutines in this checkpoint. Existing synchronized
 startup callbacks are reused. Hosted race checks and independent review remain.
@@ -76,3 +76,27 @@ ledger and selected native lifecycle aggregate and were reverted:
 Tests use pinned Go 1.27.3, Idle priority, GOMAXPROCS=2 and -p 2. JSON streams
 go directly into replay-report, including TestNativeStartupSessionReplacement;
 no logs are saved. No engine process, service, TUN or host route is run.
+
+## Live add defect and evidence
+
+lineAdd starts with only a1, no probes and no b2 lane. The shared startup
+counterpart now accepts this existing one-line startup shape. The generated
+060606 identity maps bijectively to the fixture LineID provider's 000001;
+the resulting complete settings, compiled policy and responses are checked.
+
+The first replay reproduced a product defect: the live-add path skipped the
+new lane's initial health sample, which used to run during Start. Its real
+compiled target was a1 instead of 000001. Source inspection of changeLines,
+Start and sampleLinesLocked established the cause; GitHub issue search found
+no matching report. Service-mode add now samples only the new line before
+Apply and schedules physical checks after acknowledgement. It does not
+resample unrelated lines or restart. This restores §4.1 parity, not a new
+permitted divergence. A reverted mutation disabling both new steps failed
+the literal policy assertion with 000001:a1 instead of 000001:000001.
+
+Both physical quick checks have unique nonempty operations, the current
+instance, index 0, target 1.1.1.1:443, outcome OK and delay 18 ms. Their hooks
+write maps under a mutex; reads occur only after the joined synchronous
+ProbeBackground returns. Each lane publishes exactly one passed round.
+The complete ordered native effects include both lane logs, the added-line
+diagnostic and both probe groups. The same full aggregate passes after the fix.

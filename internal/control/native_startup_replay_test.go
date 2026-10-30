@@ -37,6 +37,10 @@ func twoLineNativeConfig(pins map[string]string) policy.Config {
 	return twoLineNativeConfigIDs("a1", "b2", pins)
 }
 
+func oneLineNativeConfig() policy.Config {
+	return policy.Config{Lines: []platform.Line{{ID: "a1", Interface: "Ethernet"}}, AppLines: map[string]string{}, Shares: map[string]uint64{}, Lanes: map[string]string{"a1": "a1"}, Blocked: []string{}}
+}
+
 func twoLineNativeConfigIDs(first, second string, pins map[string]string) policy.Config {
 	return policy.Config{
 		Lines:    []platform.Line{{ID: first, Interface: "Ethernet"}, {ID: second, Interface: "Wi-Fi"}},
@@ -108,6 +112,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("lineAdd", func(t *testing.T) { replayNativeStartup(t, "lineAdd") })
 	t.Run("lineRemove", func(t *testing.T) { replayNativeStartup(t, "lineRemove") })
 	t.Run("lineOrder", func(t *testing.T) { replayNativeStartup(t, "lineOrder") })
 	t.Run("lostDefaultRoute", func(t *testing.T) { replayNativeStartup(t, "lostDefaultRoute") })

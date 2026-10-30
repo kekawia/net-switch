@@ -48,7 +48,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
-	liveSlice := name == "lineOrder" || name == "lineRemove"
+	liveSlice := name == "lineOrder" || name == "lineRemove" || name == "lineAdd"
 	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute"
 	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException" || name == "combiningNoOpenLine"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
@@ -59,14 +59,17 @@ func replayNativeStartup(t *testing.T, name string) {
 		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
 		ownerLine = firstLine
 	}
-	if name == "legacyCaseOrder" {
-		firstLine, secondLine = "000001", "000002"
-		ownerLine = secondLine
-		pins = map[string]string{`c:\apps\x.exe`: secondLine}
-		owners = []string{`c:\apps\x.exe`, `C:\Apps\X.exe`}
+	if name == "legacyCaseOrder" || name == "lineAdd" {
+		ids := map[string]string{"060606": "000001"}
+		if name == "legacyCaseOrder" {
+			firstLine, secondLine = "000001", "000002"
+			ownerLine = secondLine
+			pins = map[string]string{`c:\apps\x.exe`: secondLine}
+			owners = []string{`c:\apps\x.exe`, `C:\Apps\X.exe`}
+			ids = map[string]string{"010101": firstLine, "020202": secondLine}
+		}
 		// A bijection of generated identities only. Saved paths and their order
 		// remain untouched; embedded settings/usage JSON retains object order.
-		ids := map[string]string{"010101": firstLine, "020202": secondLine}
 		var convert func(string) string
 		convert = func(s string) string {
 			if strings.HasPrefix(s, "{") && json.Valid([]byte(s)) {
@@ -77,6 +80,9 @@ func replayNativeStartup(t *testing.T, name string) {
 				return string(b)
 			}
 			for from, to := range ids {
+				for _, prefix := range []string{"apps-", "share-", "cut-"} {
+					s = strings.ReplaceAll(s, "/"+prefix+from+".json", "/"+prefix+to+".json")
+				}
 				if s == "/proxies/line-"+from+"/delay" {
 					return "/proxies/line-" + to + "/delay"
 				}
@@ -162,6 +168,11 @@ func replayNativeStartup(t *testing.T, name string) {
 	c, base, _, _ := testCoreWithFilesLocation(t, files, clock, true, location)
 	base.ackPoint = 1
 	e := &nativeStartupEngine{fakeEngine: base, files: files, want: twoLineNativeConfigIDs(firstLine, secondLine, pins)}
+	if name == "lineAdd" {
+		e.want = oneLineNativeConfig()
+		secondLine = ""
+		c.op.LineID = func() string { return "000001" }
+	}
 	if name == "combiningNoOpenLine" {
 		e.want.Combine = true
 	}
@@ -369,7 +380,11 @@ func replayNativeStartup(t *testing.T, name string) {
 	check("probe request/result bijection", probeErr)
 	check("startup revision group", cmp.End("startup"))
 	// Diagnostic logs, usage and native transactions share the same stream.
-	check("startup order", cmp.Effects("write:control-journal.json", "write:control-journal.json.bak", "native:desired", "log", "native:start", "write:usage.json", "native:apply", "native:ack", "native:started", "log", "lane-log", "lane-log", "native:probe:"+firstLine, "native:probe-result:"+firstLine, "native:probe:"+secondLine, "native:probe-result:"+secondLine))
+	startupOrder := []string{"write:control-journal.json", "write:control-journal.json.bak", "native:desired", "log", "native:start", "write:usage.json", "native:apply", "native:ack", "native:started", "log"}
+	if secondLine != "" {
+		startupOrder = append(startupOrder, "lane-log", "lane-log", "native:probe:"+firstLine, "native:probe-result:"+firstLine, "native:probe:"+secondLine, "native:probe-result:"+secondLine)
+	}
+	check("startup order", cmp.Effects(startupOrder...))
 	if e.active == nil || e.applies != 1 || len(files.syncs) == 0 {
 		t.Fatal("complete durable revision guard")
 	}
@@ -400,7 +415,11 @@ func replayNativeStartup(t *testing.T, name string) {
 		}
 	}
 	seenOps := map[string]bool{}
-	for _, line := range []string{firstLine, secondLine} {
+	probeLines := []string{firstLine, secondLine}
+	if secondLine == "" {
+		probeLines = nil
+	}
+	for _, line := range probeLines {
 		if len(answers[line]) != 1 {
 			t.Fatal("healthy startup needs one successful quick probe", line, answers[line])
 		}
@@ -434,7 +453,11 @@ func replayNativeStartup(t *testing.T, name string) {
 	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice)
 	var pinEvidence map[int]string
 	if liveSlice {
-		pinEvidence, err = fileCursor.CheckRevision(trace.Entries[66:86], twoLineRevisionFiles(), cmp, 0)
+		start, end, names := 66, 86, twoLineRevisionFiles()
+		if name == "lineAdd" {
+			start, end, names = 62, 67, []string{"apps-a1.json"}
+		}
+		pinEvidence, err = fileCursor.CheckRevision(trace.Entries[start:end], names, cmp, 0)
 		check("ordered startup rule revision", err)
 	}
 	if name == "combining" {

@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/apppath"
@@ -23,10 +24,16 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 	t.Helper()
 	before := e.Snapshot()
 	oldConfig := twoLineNativeConfig(map[string]string{})
-	if before.Status != "on" || before.AppliedRevision == 0 || !reflect.DeepEqual(e.want, oldConfig) || len(c.itemsLocked()) != 2 || c.itemsLocked()[0].ID != "a1" {
+	if trace.Name == "lineAdd" {
+		oldConfig = oneLineNativeConfig()
+	}
+	if before.Status != "on" || before.AppliedRevision == 0 || !reflect.DeepEqual(e.want, oldConfig) || len(c.itemsLocked()) != len(oldConfig.Lines) || c.itemsLocked()[0].ID != "a1" {
 		t.Fatal("live reorder starting policy")
 	}
 	for _, id := range []string{"a1", "b2"} {
+		if trace.Name == "lineAdd" {
+			break
+		}
 		l := c.lanes[id]
 		if l.health.Up == nil || !*l.health.Up || l.probing || l.delay == nil || *l.delay != 18 {
 			t.Fatal("live reorder starting health", id)
@@ -34,6 +41,7 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 	}
 	want := twoLineNativeConfig(map[string]string{})
 	want.Lines = []platform.Line{{ID: "b2", Interface: "Wi-Fi"}, {ID: "a1", Interface: "Ethernet"}}
+	begin, settingsSeq := 135, 158
 	end, read, configSeq, pidSeq := 269, 270, 222, 228
 	note := "line order: Wi-Fi, Ethernet"
 	if trace.Name == "lineRemove" {
@@ -43,8 +51,39 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 		end, read, configSeq, pidSeq = 229, 230, 210, 216
 		note = "removed Wi-Fi (Wi-Fi)"
 	}
+	if trace.Name == "lineAdd" {
+		want = twoLineNativeConfigIDs("a1", "000001", map[string]string{})
+		begin, settingsSeq, end, read, configSeq, pidSeq = 86, 94, 196, 197, 152, 158
+		note = "added Wi-Fi (Wi-Fi)"
+	}
 	calls := len(e.calls)
-	checked := replayNativePolicySteps(t, c, e, clock, files, trace, cmp, fc, []nativePolicyStep{{135, end, 158, want}, {read, read + 3, -1, want}})
+	var probeMu sync.Mutex
+	requests := map[string]engine.ProbeRequest{}
+	results := map[string]engine.ProbeResult{}
+	if trace.Name == "lineAdd" {
+		if e.probes.Load() != 0 || c.lanes["000001"] != nil || c.lanes["a1"].delay != nil {
+			t.Fatal("live add starting probes/identity")
+		}
+		e.probeBegin = func(r engine.ProbeRequest) { probeMu.Lock(); defer probeMu.Unlock(); requests[r.Line] = r }
+		e.probeCheck = func(r engine.ProbeRequest, result engine.ProbeResult) {
+			probeMu.Lock()
+			defer probeMu.Unlock()
+			results[r.Line] = result
+		}
+	}
+	checked := replayNativePolicySteps(t, c, e, clock, files, trace, cmp, fc, []nativePolicyStep{{begin, end, settingsSeq, want}, {read, read + 3, -1, want}})
+	if trace.Name == "lineAdd" {
+		if len(requests) != 2 || len(results) != 2 || requests["a1"].OperationID == requests["000001"].OperationID {
+			t.Fatal("live add probe bijection")
+		}
+		for _, id := range []string{"a1", "000001"} {
+			r, v := requests[id], results[id]
+			l := c.lanes[id]
+			if r.OperationID == "" || !r.Quick || r.Target != "1.1.1.1:443" || r.Index != 0 || r.Custom || v.Kind != "quick" || v.Instance != before.Instance || v.Outcome != engine.OK || v.Delay == nil || *v.Delay != 18 || l.probing || l.health.ProbePasses != 1 || l.probeAt == nil || *l.probeAt != clock.Now().UnixMilli() {
+				t.Fatal("live add initial physical check", id, r, v)
+			}
+		}
+	}
 	if !reflect.DeepEqual(e.calls[calls:], []string{"apply"}) || e.Snapshot().Instance != before.Instance || e.Snapshot().Status != "on" {
 		t.Fatal("live revision must retain engine instance without stop/start", e.calls[calls:])
 	}
@@ -93,6 +132,9 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 	add("socket-completion", map[string]any{"operation": "listen", "port": 49000})
 	add("socket-completion", map[string]any{"operation": "close", "port": 49000})
 	names := []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "apps-b2.json", "share-b2.json", "cut-b2.json", "engine-config.json", "settings.json.bak"}
+	if trace.Name == "lineAdd" {
+		names = []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "engine-config.json", "settings.json.bak", "apps-000001.json", "share-000001.json", "cut-000001.json"}
+	}
 	if trace.Name == "lineOrder" {
 		names = append(names, "share-a1.json", "cut-a1.json")
 	}
@@ -101,6 +143,9 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 	// The directory is /oracle/data, without a trailing separator.
 	plan[len(plan)-1].Value = mustStartupJSON(t, map[string]any{"operation": "readdir", "file": "/oracle/data", "ok": true})
 	removed := []string{"share-b2.json", "cut-b2.json"}
+	if trace.Name == "lineAdd" {
+		removed = nil
+	}
 	if trace.Name == "lineRemove" {
 		removed = append([]string{"apps-b2.json"}, removed...)
 	}
@@ -117,6 +162,9 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 	add("engine-reply", map[string]any{"route": "/version", "status": 200, "body": map[string]any{}})
 	log("routing on")
 	probeLines := []struct{ id, label string }{{"b2", "Wi-Fi"}, {"a1", "Ethernet"}}
+	if trace.Name == "lineAdd" {
+		probeLines = []struct{ id, label string }{{"a1", "Ethernet"}, {"000001", "Wi-Fi"}}
+	}
 	if trace.Name == "lineRemove" {
 		probeLines = nil
 	}
@@ -128,25 +176,27 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 		add("engine", map[string]any{"route": probe, "method": "GET"})
 		add("probe-result", map[string]any{"route": probe, "status": 200, "body": map[string]any{"delay": 18}})
 		if i == 1 {
-			add("probe-vote", map[string]any{"line": "b2", "result": true, "at": clock.Now().UnixMilli()})
+			add("probe-vote", map[string]any{"line": probeLines[0].id, "result": true, "at": clock.Now().UnixMilli()})
 		}
-		log(line.label + "'s apps now use " + line.label)
+		if trace.Name != "lineAdd" || i != 1 {
+			log(line.label + "'s apps now use " + line.label)
+		}
 		async("engine."+probe+".json", []any{}, map[string]any{"delay": 18}, false)
 	}
 	if len(probeLines) > 0 {
-		add("probe-vote", map[string]any{"line": "a1", "result": true, "at": clock.Now().UnixMilli()})
+		add("probe-vote", map[string]any{"line": probeLines[1].id, "result": true, "at": clock.Now().UnixMilli()})
 	} else {
 		async("platform.readDefaultRoutes", []any{}, []map[string]string{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}, false)
 	}
 	next, completion := 0, 0
-	for _, x := range trace.Entries[:135] {
+	for _, x := range trace.Entries[:begin] {
 		if x.Kind == "completion" {
 			var v struct{ ID int }
 			_ = json.Unmarshal(x.Value, &v)
 			completion = v.ID
 		}
 	}
-	for seq := 136; seq < len(trace.Entries); seq++ {
+	for seq := begin + 1; seq < len(trace.Entries); seq++ {
 		x := trace.Entries[seq]
 		if x.Kind == "completion" {
 			completion = checkHealthCompletion(t, trace, seq, completion, checked)

@@ -153,6 +153,9 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			if trace.Name == "lineOrder" || trace.Name == "lineRemove" {
 				order = append(order[:len(order)-1], "log", "api")
 			}
+			if trace.Name == "lineAdd" {
+				order = append(order[:len(order)-1], "lane-log", "lane-log", "log", "native:probe:a1", "native:probe-result:a1", "native:probe:000001", "native:probe-result:000001", "api")
+			}
 			if e.applies != applies+1 || e.Snapshot().AppliedPoint <= before.AppliedPoint {
 				t.Fatal("missing ack before response")
 			}
@@ -181,6 +184,11 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			ruleEntries = append([]replayledger.Entry{}, trace.Entries[136:156]...)
 			ruleEntries = append(ruleEntries, trace.Entries[192:last]...)
 		}
+		if trace.Name == "lineAdd" && step.settings >= 0 {
+			ruleFiles = []string{"apps-a1.json", "apps-a1.json", "apps-000001.json", "share-000001.json", "cut-000001.json"}
+			ruleEntries = append([]replayledger.Entry{}, trace.Entries[87:92]...)
+			ruleEntries = append(ruleEntries, trace.Entries[128:148]...)
+		}
 		proof, err := fileCursor.CheckRevision(ruleEntries, ruleFiles, cmp, effectStart)
 		if err != nil {
 			t.Fatal("HTTP rule revision", err)
@@ -197,6 +205,13 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			}
 			if files.logs[logs] != note || e.Snapshot().Instance != before.Instance || !reflect.DeepEqual(e.calls[len(e.calls)-1:], []string{"apply"}) {
 				t.Fatal("live line order changed session or diagnostic")
+			}
+		}
+		if trace.Name == "lineAdd" && step.settings >= 0 {
+			wantLogs += 3
+			probes += 2
+			if !reflect.DeepEqual(files.logs[logs:], []string{"Ethernet's apps now use Ethernet", "Wi-Fi's apps now use Wi-Fi", "added Wi-Fi (Wi-Fi)"}) {
+				t.Fatal("live add diagnostics", files.logs[logs:])
 			}
 		}
 		if clock.Now() != at || clock.afterCalls.Load() != waits || e.probes.Load() != probes || len(files.logs) != wantLogs || len(files.events) != events {
