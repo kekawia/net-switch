@@ -172,6 +172,10 @@ async function buildArchInitramfs(lock, arch, outDir) {
   const initramfsPath = join(outDir, `initramfs-5.8-${arch}.cpio.gz`);
   await writeFile(initramfsPath, initramfs);
   const digest = sha256(initramfs);
+  const expectedInitramfsSha = lock.outputs?.[arch]?.initramfsSha256;
+  if (expectedInitramfsSha && expectedInitramfsSha !== digest) {
+    throw new Error(`Initramfs SHA-256 mismatch on ${arch}: got ${digest}, expected ${expectedInitramfsSha}`);
+  }
   console.log(`FLOOR_GUEST_INITRAMFS arch=${arch} target=${target} bytes=${initramfs.length} sha256=${digest} init_sha256=${sha256(initBytes)} test_sha256=${sha256(testBytes)}`);
   return { initramfsPath, digest };
 }
@@ -212,7 +216,7 @@ async function buildArchKernel(lock, arch, outDir) {
     'export KBUILD_BUILD_TIMESTAMP="Thu Jan  1 00:00:00 UTC 1970" KBUILD_BUILD_USER=builder KBUILD_BUILD_HOST=netswitch KBUILD_BUILD_VERSION=1',
     'dpkg -i /work/debs/*.deb',
     'echo "=== FLOOR_COMPILER_INVENTORY arch=' + arch + ' ==="',
-    'dpkg-query -W -f=\'${Package}=${Version}\\n\' gcc-12 gcc binutils make bc bison cpio dwarves pahole libbpf1 libdw1 libelf1 libelf-dev flex kmod m4 rsync',
+    'dpkg-query -W -f=\'${Package}=${Version}\\n\' gcc-12 gcc binutils make bc bison cpio dwarves pahole libbpf1 libdw1 libelf1 libelf-dev flex kmod libkmod2 libpopt0 m4 rsync',
     'gcc --version | head -n 1',
     'ld --version | head -n 1',
     'pahole --version',

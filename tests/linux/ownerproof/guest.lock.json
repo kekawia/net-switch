@@ -94,6 +94,12 @@
         "sha256": "e21ae247204fe8a14ac29a5f510227d45b41cd3c41059cc942f2502d25765165"
       },
       {
+        "name": "libkmod2",
+        "version": "30+20221128-1",
+        "path": "pool/main/k/kmod/libkmod2_30+20221128-1_amd64.deb",
+        "sha256": "af63bbbfc15fbd1f254b15c393b3b95b18b18cc81348fc1b4f1c9c34b4d672d7"
+      },
+      {
         "name": "libbpf1",
         "version": "1:1.1.2-0+deb12u1",
         "path": "pool/main/libb/libbpf/libbpf1_1.1.2-0+deb12u1_amd64.deb",
@@ -116,6 +122,12 @@
         "version": "0.188-2.1",
         "path": "pool/main/e/elfutils/libelf1_0.188-2.1_amd64.deb",
         "sha256": "619add379c606b3ac6c1a175853b918e6939598a83d8ebadf3bdfd50d10b3c8c"
+      },
+      {
+        "name": "libpopt0",
+        "version": "1.19+dfsg-1",
+        "path": "pool/main/p/popt/libpopt0_1.19+dfsg-1_amd64.deb",
+        "sha256": "6f94b488255acd996254f775c77ff3956557c61f860a3c9caeaf65457554194f"
       },
       {
         "name": "m4",
@@ -174,6 +186,12 @@
         "sha256": "641057647e90b035148a40a56da51f030838f7b614e6f7896d36a18a316ef2c4"
       },
       {
+        "name": "libkmod2",
+        "version": "30+20221128-1",
+        "path": "pool/main/k/kmod/libkmod2_30+20221128-1_arm64.deb",
+        "sha256": "a3d13b1a5d01fff740356d3a8dad6c13f34988180a5d68a9a2e095995054d828"
+      },
+      {
         "name": "libbpf1",
         "version": "1:1.1.2-0+deb12u1",
         "path": "pool/main/libb/libbpf/libbpf1_1.1.2-0+deb12u1_arm64.deb",
@@ -196,6 +214,12 @@
         "version": "0.188-2.1",
         "path": "pool/main/e/elfutils/libelf1_0.188-2.1_arm64.deb",
         "sha256": "32971952d8f5d563447bf275f24e26057500924da2d855c1edb53b0f0400bd11"
+      },
+      {
+        "name": "libpopt0",
+        "version": "1.19+dfsg-1",
+        "path": "pool/main/p/popt/libpopt0_1.19+dfsg-1_arm64.deb",
+        "sha256": "636165b8135fe303ea00ae6d30841b65dabbc5c4fff56083d431d8bb669350e9"
       },
       {
         "name": "m4",
@@ -278,11 +302,11 @@
     "reproducibilityStage": "single-build-first-boot-pending",
     "amd64": {
       "kernelImageSha256": null,
-      "initramfsSha256": null
+      "initramfsSha256": "4c7920d85f69b38c4cfc2620edc32d5e2da80e54da72ca5974fd7e336d66c8c9"
     },
     "arm64": {
       "kernelImageSha256": null,
-      "initramfsSha256": null
+      "initramfsSha256": "c31d9ec966841ad0a099321b6f2ae7025f03ed428ada5ef835d6efbfb8a2970f"
     }
   }
 }
