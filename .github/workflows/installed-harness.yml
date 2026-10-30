@@ -1,0 +1,71 @@
+name: Installed native harness
+
+on:
+  pull_request:
+    paths: ['tests/lifecycle/installed_*', 'scripts/run-native-proof.mjs', '.github/workflows/installed-harness.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# This qualification workflow is intentionally two jobs while the migration is
+# being proved. Existing required Control gates remain intact until replacement.
+jobs:
+  windows:
+    name: Installed harness / ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        runner: [windows-latest, windows-11-arm]
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_LIFECYCLE_CI: '1'
+      NETSWITCH_NATIVE_CI: '1'
+      NETSWITCH_NATIVE_FAULTS: '1'
+      NETSWITCH_LIFECYCLE_FILTER: '^TestInstalledNativeStartup$'
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Build installed native candidates
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $directory = Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI'
+          foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
+            go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o (Join-Path $directory "$name.exe") "./cmd/$name"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          go test -c -o (Join-Path $directory 'lifecycle.test.exe') ./tests/lifecycle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory $directory
+          icacls $directory /setowner '*S-1-5-32-544' /T /Q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Installed startup and quarantine assertions
+        id: startup
+        continue-on-error: true
+        run: |
+          $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI'
+          Push-Location tests/lifecycle
+          try {
+            node (Join-Path $env:GITHUB_WORKSPACE 'scripts/run-native-proof.mjs') installed-startup (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+      - name: Require collected startup results
+        if: always() && steps.startup.outcome != 'success'
+        run: throw 'Installed startup qualification failed or did not run; see individual case results above.'

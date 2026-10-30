@@ -8,6 +8,7 @@ const retirementFailure = 'retirement-failure-exits-and-cleans-capture';
 // crash barriers), so its PASS lines are required in the faults variant only.
 const control = ['TestNativeControlCutover', ...['routes-traffic-through-the-native-engine','live-network-update-preserves-held-traffic','engine-service-is-never-restarted-by-the-manager','exact-usage-survives-control-crashes-around-the-ack','child-crash-counts-one-failure-and-restarts','adapter-loss-restarts-free-then-counts','control-absent-past-the-lease-then-restored-within-70s'].map(name=>`TestNativeControlCutover/${name}`)];
 export const required = {
+  'installed-startup': ['TestInstalledNativeStartup', ...['root-junction','root-hardlink','root-children','stage-junction','stage-hardlink','stage-children','single-instance-preserves-live-store'].map(name=>`TestInstalledNativeStartup/${name}`)],
   'native-product': native(['product-build-ignores-forwarding-fault','control-absent-whole-child','control-absent-host','control-absent-host-and-child']),
   'native-faults': [...control, ...native([retirementFailure,'idle-error-survives-live-lease-backoff','forwarding-health-under-load','slow-start-and-clean-stop','starting-hang-is-bounded','same-child-routing-restart-health','read-deadline-control-with-forwarding-live','totals-capacity-over-installed-transport','startup-death-before-readiness','slow-relay-and-log-readers','control-absent-read-pump','service-outcome-three-cleanup-fails-false','service-outcome-three-cleanup-fails-true'])],
   containment,
