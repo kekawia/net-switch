@@ -111,11 +111,25 @@ func serve(args []string) error {
 	index := f.Int("uplink-index", 0, "real uplink interface index")
 	ip := f.String("uplink-ip", "", "real uplink IPv4 address")
 	state := f.String("state", "", "write ready state and final counters here")
+	role := f.String("role", "secondary", "secondary or primary installed-test path")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
 	if *index <= 0 || net.ParseIP(*ip).To4() == nil || *state == "" {
 		return errors.New("uplink-index, uplink-ip and state are required")
+	}
+	address := "198.19.0.1"
+	switch *role {
+	case "secondary":
+	case "primary":
+		// Two separately observed test paths share the real uplink. Both can
+		// map a controlled TLS destination outside the product engine; the
+		// secondary's counters remain independent of primary traffic.
+		deviceConfig.Name = "TestISPMain"
+		deviceConfig.GUID = "{E66D91A5-76B7-4A95-95CB-E2D87706E995}"
+		address = "198.19.4.1"
+	default:
+		return errors.New("unknown TestISP role")
 	}
 	// The engine's absence rule (spec §5.1): a lingering NDIS row from the
 	// previous TestISP, kept alive by TIME_WAIT entries after heavy traffic,
@@ -218,11 +232,11 @@ func serve(args []string) error {
 			g.close()
 		}
 	}()
-	adapter, err := net.InterfaceByName("TestISP")
+	adapter, err := net.InterfaceByName(deviceConfig.Name)
 	if err != nil {
 		return err
 	}
-	ready := map[string]any{"pid": os.Getpid(), "index": adapter.Index, "alias": "TestISP", "guid": deviceConfig.GUID, "instanceID": device.adapter.InstanceID(), "session": "internal/wintun", "address": "198.19.0.1", "control": "http://" + listener.Addr().String(), "uplinkIndex": *index, "uplinkIP": *ip, "tcpReuseHook": g.tcpReuseHook}
+	ready := map[string]any{"pid": os.Getpid(), "index": adapter.Index, "alias": deviceConfig.Name, "guid": deviceConfig.GUID, "instanceID": device.adapter.InstanceID(), "session": "internal/wintun", "address": address, "control": "http://" + listener.Addr().String(), "uplinkIndex": *index, "uplinkIP": *ip, "tcpReuseHook": g.tcpReuseHook}
 	if err := writeJSON(*state, ready); err != nil {
 		return err
 	}

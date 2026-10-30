@@ -121,7 +121,8 @@ export function readWorkflow(text) {
 }
 
 // One entry per runner a job may use, with the matrix values that step
-// conditions read (name, arch). Covers "include" lists and runner lists.
+// conditions read. Literal non-runner axes form a Cartesian product too;
+// dropping one silently makes both sides of a matrix-dependent step disappear.
 function matrixEntries(runsOn, strategy) {
   if (!/\$\{\{/.test(runsOn ?? '')) return [{ runner: runsOn }];
   const include = [];
@@ -149,7 +150,10 @@ function matrixEntries(runsOn, strategy) {
   const entries = include.filter(entry => entry.runner && !runners.includes(entry.runner));
   for (const runner of runners) entries.push({ ...include.find(entry => entry.runner === runner), runner });
   if (!entries.length) throw new Error(`No runners found for matrix job: ${strategy}`);
-  return entries;
+  const axes = [...strategy.matchAll(/^ {8}([\w-]+): (\[.*\])$/gm)]
+    .filter(([, name]) => name !== 'runner')
+    .map(([, name, values]) => [name, flowList(values)]);
+  return axes.reduce((rows, [name, values]) => rows.flatMap(row => values.map(value => ({ ...row, [name]: value }))), entries);
 }
 
 export const runnerOS = runner => /^windows/.test(runner) ? 'Windows' : /^ubuntu/.test(runner) ? 'Linux' : null;

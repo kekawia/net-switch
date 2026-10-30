@@ -1,5 +1,13 @@
 param([ValidateSet('inspect', 'pnp', 'state', 'configure', 'reuse-route', 'withdraw', 'restore', 'block-direct', 'unblock-direct', 'clean')] [string] $Action)
 $ErrorActionPreference = 'Stop'
+$testName = 'TestISP'
+$testAddress = '198.19.0.1'
+if ($env:TESTISP_ROLE -eq 'primary') {
+  $testName = 'TestISPMain'
+  $testAddress = '198.19.4.1'
+} elseif ($env:TESTISP_ROLE -and $env:TESTISP_ROLE -ne 'secondary') {
+  throw 'Unknown TestISP role.'
+}
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Hosted Windows runners only.' }
 $admin = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $admin.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'Administrator required.' }
@@ -35,7 +43,7 @@ if ($Action -eq 'block-direct') {
 } else {
   $index = [int]$env:TESTISP_INDEX
   $adapter = Get-NetAdapter -InterfaceIndex $index
-  if ($index -le 0 -or $adapter.Name -ne 'TestISP') { throw 'Refusing to change an adapter other than TestISP.' }
+  if ($index -le 0 -or $adapter.Name -ne $testName) { throw 'Refusing to change an adapter other than the selected TestISP.' }
   if ($Action -eq 'state') {
     [pscustomobject]@{ defaultRoute = [bool](Get-NetRoute -InterfaceIndex $index -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue) } | ConvertTo-Json -Compress
     exit
@@ -48,11 +56,11 @@ if ($Action -eq 'block-direct') {
   if ($Action -eq 'configure') {
     Set-NetIPInterface -InterfaceIndex $index -AddressFamily IPv4 -AutomaticMetric Disabled -InterfaceMetric 5500 -NlMtuBytes 1500 -Dhcp Disabled
     Set-DnsClient -InterfaceIndex $index -RegisterThisConnectionsAddress $false
-    New-NetIPAddress -InterfaceIndex $index -IPAddress '198.19.0.1' -PrefixLength 30 -AddressFamily IPv4 | Out-Null
+    New-NetIPAddress -InterfaceIndex $index -IPAddress $testAddress -PrefixLength 30 -AddressFamily IPv4 | Out-Null
     # New-NetIPAddress returns while duplicate-address detection is pending.
     $deadline = [DateTime]::UtcNow.AddSeconds(20)
     do {
-      $address = Get-NetIPAddress -InterfaceIndex $index -IPAddress '198.19.0.1' -AddressFamily IPv4
+      $address = Get-NetIPAddress -InterfaceIndex $index -IPAddress $testAddress -AddressFamily IPv4
       if ($address.AddressState -eq 'Preferred') { break }
       if ($address.AddressState -eq 'Duplicate') { throw 'TestISP address is duplicate.' }
       Start-Sleep -Milliseconds 200

@@ -63,6 +63,7 @@ jobs:
     timeout-minutes: 30
     strategy:
       fail-fast: false
+      max-parallel: 10
       matrix:
         runner: [windows-latest, windows-11-arm]
         control: [node, go]
@@ -101,16 +102,46 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $elapsed = ((Get-Date) - $started).TotalSeconds
           "Windows PowerShell 5.1 started in $([math]::Round($elapsed, 1)) s"
-      - name: Build Go control with commit identity
-        run: go build -tags control_compat -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}" -o bin/netswitch.exe ./cmd/netswitch
+      # Compile-only until retirement step 2(b) deletes these tagged sources.
+      # No installed native test executes either compatibility binary.
+      - name: Compile historical launcher pending physical deletion
+        if: matrix.control == 'node'
+        run: |
+          go build -tags control_compat -o bin/historical-control.exe ./cmd/netswitch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -tags control_compat,control_test_https -o bin/historical-https.exe ./cmd/netswitch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build installed native candidates
+        if: matrix.control == 'go'
+        run: |
+          $directory = Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI'
+          go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch.exe" ./cmd/netswitch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-engine.exe" ./cmd/netswitch-engine
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-desktop.exe" ./cmd/netswitch-desktop
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitchctl.exe" ./cmd/netswitchctl
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o "$directory/lifecycle.test.exe" ./tests/lifecycle
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o "$directory/worker.test.exe" ./internal/platform/worker
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o "$directory/testisp.exe" ./tests/windows/testisp
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/testisp/fetch-wintun.ps1 -Directory $directory
+          icacls $directory /setowner '*S-1-5-32-544' /T /Q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Native Win32 parity
         id: parity
         if: matrix.control == 'go'
         continue-on-error: true
-        run: node scripts/win32-parity.mjs ./bin/netswitch.exe
+        run: node scripts/win32-parity.mjs (Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI/netswitch.exe') --installed-startup-suite
       - name: Fetch verified sing-box
+        if: matrix.control == 'node'
         run: ./scripts/fetch-engine.ps1
       - name: Build the two-path TUN harness and fetch its signed driver
+        if: matrix.control == 'node'
         run: |
           go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -118,22 +149,52 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
       - name: Routing against the selected control executable
+        if: matrix.control == 'node'
         run: |
-          $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch.exe).Path } else { (Get-Command node).Source }
+          $server = (Get-Command node).Source
           node scripts/e2e-routing.mjs --server-executable $server --public-via-tun
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: TUN against the selected control executable
+        if: matrix.control == 'node'
         run: |
-          if ('${{ matrix.control }}' -eq 'go') {
-            go build -tags control_compat,control_test_https -ldflags "-H windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-https-fixture" -o bin/netswitch-tun.exe ./cmd/netswitch
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          }
-          $server = if ('${{ matrix.control }}' -eq 'go') { (Resolve-Path bin/netswitch-tun.exe).Path } else { (Get-Command node).Source }
+          $server = (Get-Command node).Source
           node scripts/e2e-tun.mjs --server-executable $server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Require native parity to pass
-        if: always() && steps.parity.outcome == 'failure'
-        run: throw 'Native parity failed; its complete case results are above.'
+      - name: Installed startup and quarantine
+        id: startup
+        if: matrix.control == 'go'
+        continue-on-error: true
+        env:
+          NETSWITCH_LIFECYCLE_CI: '1'
+          NETSWITCH_NATIVE_CI: '1'
+          NETSWITCH_NATIVE_FAULTS: '1'
+          NETSWITCH_LIFECYCLE_FILTER: '^TestInstalledNativeStartup$'
+        run: |
+          $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI'
+          Push-Location tests/lifecycle
+          try {
+            node (Join-Path $env:GITHUB_WORKSPACE 'scripts/run-native-proof.mjs') installed-startup (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+      - name: Installed routing and TUN
+        id: traffic
+        if: matrix.control == 'go'
+        continue-on-error: true
+        env:
+          NETSWITCH_LIFECYCLE_CI: '1'
+          NETSWITCH_NATIVE_CI: '1'
+          NETSWITCH_NATIVE_FAULTS: '1'
+          NETSWITCH_LIFECYCLE_FILTER: '^TestInstalledNativeTraffic$'
+        run: |
+          $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI'
+          Push-Location tests/lifecycle
+          try {
+            node (Join-Path $env:GITHUB_WORKSPACE 'scripts/run-native-proof.mjs') installed-traffic (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') run-hosted
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } finally { Pop-Location }
+      - name: Require all native results to pass
+        if: always() && matrix.control == 'go' && (steps.parity.outcome != 'success' || steps.startup.outcome != 'success' || steps.traffic.outcome != 'success')
+        run: throw 'Native parity/startup/traffic failed or did not run; complete case results are above.'
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
