@@ -30,6 +30,7 @@ type nativeStartupEngine struct {
 	probeCheck func(engine.ProbeRequest, engine.ProbeResult)
 	probeBegin func(engine.ProbeRequest)
 	closeCheck func(engine.CloseRequest) (engine.CloseResult, error)
+	stopCheck  func(context.Context) error
 	desired    *engine.Revision
 }
 
@@ -91,6 +92,13 @@ func (e *nativeStartupEngine) Start(ctx context.Context, p engine.Policy) (err e
 
 func (e *nativeStartupEngine) ForgetLane(string) {} // complete revisions own lanes
 
+func (e *nativeStartupEngine) Stop(ctx context.Context) error {
+	if e.stopCheck != nil {
+		return e.stopCheck(ctx)
+	}
+	return e.fakeEngine.Stop(ctx)
+}
+
 func (e *nativeStartupEngine) CloseFlows(_ context.Context, request engine.CloseRequest) (engine.CloseResult, error) {
 	if e.closeCheck != nil {
 		return e.closeCheck(request)
@@ -112,6 +120,7 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("quitFailure", func(t *testing.T) { replayNativeStartup(t, "quitFailure") })
 	t.Run("reconnectPinned", func(t *testing.T) { replayNativeStartup(t, "reconnectPinned") })
 	t.Run("reconnectShared", func(t *testing.T) { replayNativeStartup(t, "reconnectShared") })
 	t.Run("ipv6", func(t *testing.T) { replayNativeStartup(t, "ipv6") })

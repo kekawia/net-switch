@@ -48,6 +48,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
+	quitSlice := name == "quitFailure"
 	reconnectSlice := name == "reconnectPinned" || name == "reconnectShared"
 	liveSlice := name == "lineOrder" || name == "lineRemove" || name == "lineAdd" || name == "adapterRename"
 	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute" || name == "ipv6"
@@ -55,7 +56,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
 	ownerLine := secondLine
-	if name == "appLine" || name == "combining" || usageSlice || healthSlice || liveSlice || reconnectSlice {
+	if name == "appLine" || name == "combining" || usageSlice || healthSlice || liveSlice || reconnectSlice || quitSlice {
 		pins = map[string]string{}
 		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
 		ownerLine = firstLine
@@ -467,9 +468,9 @@ func replayNativeStartup(t *testing.T, name string) {
 	// Compare external observations in trace order and associate each callback
 	// with its checked native operation. No default handler can earn a receipt.
 	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
-	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice)
+	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice)
 	var pinEvidence map[int]string
-	if liveSlice || name == "ipv6" || reconnectSlice {
+	if liveSlice || name == "ipv6" || reconnectSlice || quitSlice {
 		start, end, names := 66, 86, twoLineRevisionFiles()
 		if name == "lineAdd" {
 			start, end, names = 62, 67, []string{"apps-a1.json"}
@@ -493,6 +494,17 @@ func replayNativeStartup(t *testing.T, name string) {
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		if quitSlice && entry.Kind == "quitFailure" {
+			check("startup counterpart exhaustion", counterparts.Finish())
+			if logIndex != len(files.logs) || len(pendingLogs) != 0 {
+				t.Fatal("startup observation leftovers")
+			}
+			for seq, guard := range replayNativeQuitFailure(t, c, e, clock, files, trace, cmp, fileCursor) {
+				checked[seq] = guard
+			}
+			logIndex = len(files.logs)
+			break
+		}
 		if reconnectSlice && entry.Kind == "connections" {
 			check("startup counterpart exhaustion", counterparts.Finish())
 			if logIndex != len(files.logs) || len(pendingLogs) != 0 {
@@ -594,7 +606,7 @@ func replayNativeStartup(t *testing.T, name string) {
 				}
 				guard = "constructed native stores replace adapter directory setup"
 			case operation == "readdir":
-				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice) && v["ok"] == true) {
+				if !(v["ok"] == false && v["code"] == "ERR_INVALID_ARG_TYPE" || (name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice) && v["ok"] == true) {
 					t.Fatal("recorded cleanup failure guard")
 				}
 				guard = "complete revision replaces failed adapter directory cleanup"
@@ -728,7 +740,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			guard = "completed and published physical probe vote"
 		case "directory-list":
-			if (name != "appLine" && name != "capReset" && name != "lostDefaultRoute" && !liveSlice) || v["directory"] != "/oracle/data" {
+			if (name != "appLine" && name != "capReset" && name != "lostDefaultRoute" && !liveSlice && !quitSlice) || v["directory"] != "/oracle/data" {
 				t.Fatal("unknown directory replacement", v)
 			}
 			guard = "complete revision cleanup contract"

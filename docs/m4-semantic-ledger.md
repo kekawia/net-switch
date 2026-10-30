@@ -7,6 +7,10 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
+Completed quitFailure, 2026-10-30: 175 more entries, passing local aggregate
+**6,608 / 7,894** (1,286 uncovered), exits 0/0/0. See
+[remaining slice evidence](m4-native-remaining-replay.md).
+
 Completed reconnect slice, 2026-10-30: reconnectPinned and reconnectShared add
 305 entries, bringing the passing local aggregate to **6,433 / 7,894**
 (1,461 uncovered), exits 0/0/0. Hosted race checks and independent review remain.
