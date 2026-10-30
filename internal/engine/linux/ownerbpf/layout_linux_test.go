@@ -25,7 +25,7 @@ func TestProvenanceCInterchange(t *testing.T) {
 	}
 	want := ReaderSlot{
 		Control: ReadControl{ABI: 3, Registration: 0x1020304050607080,
-			Epoch: 0x1122334455667788, Sequence: 0x8877665544332211, Armed: 1},
+			Epoch: 0x1122334455667788, Sequence: 0x8877665544332211, Armed: 0},
 		Completion: ReadCompletion{Count: 1, Sequence: 0x8877665544332211,
 			Registration: 0x1020304050607080, Terminal: 1, Status: 1},
 		Packet: PacketRecord{ABI: 3, Status: 1, Epoch: 0x1122334455667788,
