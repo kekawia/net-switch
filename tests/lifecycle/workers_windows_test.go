@@ -1,7 +1,10 @@
 package lifecycle_test
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -55,7 +58,7 @@ func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 		var path [32768]uint16
 		size := uint32(len(path))
 		err = windows.QueryFullProcessImageName(h, 0, &path[0], &size)
-		if err != nil || !strings.EqualFold(windows.UTF16ToString(path[:size]), filepath.Join(directory, "netswitch-engine.exe")) {
+		if err != nil {
 			windows.CloseHandle(h)
 			continue
 		}
@@ -69,12 +72,50 @@ func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 			windows.CloseHandle(h)
 			continue
 		}
+		if !workerImageMatches(directory, windows.UTF16ToString(path[:size])) {
+			windows.CloseHandle(h)
+			t.Logf("Control child %d has an unrecognized worker image", entry.ProcessID)
+			continue
+		}
 		refs = append(refs, &windowsWorker{pid: entry.ProcessID, handle: h, mode: args[2], t: t})
 	}
 	if err != windows.ERROR_NO_MORE_FILES {
 		t.Fatal(err)
 	}
 	return refs
+}
+
+func workerImageMatches(directory, image string) bool {
+	source := filepath.Join(directory, "netswitch-engine.exe")
+	if strings.EqualFold(image, source) {
+		return true
+	}
+	root, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	if err != nil || !strings.EqualFold(filepath.Base(image), "worker.exe") || !strings.HasPrefix(filepath.Base(filepath.Dir(image)), "NetSwitchWorker-") || !strings.EqualFold(filepath.Dir(filepath.Dir(image)), root) {
+		return false
+	}
+	// A private name alone is not evidence. Compare the deployed source bytes
+	// before accepting this Control child as a worker for fault injection.
+	digest := func(path string) ([32]byte, error) {
+		f, err := os.Open(path)
+		if err != nil {
+			return [32]byte{}, err
+		}
+		defer f.Close()
+		h := sha256.New()
+		if _, err = io.Copy(h, f); err != nil {
+			return [32]byte{}, err
+		}
+		var out [32]byte
+		copy(out[:], h.Sum(nil))
+		return out, nil
+	}
+	want, err := digest(source)
+	if err != nil {
+		return false
+	}
+	got, err := digest(image)
+	return err == nil && got == want
 }
 func processArguments(handle windows.Handle) ([]string, error) {
 	// NtQueryInformationProcess probes this as a pointer-aligned structure.

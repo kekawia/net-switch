@@ -1,10 +1,13 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"unsafe"
@@ -19,7 +22,11 @@ type process struct {
 	errors        *os.File
 	wait          sync.Once
 	waitErr       error
+	exited        bool
 	close         sync.Once
+	fence         *networkFence
+	image         *workerImage
+	closeErr      error
 }
 
 func (p *process) Input() io.WriteCloser { return p.input }
@@ -28,7 +35,9 @@ func (p *process) Errors() io.ReadCloser { return p.errors }
 func (p *process) Kill() error           { return windows.TerminateJobObject(p.job, 1) }
 func (p *process) Wait() error {
 	p.wait.Do(func() {
-		_, p.waitErr = windows.WaitForSingleObject(p.handle, windows.INFINITE)
+		var state uint32
+		state, p.waitErr = windows.WaitForSingleObject(p.handle, windows.INFINITE)
+		p.exited = p.waitErr == nil && state == windows.WAIT_OBJECT_0
 		if p.waitErr == nil {
 			var code uint32
 			p.waitErr = windows.GetExitCodeProcess(p.handle, &code)
@@ -51,8 +60,36 @@ func (p *process) Close() error {
 		p.errors.Close()
 		windows.CloseHandle(p.handle)
 		windows.CloseHandle(p.job)
+		if !p.exited {
+			p.closeErr = fmt.Errorf("worker termination was not confirmed; retaining network fence and image: %v", p.waitErr)
+			if p.fence != nil && p.fence.engine != 0 {
+				p.closeErr = errors.Join(p.closeErr, networkCall("FwpmEngineClose0", uintptr(p.fence.engine)))
+				p.fence.engine = 0
+			}
+			log.Print(p.closeErr)
+			return
+		}
+		imageRecovery.Lock()
+		if p.image != nil {
+			p.closeErr = p.image.removeExecutable()
+		}
+		if p.fence != nil && p.closeErr == nil {
+			p.closeErr = p.fence.close()
+		}
+		if p.image != nil && p.closeErr == nil {
+			p.closeErr = p.image.removeFiles()
+		}
+		imageRecovery.Unlock()
+		if p.closeErr != nil && p.fence != nil && p.fence.engine != 0 {
+			// Static rules stay active without leaking the parent's RPC handle.
+			p.closeErr = errors.Join(p.closeErr, networkCall("FwpmEngineClose0", uintptr(p.fence.engine)))
+			p.fence.engine = 0
+		}
+		if p.closeErr != nil {
+			log.Printf("worker cleanup: %v", p.closeErr)
+		}
 	})
-	return nil
+	return p.closeErr
 }
 
 const workerUILimits = windows.JOB_OBJECT_UILIMIT_DESKTOP | windows.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
@@ -77,6 +114,93 @@ func Start(executable string, args []string) (Process, error) {
 func start(executable string, args []string, desktop *uint16, creationFlags, uiLimits uint32) (Process, error) {
 	if !filepath.IsAbs(executable) || len(args) < 2 || args[0] != "worker" {
 		return nil, fmt.Errorf("worker launcher requires its absolute executable and a worker mode")
+	}
+	mode := workerMode(args)
+	admin := adminWorker(args)
+	network := mode == "probe" || mode == "line-check"
+	var fence *networkFence
+	var image *workerImage
+	fenceIntent := false
+	var err error
+	if !admin && !network {
+		imageRecovery.Lock()
+		if err := recoverWorkerImages(); err != nil {
+			log.Printf("worker image recovery: %v", err)
+		}
+		imageRecovery.Unlock()
+		image, err = newWorkerImage(executable)
+		if err != nil {
+			return nil, fmt.Errorf("prepare %s worker image: %w", mode, err)
+		}
+		executable = image.executable
+	}
+	policy := processPolicy{}
+	if image != nil {
+		policy.beforeResume = func(child windows.Handle) error {
+			pid, err := windows.GetProcessId(child)
+			if err != nil {
+				return err
+			}
+			created, err := processCreated(child)
+			if err != nil {
+				return err
+			}
+			if err = writeImageRecord(filepath.Join(image.directory, "child.json"), imageOwner{pid, created}); err != nil {
+				return err
+			}
+			fenceIntent = true
+			fence, err = fenceWorkerNetwork(image)
+			return err
+		}
+	}
+	p, err := startWithToken(executable, args, desktop, creationFlags, uiLimits, func(token windows.Token) (windows.Token, error) {
+		if admin {
+			return workerTokenForMode(token, true, false)
+		}
+		return workerTokenWithSIDs(token, false, workerReadSIDs(mode))
+	}, policy)
+	if err != nil {
+		imageRecovery.Lock()
+		var cleanup error
+		if image != nil {
+			cleanup = image.removeExecutable()
+		}
+		if fence != nil && cleanup == nil {
+			cleanup = fence.close()
+		}
+		if image != nil && fenceIntent && cleanup == nil {
+			cleanup = removeImageFence(image)
+		}
+		if image != nil && cleanup == nil {
+			cleanup = image.removeFiles()
+		}
+		imageRecovery.Unlock()
+		if cleanup != nil && fence != nil && fence.engine != 0 {
+			cleanup = errors.Join(cleanup, networkCall("FwpmEngineClose0", uintptr(fence.engine)))
+			fence.engine = 0
+		}
+		return nil, errors.Join(err, cleanup)
+	}
+	p.(*process).fence = fence
+	p.(*process).image = image
+	return p, nil
+}
+
+var imageRecovery sync.Mutex
+
+type processPolicy struct {
+	beforeResume func(windows.Handle) error
+}
+
+// Token injection is private to this package's hosted compatibility tests.
+// Start and start always select the production policy above.
+func startWithToken(executable string, args []string, desktop *uint16, creationFlags, uiLimits uint32, makeToken func(windows.Token) (windows.Token, error), policies ...processPolicy) (Process, error) {
+	if !filepath.IsAbs(executable) || len(args) < 2 || args[0] != "worker" {
+		return nil, fmt.Errorf("worker launcher requires its absolute executable and a worker mode")
+	}
+	var policy processPolicy
+	if len(policies) > 0 {
+		policy = policies[0]
 	}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
@@ -107,7 +231,7 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 		return nil, err
 	}
 	defer token.Close()
-	restricted, err := workerToken(token, adminWorker(args))
+	restricted, err := makeToken(token)
 	if err != nil {
 		return nil, err
 	}
@@ -161,11 +285,18 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 			windows.CloseHandle(h)
 		}
 	}()
-	attrs, err := windows.NewProcThreadAttributeList(1)
+	attrs, err := windows.NewProcThreadAttributeList(2)
 	if err != nil {
 		return nil, err
 	}
-	defer attrs.Delete()
+	jobRef := new(windows.Handle)
+	*jobRef = job
+	defer func() { attrs.Delete(); runtime.KeepAlive(jobRef) }()
+	// Assign atomically at creation: parent death cannot strand a suspended
+	// process outside the kill-on-close job or its orphan-recovery record.
+	if err := attrs.Update(0x2000D, unsafe.Pointer(jobRef), unsafe.Sizeof(*jobRef)); err != nil {
+		return nil, fmt.Errorf("worker job list: %w", err)
+	}
 	if err := attrs.Update(windows.PROC_THREAD_ATTRIBUTE_HANDLE_LIST, unsafe.Pointer(&handles[0]), uintptr(len(handles))*unsafe.Sizeof(handles[0])); err != nil {
 		return nil, err
 	}
@@ -188,13 +319,17 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 		return nil, err
 	}
 	defer windows.CloseHandle(pi.Thread)
-	if err = windows.AssignProcessToJobObject(job, pi.Process); err != nil {
-		windows.TerminateProcess(pi.Process, 1)
-		windows.CloseHandle(pi.Process)
-		return nil, err
+	if policy.beforeResume != nil {
+		if err = policy.beforeResume(pi.Process); err != nil {
+			windows.TerminateJobObject(job, 1)
+			windows.WaitForSingleObject(pi.Process, windows.INFINITE)
+			windows.CloseHandle(pi.Process)
+			return nil, err
+		}
 	}
 	if _, err = windows.ResumeThread(pi.Thread); err != nil {
 		windows.TerminateJobObject(job, 1)
+		windows.WaitForSingleObject(pi.Process, windows.INFINITE)
 		windows.CloseHandle(pi.Process)
 		return nil, err
 	}
@@ -203,9 +338,45 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 }
 
 func workerToken(token windows.Token, administrative bool) (windows.Token, error) {
-	var disabled []windows.SIDAndAttributes
+	return workerTokenForMode(token, administrative, false)
+}
+
+func workerReadSIDs(mode string) []string {
+	sids := []string{"S-1-5-12"}
+	if mode == "probe" || mode == "line-check" {
+		sids = append(sids, "S-1-5-32-545")
+	}
+	if mode == "line-check" {
+		sids = append(sids, "S-1-1-0")
+	}
+	if mode == "tcp-port-configuration" || mode == "autostart" {
+		sids = append(sids, "S-1-5-11")
+	}
+	return sids
+}
+
+func workerTokenForMode(token windows.Token, administrative, network bool) (windows.Token, error) {
+	var sids []string
 	if !administrative {
-		groups, err := token.GetTokenGroups()
+		sids = []string{"S-1-5-12"}
+		if network {
+			sids = append(sids, "S-1-5-32-545")
+		}
+	}
+	return workerTokenWithSIDs(token, administrative, sids)
+}
+
+func workerTokenWithSIDs(token windows.Token, administrative bool, sids []string) (windows.Token, error) {
+	return constructWorkerToken(token, administrative, sids, false)
+}
+
+func constructWorkerToken(token windows.Token, administrative bool, sids []string, disableSystemUser bool) (windows.Token, error) {
+	var disabled []windows.SIDAndAttributes
+	var groups *windows.Tokenuser
+	var tokenGroups *windows.Tokengroups
+	if !administrative {
+		var err error
+		tokenGroups, err = token.GetTokenGroups()
 		if err != nil {
 			return 0, err
 		}
@@ -213,9 +384,16 @@ func workerToken(token windows.Token, administrative bool) (windows.Token, error
 		if err != nil {
 			return 0, err
 		}
-		disabled, err = disabledWorkerGroups(groups.AllGroups(), filtered)
+		disabled, err = disabledWorkerGroups(tokenGroups.AllGroups(), filtered)
 		if err != nil {
 			return 0, err
+		}
+		groups, err = token.GetTokenUser()
+		if err != nil {
+			return 0, err
+		}
+		if disableSystemUser && groups.User.Sid.String() == "S-1-5-18" {
+			disabled = append(disabled, windows.SIDAndAttributes{Sid: groups.User.Sid})
 		}
 	}
 	var disabledSIDs *windows.SIDAndAttributes
@@ -223,8 +401,34 @@ func workerToken(token windows.Token, administrative bool) (windows.Token, error
 		disabledSIDs = &disabled[0]
 	}
 	var restricted windows.Token
+	flags := uintptr(1) // DISABLE_MAX_PRIVILEGE
+	var restricting *windows.SIDAndAttributes
+	var restrictingCount uintptr
+	var restrictions []windows.SIDAndAttributes
+	if !administrative {
+		// Preserve the normal identity for native reads; every write must also
+		// pass this independent SID set, which never includes SYSTEM or admin.
+		// WFP uses a private executable identity to enforce network denial.
+		if len(sids) == 0 {
+			return 0, fmt.Errorf("read worker requires restricting SIDs")
+		}
+		for _, text := range sids {
+			sid, err := windows.StringToSid(text)
+			if err != nil {
+				return 0, err
+			}
+			restrictions = append(restrictions, windows.SIDAndAttributes{Sid: sid})
+		}
+		restricting = &restrictions[0]
+		restrictingCount = uintptr(len(restrictions))
+		flags |= 8 // WRITE_RESTRICTED (supported Windows versions)
+	}
 	proc := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
-	result, _, callErr := proc.Call(uintptr(token), 1, uintptr(len(disabled)), uintptr(unsafe.Pointer(disabledSIDs)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&restricted)))
+	result, _, callErr := proc.Call(uintptr(token), flags, uintptr(len(disabled)), uintptr(unsafe.Pointer(disabledSIDs)), 0, 0, restrictingCount, uintptr(unsafe.Pointer(restricting)), uintptr(unsafe.Pointer(&restricted)))
+	runtime.KeepAlive(tokenGroups)
+	runtime.KeepAlive(groups)
+	runtime.KeepAlive(disabled)
+	runtime.KeepAlive(restrictions)
 	if result == 0 {
 		return 0, fmt.Errorf("restrict worker token: %w", callErr)
 	}
@@ -280,7 +484,7 @@ func disabledWorkerGroups(groups, filtered []windows.SIDAndAttributes) ([]window
 		if text == "" {
 			return nil, fmt.Errorf("could not read a worker token group SID")
 		}
-		if denyOnly[text] || (filtered == nil && elevatedGroupText(text)) {
+		if denyOnly[text] || elevatedGroupText(text) {
 			disabled = append(disabled, windows.SIDAndAttributes{Sid: group.Sid})
 		}
 	}
@@ -294,8 +498,12 @@ func mediumIntegrity(token windows.Token) error {
 	}
 	label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: medium, Attributes: windows.SE_GROUP_INTEGRITY}}
 	if err := windows.SetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), label.Size()); err != nil {
+		runtime.KeepAlive(medium)
+		runtime.KeepAlive(label)
 		return fmt.Errorf("lower worker integrity: %w", err)
 	}
+	runtime.KeepAlive(medium)
+	runtime.KeepAlive(label)
 	return nil
 }
 
@@ -334,14 +542,19 @@ func elevatedGroupText(text string) bool {
 }
 
 func adminWorker(args []string) bool {
-	mode := args[1]
-	if mode == "query" && len(args) > 2 {
-		mode = args[2]
-	}
+	mode := workerMode(args)
 	switch mode {
 	case "outside", "policy-set", "metrics-set", "metrics-restore", "protect-directory",
 		"stop-process", "close-tcp", "autostart-set", "autostart-upgrade":
 		return true
 	}
 	return false
+}
+
+func workerMode(args []string) string {
+	mode := args[1]
+	if mode == "query" && len(args) > 2 {
+		mode = args[2]
+	}
+	return mode
 }

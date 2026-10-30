@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -20,9 +22,12 @@ import (
 )
 
 type isolationRequest struct {
-	Parent uint32
-	Key    string
-	TCP    [5]uint32
+	Parent    uint32
+	Key       string
+	TCP       [5]uint32
+	Address   string
+	Address6  string
+	FilterIDs []uint64
 }
 type isolationResult struct {
 	Groups                                   map[string]uint32
@@ -34,9 +39,34 @@ type isolationResult struct {
 	UI                                       uint32
 	ConsoleAttached                          bool
 	Error                                    string
+	OutboundDenied                           bool
+	OutboundCode                             string
+	Outbound6Denied                          bool
+	Outbound6Code                            string
+	DLLs                                     map[string]string
+	EventCode                                string
+	Restricted                               []string
+	RegistryDACDenied                        bool
+	RegistryDACCode                          string
+	FilterDeleteDenied                       bool
+	FilterDeleteCode                         string
+	ProcessDuplicateDenied                   bool
+	ProcessDuplicateCode                     string
 }
 
 func TestMain(m *testing.M) {
+	if root := os.Getenv("NETSWITCH_WORKER_TEST_ROOT"); root != "" {
+		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" || !filepath.IsAbs(root) {
+			os.Exit(2)
+		}
+		imageRoot = func() (string, error) { return root, nil }
+	}
+	if len(os.Args) > 1 && os.Args[1] == "fence-owner-proof" {
+		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+			os.Exit(2)
+		}
+		os.Exit(runFenceOwnerProof())
+	}
 	if len(os.Args) > 1 && os.Args[1] == "worker" {
 		// Only this test executable handles these inputs. Product workers retain
 		// their normal operation allowlist and never gain a diagnostic write API.
@@ -127,7 +157,31 @@ func TestWorkerBootstrapDiagnostics(t *testing.T) {
 
 func isolationProbe(input isolationRequest) (isolationResult, error) {
 	result := isolationResult{Groups: map[string]uint32{}}
+	result.DLLs = map[string]string{}
+	// Find returns an error with the DLL name; LazyProc.Call would panic and
+	// lose the other authority results before they reach the parent.
+	for _, library := range []struct{ dll, procedure string }{
+		{"ole32.dll", "CLSIDFromString"}, {"user32.dll", "GetDesktopWindow"},
+		{"oleaut32.dll", "VariantClear"}, {"combase.dll", "RoInitialize"},
+		{"shell32.dll", "SHGetFileInfoW"}, {"iphlpapi.dll", "GetAdaptersAddresses"},
+	} {
+		result.DLLs[library.dll] = fmt.Sprint(windows.NewLazySystemDLL(library.dll).NewProc(library.procedure).Find())
+	}
+	event, eventErr := windows.CreateEvent(nil, 0, 0, nil)
+	result.EventCode = fmt.Sprint(eventErr)
+	if eventErr == nil {
+		windows.CloseHandle(event)
+	}
 	token := windows.GetCurrentProcessToken()
+	var restrictedSize uint32
+	_ = windows.GetTokenInformation(token, windows.TokenRestrictedSids, nil, 0, &restrictedSize)
+	restrictedBuffer := make([]uint64, (max(uintptr(restrictedSize), unsafe.Sizeof(windows.Tokengroups{}))+7)/8)
+	if err := windows.GetTokenInformation(token, windows.TokenRestrictedSids, (*byte)(unsafe.Pointer(&restrictedBuffer[0])), restrictedSize, &restrictedSize); err != nil {
+		return result, err
+	}
+	for _, group := range (*windows.Tokengroups)(unsafe.Pointer(&restrictedBuffer[0])).AllGroups() {
+		result.Restricted = append(result.Restricted, group.Sid.String())
+	}
 	groups, err := token.GetTokenGroups()
 	if err != nil {
 		return result, err
@@ -151,6 +205,12 @@ func isolationProbe(input isolationRequest) (isolationResult, error) {
 	if err == nil {
 		windows.CloseHandle(h)
 	}
+	duplicate, duplicateErr := windows.OpenProcess(windows.PROCESS_DUP_HANDLE, false, input.Parent)
+	result.ProcessDuplicateDenied = duplicateErr == windows.ERROR_ACCESS_DENIED
+	result.ProcessDuplicateCode = fmt.Sprint(duplicateErr)
+	if duplicateErr == nil {
+		windows.CloseHandle(duplicate)
+	}
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE, input.Key, registry.SET_VALUE)
 	result.RegistryDenied = err == windows.ERROR_ACCESS_DENIED
 	result.RegistryCode = fmt.Sprint(err)
@@ -158,11 +218,46 @@ func isolationProbe(input isolationRequest) (isolationResult, error) {
 		_ = k.SetStringValue("worker-write", "permitted")
 		k.Close()
 	}
+	dac, dacErr := registry.OpenKey(registry.LOCAL_MACHINE, input.Key, windows.WRITE_DAC)
+	result.RegistryDACDenied = dacErr == windows.ERROR_ACCESS_DENIED
+	result.RegistryDACCode = fmt.Sprint(dacErr)
+	if dacErr == nil {
+		dac.Close()
+	}
 	code, _, _ := windows.NewLazySystemDLL("iphlpapi.dll").NewProc("SetTcpEntry").Call(uintptr(unsafe.Pointer(&input.TCP[0])))
 	// SetTcpEntry documents both 5 (access denied) and 317 (non-elevated).
 	// The parent also proves the live connection survived this attempted close.
 	result.TCPDenied = code == uintptr(windows.ERROR_ACCESS_DENIED) || code == 317
 	result.TCPCode = strconv.FormatUint(uint64(code), 10)
+	if len(input.FilterIDs) > 0 {
+		var engine windows.Handle
+		fenceErr := networkCall("FwpmEngineOpen0", 0, 10, 0, 0, uintptr(unsafe.Pointer(&engine)))
+		result.FilterDeleteDenied = errors.Is(fenceErr, windows.ERROR_ACCESS_DENIED)
+		result.FilterDeleteCode = fmt.Sprint(fenceErr)
+		if fenceErr == nil {
+			result.FilterDeleteDenied = true
+			for _, id := range input.FilterIDs {
+				deleteErr := networkCall("FwpmFilterDeleteById0", uintptr(engine), uintptr(id))
+				result.FilterDeleteDenied = result.FilterDeleteDenied && errors.Is(deleteErr, windows.ERROR_ACCESS_DENIED)
+				result.FilterDeleteCode = fmt.Sprint(deleteErr)
+			}
+			_ = networkCall("FwpmEngineClose0", uintptr(engine))
+		}
+	}
+	conn, dialErr := net.DialTimeout("tcp4", input.Address, 3*time.Second)
+	result.OutboundCode = fmt.Sprint(dialErr)
+	result.OutboundDenied = errors.Is(dialErr, windows.WSAEACCES) || errors.Is(dialErr, windows.ERROR_ACCESS_DENIED)
+	if dialErr == nil {
+		conn.Close()
+	}
+	if input.Address6 != "" {
+		conn6, err6 := net.DialTimeout("tcp6", input.Address6, 3*time.Second)
+		result.Outbound6Code = fmt.Sprint(err6)
+		result.Outbound6Denied = errors.Is(err6, windows.WSAEACCES) || errors.Is(err6, windows.ERROR_ACCESS_DENIED)
+		if err6 == nil {
+			conn6.Close()
+		}
+	}
 	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 	if err := winapi.QueryJobInformation(0, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
 		return result, err
@@ -185,6 +280,14 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Fatal("the parent must be elevated")
 	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("parent user SID: %s", user.User.Sid.String())
+	if os.Getenv("NETSWITCH_EXPECT_SYSTEM") == "1" && user.User.Sid.String() != "S-1-5-18" {
+		t.Fatal("SYSTEM fixture ran under the wrong identity")
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -205,13 +308,37 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 	}
 	k.Close()
 	t.Cleanup(func() { _ = registry.DeleteKey(registry.LOCAL_MACHINE, key) })
-	for _, mode := range []string{"app-info", "installed-apps", "line-check", "probe", "meters", "network", "outside"} {
+	for _, policy := range []struct {
+		mode                    string
+		network, administrative bool
+	}{
+		{"app-info", false, false}, {"installed-apps", false, false},
+		{"line-check", true, false}, {"probe", true, false},
+		{"meters", false, false}, {"network", false, false}, {"outside", true, true},
+		{"tcp-port-configuration", false, false}, {"architecture", false, false},
+		{"policy", false, false}, {"metrics", false, false}, {"port-holder", false, false},
+		{"tcp-identity", false, false}, {"autostart", false, false},
+		{"policy-set", true, true}, {"metrics-set", true, true}, {"metrics-restore", true, true},
+		{"protect-directory", true, true}, {"stop-process", true, true}, {"close-tcp", true, true},
+		{"autostart-set", true, true}, {"autostart-upgrade", true, true},
+	} {
+		mode := policy.mode
 		t.Run(mode, func(t *testing.T) {
 			listener, err := net.Listen("tcp4", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer listener.Close()
+			listener6, err := net.Listen("tcp6", "[::1]:0")
+			if err != nil {
+				t.Fatal("IPv6 qualification listener", err)
+			}
+			defer listener6.Close()
+			positive6, err := net.Dial("tcp6", listener6.Addr().String())
+			if err != nil {
+				t.Fatal("IPv6 listener precondition", err)
+			}
+			positive6.Close()
 			client, err := net.Dial("tcp4", listener.Addr().String())
 			if err != nil {
 				t.Fatal(err)
@@ -225,6 +352,8 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 			local, remote := client.LocalAddr().(*net.TCPAddr), client.RemoteAddr().(*net.TCPAddr)
 			port := func(p int) uint32 { return uint32((p&255)<<8 | p>>8) }
 			input := isolationRequest{Parent: parent, Key: key, TCP: [5]uint32{12, binary.LittleEndian.Uint32(local.IP.To4()), port(local.Port), binary.LittleEndian.Uint32(remote.IP.To4()), port(remote.Port)}}
+			input.Address = listener.Addr().String()
+			input.Address6 = listener6.Addr().String()
 			args := []string{"worker", mode}
 			if strings.Contains(mode, "-") {
 				args = []string{"worker", "query", mode}
@@ -234,6 +363,13 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer p.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			stop := context.AfterFunc(ctx, func() { _ = p.Kill() })
+			defer stop()
+			if concrete := p.(*process); concrete.fence != nil {
+				input.FilterIDs = append([]uint64(nil), concrete.fence.filters...)
+			}
 			if err := json.NewEncoder(p.Input()).Encode(input); err != nil {
 				t.Fatal(err)
 			}
@@ -250,24 +386,46 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 				t.Fatal(string(b), err)
 			}
 			t.Logf("%s: %+v", mode, got)
+			if len(input.FilterIDs) > 0 && !got.FilterDeleteDenied {
+				t.Errorf("read worker could remove its network fence: %+v", got)
+			}
+			for dll, code := range got.DLLs {
+				if code != "<nil>" {
+					t.Errorf("%s initialization: %s", dll, code)
+				}
+			}
+			if (policy.network && got.OutboundCode != "<nil>") || (!policy.network && !got.OutboundDenied) {
+				t.Fatalf("outbound TCP policy (allowed=%t): %+v", policy.network, got)
+			}
+			if (policy.network && got.Outbound6Code != "<nil>") || (!policy.network && !got.Outbound6Denied) {
+				t.Fatalf("outbound IPv6 TCP policy (allowed=%t): %+v", policy.network, got)
+			}
 			if got.Error != "" || got.Memory != 256*1024*1024 || got.UI != 255 || got.ConsoleAttached {
 				t.Fatalf("worker limits: %+v", got)
 			}
-			if mode == "outside" {
-				if got.AdminDenyOnly || got.Integrity != "S-1-16-12288" || got.ProcessCode != "<nil>" || got.RegistryCode != "<nil>" || got.TCPCode != "0" {
+			if policy.administrative {
+				user, err := windows.GetCurrentProcessToken().GetTokenUser()
+				if err != nil {
+					t.Fatal(err)
+				}
+				integrity := "S-1-16-12288"
+				if user.User.Sid.String() == "S-1-5-18" {
+					integrity = "S-1-16-16384"
+				}
+				if got.AdminDenyOnly || got.Integrity != integrity || got.ProcessCode != "<nil>" || got.RegistryCode != "<nil>" || got.TCPCode != "0" {
 					t.Fatalf("admin worker lost required writes: %+v", got)
 				}
 				if err := accepted.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 					t.Fatal(err)
 				}
-				_, err := accepted.Read(make([]byte, 1))
+				_, err = accepted.Read(make([]byte, 1))
 				if err == nil {
 					t.Fatal("admin close did not close the TCP connection")
 				}
 				if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 					t.Fatal("admin close left the TCP connection alive")
 				}
-			} else if !got.AdminDenyOnly || got.Integrity != "S-1-16-8192" || !got.ProcessDenied || !got.RegistryDenied || !got.TCPDenied {
+			} else if !got.AdminDenyOnly || got.Integrity != "S-1-16-8192" || !got.ProcessDenied || !got.ProcessDuplicateDenied || !got.RegistryDenied || !got.RegistryDACDenied || !got.TCPDenied {
 				t.Fatalf("read worker retained authority: %+v", got)
 			} else {
 				for text, attributes := range got.Groups {

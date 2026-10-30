@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/platform/worker"
 	"golang.org/x/sys/windows"
 )
 
@@ -29,9 +29,17 @@ type metadataAnswer struct {
 func TestMain(m *testing.M) {
 	if len(os.Args) > 2 && os.Args[1] == "worker" && os.Args[2] == "acl-proof" {
 		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+			fmt.Fprintln(os.Stderr, "metadata attacker fixture requires GITHUB_ACTIONS=true and RUNNER_ENVIRONMENT=github-hosted")
 			os.Exit(2)
 		}
 		os.Exit(runMetadataProof())
+	}
+	if len(os.Args) > 2 && os.Args[1] == "worker" {
+		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+			os.Exit(2)
+		}
+		installWorkerTestRoots()
+		os.Exit(Run(os.Args[2:]))
 	}
 	os.Exit(m.Run())
 }
@@ -201,7 +209,7 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			setProofSecurity(t, target, user.User.Sid.String(), rights)
 			before := fileSecurity(t, target)
 			rootBefore := fileSecurity(t, root)
-			p, err := worker.Start(exe, []string{"worker", "acl-proof"})
+			p, err := startMetadataAttacker(exe)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -216,7 +224,9 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			}
 			var ready metadataAnswer
 			if err := decoder.Decode(&ready); err != nil || !ready.Ready || !ready.CertificateDenied {
-				t.Fatalf("Medium worker could not acquire the original grant: %+v %v", ready, err)
+				_ = p.Kill()
+				stderr, _ := io.ReadAll(io.LimitReader(p.Errors(), 65536))
+				t.Fatalf("Medium attacker could not acquire the original grant: %+v decode=%v exit=%v stderr=%s", ready, err, p.Wait(), stderr)
 			}
 			if test.hideGrant {
 				// The retained handle now has authority absent from today's ACL.

@@ -137,9 +137,14 @@ jobs:
         run: node .github/ci/golist-check.mjs
 
   control-security:
-    name: Control security / Windows x64
+    name: Control security / ${{ matrix.runner }}
     if: github.event_name == 'workflow_dispatch' && inputs.control_security && !inputs.wintun_integrity
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        runner: [windows-latest, windows-11-arm]
     timeout-minutes: 10
     env:
       GOTOOLCHAIN: local
@@ -157,7 +162,19 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Native migration, uninstall and token regressions with race checks
-        run: go test -race -v -count=1 ./internal/platform/windows ./internal/platform/worker
+        run: |
+          $race = @()
+          if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { $race = @('-race') }
+          go test @race -v -count=1 ./internal/platform/windows ./internal/platform/worker
+      - name: Worker isolation as SYSTEM
+        if: always()
+        shell: pwsh
+        run: |
+          go test -c -o "$env:RUNNER_TEMP/worker.test.exe" ./internal/platform/worker
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o "$env:RUNNER_TEMP/platform.test.exe" ./internal/platform/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/windows/worker-system.ps1 -ProbeDirectory $env:RUNNER_TEMP
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
