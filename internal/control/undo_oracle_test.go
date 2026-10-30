@@ -12,6 +12,14 @@ import (
 )
 
 func TestUndoFailureOracle(t *testing.T) {
+	testUndoFailureOracle(t, false)
+}
+
+func TestNativeUndoFailureOracle(t *testing.T) {
+	testUndoFailureOracle(t, true)
+}
+
+func testUndoFailureOracle(t *testing.T, serviceMode bool) {
 	b, err := os.ReadFile("../../tests/oracle/fixtures/undo.json")
 	if err != nil {
 		t.Fatal(err)
@@ -29,6 +37,7 @@ func TestUndoFailureOracle(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			c, _, _, files := testCore(t, map[string]any{"lines": testLines()})
+			c.op.ServiceMode = serviceMode
 			if _, err := c.op.Undo.Update(map[string]any{"metrics": tc.Undo["metrics"], "policy": tc.Undo["policy"]}); err != nil {
 				t.Fatal(err)
 			}

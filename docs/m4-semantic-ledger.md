@@ -449,11 +449,18 @@ observations, not just their headline feature.
 | **Total still uncovered** | | **7,408** |
 
 Build the shared native boundary and ordered comparator with the startup slice,
-then reuse it. Required follow-ups outside this 7,894-entry denominator remain:
+then reuse it. The original required follow-ups outside this denominator were:
 node.json authentication/malformed/invalid actions, all seven Undo cases, native
 failed applies and lost/mismatched acks, closure retry/fencing, journal/settings
 failure distinction, exact totals recovery, lifecycle capability/invalid-start/
 pagination/concurrency replacements, installed parity and removal gates.
+
+2026-10-30 follow-up checkpoint: all 12 negative node.json HTTP contracts and
+all seven Undo cases now execute against native/service-mode Control. Existing
+tests are mapped for failed Apply, closure retry/fencing, journal-versus-mirror
+failure and exact totals recovery. See [current evidence and remaining gaps](m4-native-remaining-replay.md).
+Lost/mismatched Apply acknowledgements, the remaining lifecycle replacement
+audit, installed parity and removal gates are not claimed complete.
 
 ## Validation and review boundary
 

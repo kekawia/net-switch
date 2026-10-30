@@ -1,5 +1,52 @@
 # Remaining native trace slices
 
+## Gate mutations and current checkpoint
+
+Four new mutations ran through the full pure aggregate and were reverted:
+missing migration receipt rejected 172 required rows (exits 0/0/1); a failed
+migration subtest refused its receipt (1/0/1); dropping the shared HTTP response
+check rejected missing API observations (1/0/1); swapping migration's Undo/backup
+publications rejected a publication without its preceding write (1/0/1).
+Restored aggregate: **7,553 / 7,894**, exits **0/0/0**. Frozen files are unchanged.
+Hosted race checks and independent review remain.
+
+## Follow-ups outside the denominator
+
+- `TestNativeNodeNegativeHTTPContracts` runs all 12 negative node.json routes
+  against a running, compiled native boundary and real service-mode Control.
+  It compares complete status, headers and body, then checks no settings writes,
+  engine mutations or removals occurred. This includes host/origin/token checks,
+  malformed/oversized input, missing endpoints and invalid actions. The oversized
+  request is 65,537 spaces; record.mjs hashes its JSON encoding. Initial Poll
+  precedes Start, matching the recorded initialized lane state.
+- `TestNativeUndoFailureOracle` runs all seven unchanged undo.json cases in
+  service mode: damaged-policy, damaged-metrics, policy-failure, save-failure,
+  partial-ordered, empty-record and legacy-ordered. Comparisons check status/error,
+  remaining ordered Undo data, policy, every platform call and failure diagnostic.
+  The original non-service tests remain too.
+- Native failed Apply maps to `TestServiceLiveUpdateFailureRetriesWithoutStopping`.
+  It injects preparation refusal through Poll and Supervise, checks the unchanged
+  snapshot and exact apply-only calls, then requires the original revision/hash
+  and durable desired policy on recovery. It runs in the aggregate.
+- Journal/settings failure distinction maps to `TestServiceJournalFailureDoesNotReachEngine`
+  and `TestServiceSettingsMirrorFailureKeepsCommittedSettings`. The former checks
+  no engine call or revision advance after journal refusal; the latter retains
+  the committed value in memory/journal and repairs its mirror on the next save.
+- Exact totals recovery maps to `TestTotalsConsumerSurvivesCrashesAroundTheAck`
+  and `TestTotalsAreNotAcknowledgedWhenTheCommitFails`. They use production flow
+  accounting, reconstruct Control across interrupted commits/acks, and check
+  independently supplied byte totals without double counting. Both execute here.
+- Reconnect retry and instance fencing are mapped in m4-native-reconnect-replay.md.
+  Native lease exits, failure identity and reattachment execute in the selected
+  lifecycle aggregate. These remain pure protocol evidence.
+
+Still open: settingsSetupUpdate (341 entries), lost/mismatched native Apply
+acknowledgements, and the remaining native invalid-start/pagination/concurrency
+replacement audit. Installed parity and removal gates are separate. The settings
+trace's protectMachineDir callback needs an explicit native protected-store
+replacement; no protection result is credited merely because a memory store was
+constructed. No partial settings trace was registered in this checkpoint.
+
 ## migration
 
 All 191 entries execute through the same native startup driver. Real Core.New
