@@ -176,27 +176,6 @@ func (p *Probe) attachPMU(program *ebpf.Program, symbol string) error {
 	return nil
 }
 
-func onlineCPUs(s string) ([]int, error) {
-	var result []int
-	last := -1
-	for _, part := range strings.Split(s, ",") {
-		a, b, rangeOK := strings.Cut(part, "-")
-		lo, err := strconv.Atoi(a)
-		hi := lo
-		if rangeOK && err == nil {
-			hi, err = strconv.Atoi(b)
-		}
-		if err != nil || lo <= last || hi < lo || hi >= 512 {
-			return nil, fmt.Errorf("unsupported online CPU list %q (proof bound 512)", s)
-		}
-		for cpu := lo; cpu <= hi; cpu++ {
-			result = append(result, cpu)
-		}
-		last = hi
-	}
-	return result, nil
-}
-
 func (p *Probe) Counts() (Counters, error) {
 	values := [7]uint64{}
 	for i := range values {
