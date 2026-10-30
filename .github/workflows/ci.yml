@@ -137,9 +137,14 @@ jobs:
         run: node .github/ci/golist-check.mjs
 
   control-security:
-    name: Control security / Windows x64
+    name: Control security / ${{ matrix.runner }}
     if: github.event_name == 'workflow_dispatch' && inputs.control_security && !inputs.wintun_integrity
-    runs-on: windows-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        runner: [windows-latest, windows-11-arm]
     timeout-minutes: 10
     env:
       GOTOOLCHAIN: local
@@ -158,6 +163,23 @@ jobs:
           cache: false
       - name: Native migration, uninstall and token regressions with race checks
         run: go test -race -v -count=1 ./internal/platform/windows ./internal/platform/worker
+      - name: Worker isolation as SYSTEM
+        if: always()
+        shell: pwsh
+        run: |
+          go test -c -o "$env:RUNNER_TEMP/worker.test.exe" ./internal/platform/worker
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Invoke-WebRequest https://download.sysinternals.com/files/PSTools.zip -OutFile "$env:RUNNER_TEMP/PSTools.zip"
+          Expand-Archive "$env:RUNNER_TEMP/PSTools.zip" "$env:RUNNER_TEMP/PSTools"
+          $launcher = Join-Path $env:RUNNER_TEMP 'PSTools/PsExec64.exe'
+          if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { $launcher = Join-Path $env:RUNNER_TEMP 'PSTools/PsExec64a.exe' }
+          $signature = Get-AuthenticodeSignature $launcher
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw 'Untrusted SYSTEM test launcher' }
+          $binary = (Join-Path $env:RUNNER_TEMP 'worker.test.exe').Replace("'", "''")
+          $command = "`$env:GITHUB_ACTIONS='true'; `$env:RUNNER_ENVIRONMENT='github-hosted'; `$env:NETSWITCH_EXPECT_SYSTEM='1'; & '$binary' '-test.v' '-test.timeout=90s' '-test.run=^(TestReadWorkerCannotWriteControlHKLMOrTCP|TestWorkerRestrictingSIDs)$'; exit `$LASTEXITCODE"
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+          & $launcher -accepteula -nobanner -s (Get-Command pwsh).Source -NoProfile -EncodedCommand $encoded
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}

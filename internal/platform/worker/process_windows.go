@@ -107,7 +107,8 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 		return nil, err
 	}
 	defer token.Close()
-	restricted, err := workerToken(token, adminWorker(args))
+	mode := workerMode(args)
+	restricted, err := workerTokenForMode(token, adminWorker(args), mode == "probe" || mode == "line-check")
 	if err != nil {
 		return nil, err
 	}
@@ -203,6 +204,10 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 }
 
 func workerToken(token windows.Token, administrative bool) (windows.Token, error) {
+	return workerTokenForMode(token, administrative, false)
+}
+
+func workerTokenForMode(token windows.Token, administrative, network bool) (windows.Token, error) {
 	var disabled []windows.SIDAndAttributes
 	if !administrative {
 		groups, err := token.GetTokenGroups()
@@ -217,14 +222,40 @@ func workerToken(token windows.Token, administrative bool) (windows.Token, error
 		if err != nil {
 			return 0, err
 		}
+		user, err := token.GetTokenUser()
+		if err != nil {
+			return 0, err
+		}
+		if user.User.Sid.String() == "S-1-5-18" {
+			disabled = append(disabled, windows.SIDAndAttributes{Sid: user.User.Sid})
+		}
 	}
 	var disabledSIDs *windows.SIDAndAttributes
 	if len(disabled) != 0 {
 		disabledSIDs = &disabled[0]
 	}
 	var restricted windows.Token
+	flags := uintptr(1) // DISABLE_MAX_PRIVILEGE
+	var restricting *windows.SIDAndAttributes
+	var restrictingCount uintptr
+	if !administrative {
+		// A second write access check must succeed independently of SYSTEM's
+		// user SID. Read workers receive no write grants; probes may use the
+		// ordinary Users grants for sockets, never the SYSTEM/admin grants.
+		text := "S-1-0-0"
+		if network {
+			text = "S-1-5-32-545"
+		}
+		sid, err := windows.StringToSid(text)
+		if err != nil {
+			return 0, err
+		}
+		restricting = &windows.SIDAndAttributes{Sid: sid}
+		restrictingCount = 1
+		flags |= 8 // WRITE_RESTRICTED (supported Windows versions)
+	}
 	proc := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
-	result, _, callErr := proc.Call(uintptr(token), 1, uintptr(len(disabled)), uintptr(unsafe.Pointer(disabledSIDs)), 0, 0, 0, 0, uintptr(unsafe.Pointer(&restricted)))
+	result, _, callErr := proc.Call(uintptr(token), flags, uintptr(len(disabled)), uintptr(unsafe.Pointer(disabledSIDs)), 0, 0, restrictingCount, uintptr(unsafe.Pointer(restricting)), uintptr(unsafe.Pointer(&restricted)))
 	if result == 0 {
 		return 0, fmt.Errorf("restrict worker token: %w", callErr)
 	}
@@ -334,14 +365,19 @@ func elevatedGroupText(text string) bool {
 }
 
 func adminWorker(args []string) bool {
-	mode := args[1]
-	if mode == "query" && len(args) > 2 {
-		mode = args[2]
-	}
+	mode := workerMode(args)
 	switch mode {
 	case "outside", "policy-set", "metrics-set", "metrics-restore", "protect-directory",
 		"stop-process", "close-tcp", "autostart-set", "autostart-upgrade":
 		return true
 	}
 	return false
+}
+
+func workerMode(args []string) string {
+	mode := args[1]
+	if mode == "query" && len(args) > 2 {
+		mode = args[2]
+	}
+	return mode
 }

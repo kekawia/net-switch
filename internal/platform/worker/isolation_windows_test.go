@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -20,9 +21,10 @@ import (
 )
 
 type isolationRequest struct {
-	Parent uint32
-	Key    string
-	TCP    [5]uint32
+	Parent  uint32
+	Key     string
+	TCP     [5]uint32
+	Address string
 }
 type isolationResult struct {
 	Groups                                   map[string]uint32
@@ -34,6 +36,8 @@ type isolationResult struct {
 	UI                                       uint32
 	ConsoleAttached                          bool
 	Error                                    string
+	OutboundDenied                           bool
+	OutboundCode                             string
 }
 
 func TestMain(m *testing.M) {
@@ -163,6 +167,12 @@ func isolationProbe(input isolationRequest) (isolationResult, error) {
 	// The parent also proves the live connection survived this attempted close.
 	result.TCPDenied = code == uintptr(windows.ERROR_ACCESS_DENIED) || code == 317
 	result.TCPCode = strconv.FormatUint(uint64(code), 10)
+	conn, dialErr := net.DialTimeout("tcp4", input.Address, 3*time.Second)
+	result.OutboundCode = fmt.Sprint(dialErr)
+	result.OutboundDenied = errors.Is(dialErr, windows.WSAEACCES) || errors.Is(dialErr, windows.ERROR_ACCESS_DENIED)
+	if dialErr == nil {
+		conn.Close()
+	}
 	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
 	if err := winapi.QueryJobInformation(0, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
 		return result, err
@@ -185,6 +195,14 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 	if !windows.GetCurrentProcessToken().IsElevated() {
 		t.Fatal("the parent must be elevated")
 	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("parent user SID: %s", user.User.Sid.String())
+	if os.Getenv("NETSWITCH_EXPECT_SYSTEM") == "1" && user.User.Sid.String() != "S-1-5-18" {
+		t.Fatal("SYSTEM fixture ran under the wrong identity")
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +223,15 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 	}
 	k.Close()
 	t.Cleanup(func() { _ = registry.DeleteKey(registry.LOCAL_MACHINE, key) })
-	for _, mode := range []string{"app-info", "installed-apps", "line-check", "probe", "meters", "network", "outside"} {
+	for _, policy := range []struct {
+		mode                    string
+		network, administrative bool
+	}{
+		{"app-info", false, false}, {"installed-apps", false, false},
+		{"line-check", true, false}, {"probe", true, false},
+		{"meters", false, false}, {"network", false, false}, {"outside", true, true},
+	} {
+		mode := policy.mode
 		t.Run(mode, func(t *testing.T) {
 			listener, err := net.Listen("tcp4", "127.0.0.1:0")
 			if err != nil {
@@ -225,6 +251,7 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 			local, remote := client.LocalAddr().(*net.TCPAddr), client.RemoteAddr().(*net.TCPAddr)
 			port := func(p int) uint32 { return uint32((p&255)<<8 | p>>8) }
 			input := isolationRequest{Parent: parent, Key: key, TCP: [5]uint32{12, binary.LittleEndian.Uint32(local.IP.To4()), port(local.Port), binary.LittleEndian.Uint32(remote.IP.To4()), port(remote.Port)}}
+			input.Address = listener.Addr().String()
 			args := []string{"worker", mode}
 			if strings.Contains(mode, "-") {
 				args = []string{"worker", "query", mode}
@@ -250,17 +277,28 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 				t.Fatal(string(b), err)
 			}
 			t.Logf("%s: %+v", mode, got)
+			if (policy.network && got.OutboundCode != "<nil>") || (!policy.network && !got.OutboundDenied) {
+				t.Fatalf("outbound TCP policy (allowed=%t): %+v", policy.network, got)
+			}
 			if got.Error != "" || got.Memory != 256*1024*1024 || got.UI != 255 || got.ConsoleAttached {
 				t.Fatalf("worker limits: %+v", got)
 			}
-			if mode == "outside" {
-				if got.AdminDenyOnly || got.Integrity != "S-1-16-12288" || got.ProcessCode != "<nil>" || got.RegistryCode != "<nil>" || got.TCPCode != "0" {
+			if policy.administrative {
+				user, err := windows.GetCurrentProcessToken().GetTokenUser()
+				if err != nil {
+					t.Fatal(err)
+				}
+				integrity := "S-1-16-12288"
+				if user.User.Sid.String() == "S-1-5-18" {
+					integrity = "S-1-16-16384"
+				}
+				if got.AdminDenyOnly || got.Integrity != integrity || got.ProcessCode != "<nil>" || got.RegistryCode != "<nil>" || got.TCPCode != "0" {
 					t.Fatalf("admin worker lost required writes: %+v", got)
 				}
 				if err := accepted.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 					t.Fatal(err)
 				}
-				_, err := accepted.Read(make([]byte, 1))
+				_, err = accepted.Read(make([]byte, 1))
 				if err == nil {
 					t.Fatal("admin close did not close the TCP connection")
 				}
