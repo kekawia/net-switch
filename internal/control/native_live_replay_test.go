@@ -97,99 +97,13 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 		t.Fatal(err)
 	}
 	checkLiveOrderHeldFlows(t, actualBefore.Config, actualAfter.Config)
-	// Project the retired stop/start protocol in its original order, using
-	// independent operation literals. Completion IDs are checked separately.
-	plan := []traceEntry{}
-	add := func(kind string, value any) {
-		plan = append(plan, traceEntry{Kind: kind, Value: mustStartupJSON(t, value)})
-	}
-	async := func(op string, args []any, value any, undefined bool) {
-		add("async-result", map[string]any{"operation": op, "args": args, "ok": true, "value": value, "undefined": undefined})
-	}
-	log := func(text string) {
-		add("log", map[string]any{"text": text})
-		async("log.append", []any{text}, nil, true)
-	}
-	file := func(op, name string, ok bool) {
-		v := map[string]any{"operation": op, "file": "/oracle/data/" + name, "ok": ok}
-		if !ok {
-			v["code"] = "ENOENT"
-		}
-		add("file-completion", v)
-	}
-	remove := func(name string) { add("remove", map[string]any{"file": "/oracle/data/" + name}) }
-	log(note)
-	add("log", map[string]any{"text": "routing stopping"})
-	add("process-exit", map[string]any{"pid": 456, "code": 0})
-	remove("engine.pid")
-	async("log.append", []any{"routing stopping"}, nil, true)
-	file("rm", "engine.pid", true)
-	remove("engine.pid")
-	file("rm", "engine.pid", true)
-	log("routing off")
-	log("routing starting")
-	file("readFile", "engine.pid", false)
-	add("socket-completion", map[string]any{"operation": "listen", "port": 49000})
-	add("socket-completion", map[string]any{"operation": "close", "port": 49000})
-	names := []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "apps-b2.json", "share-b2.json", "cut-b2.json", "engine-config.json", "settings.json.bak"}
-	if trace.Name == "lineAdd" {
-		names = []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "engine-config.json", "settings.json.bak", "apps-000001.json", "share-000001.json", "cut-000001.json"}
-	}
-	if trace.Name == "lineOrder" {
-		names = append(names, "share-a1.json", "cut-a1.json")
-	}
-	add("directory-list", map[string]any{"directory": "/oracle/data", "names": names})
-	file("readdir", "", true)
-	// The directory is /oracle/data, without a trailing separator.
-	plan[len(plan)-1].Value = mustStartupJSON(t, map[string]any{"operation": "readdir", "file": "/oracle/data", "ok": true})
-	removed := []string{"share-b2.json", "cut-b2.json"}
-	if trace.Name == "lineAdd" {
-		removed = nil
-	}
-	if trace.Name == "lineRemove" {
-		removed = append([]string{"apps-b2.json"}, removed...)
-	}
-	for _, name := range removed {
-		remove(name)
-		file("rm", name, true)
-	}
-	// Config and PID publications below have their own semantic checks.
-	file("writeFile", "engine-config.json", true)
-	async("log.rotate", []any{}, nil, true)
-	add("spawn", map[string]any{"exe": "/oracle/engine/sing-box.exe", "args": []string{"run", "-c", "/oracle/data/engine-config.json", "--disable-color"}})
-	file("writeFile", "engine.pid", true)
-	add("engine", map[string]any{"route": "/version", "method": "GET"})
-	add("engine-reply", map[string]any{"route": "/version", "status": 200, "body": map[string]any{}})
-	log("routing on")
-	probeLines := []struct{ id, label string }{{"b2", "Wi-Fi"}, {"a1", "Ethernet"}}
-	if trace.Name == "lineAdd" {
-		probeLines = []struct{ id, label string }{{"a1", "Ethernet"}, {"000001", "Wi-Fi"}}
-	}
-	if trace.Name == "lineRemove" {
-		probeLines = nil
-	}
-	for i, line := range probeLines {
-		lane, probe := "/proxies/lane-"+line.id, "/proxies/line-"+line.id+"/delay"
-		add("engine", map[string]any{"route": lane, "method": "PUT", "body": map[string]any{"name": "line-" + line.id}})
-		add("engine-reply", map[string]any{"route": lane, "status": 200, "body": map[string]any{}})
-		async("platform.readDefaultRoutes", []any{}, []map[string]string{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}, false)
-		add("engine", map[string]any{"route": probe, "method": "GET"})
-		add("probe-result", map[string]any{"route": probe, "status": 200, "body": map[string]any{"delay": 18}})
-		if i == 1 {
-			add("probe-vote", map[string]any{"line": probeLines[0].id, "result": true, "at": clock.Now().UnixMilli()})
-		}
-		if trace.Name != "lineAdd" || i != 1 {
-			log(line.label + "'s apps now use " + line.label)
-		}
-		async("engine."+probe+".json", []any{}, map[string]any{"delay": 18}, false)
-	}
-	if len(probeLines) > 0 {
-		add("probe-vote", map[string]any{"line": probeLines[1].id, "result": true, "at": clock.Now().UnixMilli()})
-	} else {
-		async("platform.readDefaultRoutes", []any{}, []map[string]string{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}, false)
-	}
+	plan := nativeLiveRestartPlan(t, clock, trace.Name, note)
+	return checkNativeLiveEntries(t, trace, clock, fc, begin, configSeq, pidSeq, want, checked, plan)
+}
+
+func checkNativeLiveEntries(t *testing.T, trace replayledger.Trace, clock *fakeClock, fc *startupFileCursor, begin, configSeq, pidSeq int, want policy.Config, checked map[int]string, plan []traceEntry) map[int]string {
 	next, completion := 0, 0
-	for _, x := range trace.Entries[:begin] {
+	for _, x := range trace.Entries[:begin+1] {
 		if x.Kind == "completion" {
 			var v struct{ ID int }
 			_ = json.Unmarshal(x.Value, &v)
@@ -270,6 +184,104 @@ func replayNativeLiveOrder(t *testing.T, c *Core, e *nativeStartupEngine, clock 
 		t.Fatal("unconsumed live replacement observations", next, len(plan))
 	}
 	return checked
+}
+
+func nativeLiveRestartPlan(t *testing.T, clock *fakeClock, name, note string) []traceEntry {
+	// Project the retired stop/start protocol in its original order, using
+	// independent operation literals. Completion IDs are checked separately.
+	plan := []traceEntry{}
+	add := func(kind string, value any) {
+		plan = append(plan, traceEntry{Kind: kind, Value: mustStartupJSON(t, value)})
+	}
+	async := func(op string, args []any, value any, undefined bool) {
+		add("async-result", map[string]any{"operation": op, "args": args, "ok": true, "value": value, "undefined": undefined})
+	}
+	log := func(text string) {
+		add("log", map[string]any{"text": text})
+		async("log.append", []any{text}, nil, true)
+	}
+	file := func(op, name string, ok bool) {
+		v := map[string]any{"operation": op, "file": "/oracle/data/" + name, "ok": ok}
+		if !ok {
+			v["code"] = "ENOENT"
+		}
+		add("file-completion", v)
+	}
+	remove := func(name string) { add("remove", map[string]any{"file": "/oracle/data/" + name}) }
+	log(note)
+	add("log", map[string]any{"text": "routing stopping"})
+	add("process-exit", map[string]any{"pid": 456, "code": 0})
+	remove("engine.pid")
+	async("log.append", []any{"routing stopping"}, nil, true)
+	file("rm", "engine.pid", true)
+	remove("engine.pid")
+	file("rm", "engine.pid", true)
+	log("routing off")
+	log("routing starting")
+	file("readFile", "engine.pid", false)
+	add("socket-completion", map[string]any{"operation": "listen", "port": 49000})
+	add("socket-completion", map[string]any{"operation": "close", "port": 49000})
+	names := []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "apps-b2.json", "share-b2.json", "cut-b2.json", "engine-config.json", "settings.json.bak"}
+	if name == "lineAdd" {
+		names = []string{"settings.json", "server.json", "usage.json", "apps-a1.json", "engine-config.json", "settings.json.bak", "apps-000001.json", "share-000001.json", "cut-000001.json"}
+	}
+	if name == "lineOrder" {
+		names = append(names, "share-a1.json", "cut-a1.json")
+	}
+	add("directory-list", map[string]any{"directory": "/oracle/data", "names": names})
+	file("readdir", "", true)
+	// The directory is /oracle/data, without a trailing separator.
+	plan[len(plan)-1].Value = mustStartupJSON(t, map[string]any{"operation": "readdir", "file": "/oracle/data", "ok": true})
+	removed := []string{"share-b2.json", "cut-b2.json"}
+	if name == "lineAdd" || name == "adapterRename" {
+		removed = nil
+	}
+	if name == "lineRemove" {
+		removed = append([]string{"apps-b2.json"}, removed...)
+	}
+	for _, name := range removed {
+		remove(name)
+		file("rm", name, true)
+	}
+	// Config and PID publications below have their own semantic checks.
+	file("writeFile", "engine-config.json", true)
+	async("log.rotate", []any{}, nil, true)
+	add("spawn", map[string]any{"exe": "/oracle/engine/sing-box.exe", "args": []string{"run", "-c", "/oracle/data/engine-config.json", "--disable-color"}})
+	file("writeFile", "engine.pid", true)
+	add("engine", map[string]any{"route": "/version", "method": "GET"})
+	add("engine-reply", map[string]any{"route": "/version", "status": 200, "body": map[string]any{}})
+	log("routing on")
+	probeLines := []struct{ id, label string }{{"b2", "Wi-Fi"}, {"a1", "Ethernet"}}
+	if name == "adapterRename" {
+		probeLines = []struct{ id, label string }{{"a1", "Ethernet"}, {"b2", "Wi-Fi"}}
+	}
+	if name == "lineAdd" {
+		probeLines = []struct{ id, label string }{{"a1", "Ethernet"}, {"000001", "Wi-Fi"}}
+	}
+	if name == "lineRemove" {
+		probeLines = nil
+	}
+	for i, line := range probeLines {
+		lane, probe := "/proxies/lane-"+line.id, "/proxies/line-"+line.id+"/delay"
+		add("engine", map[string]any{"route": lane, "method": "PUT", "body": map[string]any{"name": "line-" + line.id}})
+		add("engine-reply", map[string]any{"route": lane, "status": 200, "body": map[string]any{}})
+		async("platform.readDefaultRoutes", []any{}, []map[string]string{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}, false)
+		add("engine", map[string]any{"route": probe, "method": "GET"})
+		add("probe-result", map[string]any{"route": probe, "status": 200, "body": map[string]any{"delay": 18}})
+		if i == 1 {
+			add("probe-vote", map[string]any{"line": probeLines[0].id, "result": true, "at": clock.Now().UnixMilli()})
+		}
+		if name != "lineAdd" || i != 1 {
+			log(line.label + "'s apps now use " + line.label)
+		}
+		async("engine."+probe+".json", []any{}, map[string]any{"delay": 18}, false)
+	}
+	if len(probeLines) > 0 {
+		add("probe-vote", map[string]any{"line": probeLines[1].id, "result": true, "at": clock.Now().UnixMilli()})
+	} else {
+		async("platform.readDefaultRoutes", []any{}, []map[string]string{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}, false)
+	}
+	return plan
 }
 
 func checkLiveOrderHeldFlows(t *testing.T, before, after policy.Config) {

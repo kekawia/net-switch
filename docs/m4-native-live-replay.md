@@ -1,9 +1,9 @@
 # Live line and IPv6 replay
 
-2026-10-30. Work in progress. lineOrder (274), lineRemove (234) and lineAdd
-(201) add 709 checked entries to the previous 3,985. The aggregate passes at
-**4,694 / 7,894**, with producer/lifecycle/report exits 0/0/0.
-adapterRename (281) and ipv6 (1,153) remain unregistered.
+2026-10-30. Work in progress. lineOrder (274), lineRemove (234), lineAdd (201)
+and adapterRename (281) add 990 checked entries to the previous 3,985.
+The aggregate passes at **4,975 / 7,894**, with producer/lifecycle/report exits
+0/0/0. ipv6 (1,153) remains unregistered.
 
 The shared startup driver, native compiler boundary, HTTP transaction executor,
 ordered counterpart and exactly-once file cursor are reused. Startup rule files
@@ -57,7 +57,7 @@ with completed 18 ms quick probes. Timing is the original unchanged instant;
 response snapshots follow the acknowledged live revision. Diagnostics include
 startup and line order; retired restart diagnostics are explicit replacements.
 
-Nearby gaps: rename, IPv6 transitions, failed durable writes or Apply,
+Nearby gaps: IPv6 transitions, failed durable writes or Apply,
 concurrent requests, active probe races, installed services and actual traffic.
 No new hook runs on probe goroutines in this checkpoint. Existing synchronized
 startup callbacks are reused. Hosted race checks and independent review remain.
@@ -100,3 +100,21 @@ write maps under a mutex; reads occur only after the joined synchronous
 ProbeBackground returns. Each lane publishes exactly one passed round.
 The complete ordered native effects include both lane logs, the added-line
 diagnostic and both probe groups. The same full aggregate passes after the fix.
+
+## Adapter rename
+
+The original adapters/interfaces inputs go through RefreshAdapters. The GUID
+adapter-0 retains logical a1 and changes only its alias to LAN. Both settings
+copies and journals are checked before the live revision. The one-second Poll
+applies the new binding before Supervise, so the latter needs no second update
+or restart diagnostic. Both native logs are checked, including the rename.
+The renamed lane's physical probe retains its operator rotation (8.8.8.8:443),
+18 ms result and current instance. Counter readings stay unknown.
+
+The shared retired restart plan covers 181–275, and the ordered rule cursor
+requires the entire new compilation. The full GET/state response matches;
+the original repeated same-time ticks create no second poll. The before/after
+Control policies preserve the held a1 record in the pure flow table and admit
+new traffic on a1 through the LAN binding. The trace uses exact GUID spelling;
+the existing TestServiceLiveRenameReconcilesIdentityBeforeApply in the same
+passing sweep separately covers brace/case normalization ({ABC} versus abc).
