@@ -130,6 +130,16 @@ func newInstalledFixture(t *testing.T, data string) *installedFixture {
 		if f.client != nil {
 			f.client.input.Close()
 		}
+		for _, name := range []string{service.Control, service.Engine} {
+			stop, done := context.WithTimeout(context.Background(), 20*time.Second)
+			err := service.Stop(stop, name)
+			done()
+			if err != nil {
+				force, finish := context.WithTimeout(context.Background(), 15*time.Second)
+				_ = service.ForceStop(force, name)
+				finish()
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if err := service.Uninstall(ctx); err != nil {

@@ -23,7 +23,7 @@ if ($Action -eq 'inspect') {
   $route = Find-NetRoute -RemoteIPAddress '1.1.1.1' | Where-Object { $_.PSObject.Properties.Name -contains 'NextHop' } | Select-Object -First 1
   $adapter = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex
   $ip = Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4 | Where-Object AddressState -eq 'Preferred' | Select-Object -First 1
-  if (-not $ip -or $adapter.Name -in @('TestISP', 'NetSwitch')) { throw 'No real uplink found.' }
+  if (-not $ip -or $adapter.Name -in @('TestISP', 'TestISPMain', 'NetSwitch')) { throw 'No real uplink found.' }
   [pscustomobject]@{ index = $adapter.ifIndex; alias = $adapter.Name; address = $ip.IPAddress; gateway = $route.NextHop } | ConvertTo-Json -Compress
   exit
 }
@@ -35,8 +35,8 @@ if ($Action -eq 'block-direct') {
 } elseif ($Action -eq 'unblock-direct') {
   Get-NetFirewallRule -Name 'TestISP-direct-probe' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
 } elseif ($Action -eq 'clean') {
-  $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object Name -eq 'TestISP')
-  $routes = @(Get-NetRoute | Where-Object InterfaceAlias -eq 'TestISP')
+  $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object Name -in @('TestISP', 'TestISPMain'))
+  $routes = @(Get-NetRoute | Where-Object InterfaceAlias -in @('TestISP', 'TestISPMain'))
   $rules = @(Get-NetFirewallRule -Name 'TestISP-direct-probe' -ErrorAction SilentlyContinue)
   $devices = @(Get-PnpDevice -Class Net | Where-Object FriendlyName -like 'TestISP*')
   if ($adapters.Count -or $routes.Count -or $rules.Count -or $devices.Count) { throw "TestISP leftovers: $($adapters.Count) adapters, $($routes.Count) routes, $($rules.Count) firewall rules, $($devices.Count) PnP devices: $($devices | ConvertTo-Json -Compress)" }

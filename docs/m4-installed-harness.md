@@ -56,8 +56,8 @@ byte-for-byte unchanged.
 
 Implementation now replaces the Go Control job's compatibility launches with
 the installed suite. The original planning commit precedes implementation.
-Hosted execution and independent review are still pending: none of the new
-installed assertions is credited as passing from local compilation.
+Hosted x64 and ARM64 qualification and independent logic review are complete;
+none of the new installed assertions is credited as passing from local compilation.
 
 | Executing owner | Assertions |
 | --- | --- |
@@ -128,9 +128,11 @@ contains `NSNativeControlOwner`, so the fixture now reuses that existing identit
 and its unchanged validation/cleanup. No permission check was relaxed. Evidence:
 [ARM64 pilot job](https://github.com/kekawia/net-switch/actions/runs/41009207760/job/123911023776).
 
-Remaining for (a): hosted x64/ARM64 qualification at the final head, any fixes
-those runs reveal, and independent logic review. No privileged execution ran
-locally. Frozen sources
+Hosted qualification passed across x64 and ARM64 after merging the worker token
+restriction prerequisite (`#119`), and review hardened `TestISPMain` inspection
+and cleanup in `tests/windows/testisp/network.ps1` plus explicit `NetSwitchEngine`
+teardown in `installedFixture.cleanup` ([Go control service run 41080552776](https://github.com/kekawia/net-switch/actions/runs/41080552776)).
+No privileged execution ran locally. Frozen sources
 and fixtures remain unchanged. Adapter runtime/protocol/child/ownership/trust and
 control_compat deletion remain entirely outside this PR; Wintun adapter-loss
 handling must survive the later deletion. The dedicated old-schema refusal
