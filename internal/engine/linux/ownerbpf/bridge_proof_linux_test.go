@@ -290,9 +290,7 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 		cookies[i] = c
 	}
 	var wg sync.WaitGroup
-	var ready sync.WaitGroup
-	ready.Add(senders)
-	start := make(chan struct{})
+	var startSpin, midSpin atomic.Int32
 	var started, ended [senders]time.Time
 	errCh := make(chan error, senders)
 	for i := range senders {
@@ -306,27 +304,43 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 			var set unix.CPUSet
 			set.Set(i)
 			if e := unix.SchedSetaffinity(0, &set); e != nil {
-				ready.Done()
+				startSpin.Add(-10)
+				midSpin.Add(-10)
 				errCh <- e
 				return
 			}
-			ready.Done()
-			<-start
+			// Two-phase atomic spin barrier: both pinned sender threads must be
+			// actively running on CPUs 0 and 1 before either records started[i],
+			// and both must rendezvous mid-burst (after 300 sends, once the
+			// 500-packet TUN ring is already dropping) before either finishes.
+			startSpin.Add(1)
+			for startSpin.Load() < senders {
+				if startSpin.Load() < 0 {
+					return
+				}
+			}
 			started[i] = time.Now()
 			defer func() { ended[i] = time.Now() }()
 			for j := range 600 {
+				if j == 300 {
+					midSpin.Add(1)
+					for midSpin.Load() < senders {
+						if midSpin.Load() < 0 {
+							return
+						}
+					}
+				}
 				var p [8]byte
 				binary.BigEndian.PutUint32(p[:4], uint32(i))
 				binary.BigEndian.PutUint32(p[4:], uint32(j))
 				if e := unix.Sendto(sockets[i], p[:], 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); e != nil {
+					midSpin.Add(-10)
 					errCh <- e
 					return
 				}
 			}
 		}()
 	}
-	ready.Wait()
-	close(start)
 	wg.Wait()
 	close(errCh)
 	for e := range errCh {
@@ -346,6 +360,11 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 	}
 	if captured != 1200 || dropped == 0 {
 		t.Fatalf("drop precondition captured=%d dropped=%d", captured, dropped)
+	}
+	for i := range senders {
+		if i >= len(states) || states[i].Captures != 600 || states[i].Frees == 0 {
+			t.Fatalf("kernel per-CPU concurrency/drop evidence missing on cpu %d: %+v", i, states)
+		}
 	}
 	afterLink, err := netlink.LinkByName("nsbridge0")
 	if err != nil || afterLink.Attrs().Statistics == nil {
