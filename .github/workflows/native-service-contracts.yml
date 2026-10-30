@@ -56,6 +56,8 @@ jobs:
         run: |
           node .github/ci/registrar-breakaway.mjs
           go test -v -count=1 -run '^TestNativePolicyDecisionEvidence$' ./internal/control
+          go test -v -count=1 -run '^TestTotals' ./internal/control
+          go test -v -count=1 -tags lifecycle_test ./internal/faultpoint
           go test -v -count=1 ./internal/engine/policy
           go test -v -count=1 ./internal/engine ./internal/engine/host ./internal/engine/protocol ./internal/engine/flows ./internal/engine/probe ./internal/engine/testproxy ./internal/service
           go test -v -count=1 -tags lifecycle_test ./internal/engine/testproxy

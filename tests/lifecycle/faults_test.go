@@ -21,11 +21,21 @@ import (
 
 func arm(t *testing.T, data, point string) {
 	t.Helper()
+	armMode(t, data, point, "hosted test only\n")
+}
+
+func armMode(t *testing.T, data, point, mode string) {
+	t.Helper()
 	err := os.Remove(filepath.Join(data, "fault-hit.json"))
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(data, "fault-"+point), []byte("hosted test only\n"), 0600); err != nil {
+	path := filepath.Join(data, "fault-"+point)
+	if err := os.WriteFile(path+".arming", []byte(mode), 0600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path + ".arming")
+	if err := os.Rename(path+".arming", path); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {

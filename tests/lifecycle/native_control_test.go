@@ -330,9 +330,24 @@ func TestNativeControlCutover(t *testing.T) {
 		// want* are the exact bytes this process has sent and received so far;
 		// every exchange adds what it actually put on the wire.
 		wantUp, wantDown := start.Up, start.Down
+		// Freeze the next read before it takes its snapshot. An already-running
+		// read can otherwise consume the crash barrier with old/partial bytes
+		// (or a real compaction-only commit), even after clean ticks are fixed.
+		exchangeBeforeRead := func(point string) (uint64, uint64) {
+			const before = "control-before-totals-read"
+			armMode(t, data, before, "pause")
+			barrier(t, data, before)
+			release := filepath.Join(data, "fault-"+before+".consumed")
+			defer os.Remove(release)
+			up, down := echoExact(t, ctx, fixture, n)
+			arm(t, data, point)
+			if err := os.Remove(release); err != nil {
+				t.Fatal(err)
+			}
+			return up, down
+		}
 		// Crash between the durable usage commit and the acknowledgement.
-		arm(t, data, "control-after-usage-commit")
-		up, down := echoExact(t, ctx, fixture, n)
+		up, down := exchangeBeforeRead("control-after-usage-commit")
 		wantUp, wantDown = wantUp+up, wantDown+down
 		pid := barrier(t, data, "control-after-usage-commit")
 		if e := own(); e.Up != wantUp || e.Down != wantDown {
@@ -352,8 +367,7 @@ func TestNativeControlCutover(t *testing.T) {
 			t.Fatalf("bytes double counted after the commit/ack crash: %+v want up=%d down=%d", e, wantUp, wantDown)
 		}
 		// Crash right after the acknowledgement, before the next read.
-		arm(t, data, "control-after-totals-ack")
-		up, down = echoExact(t, ctx, fixture, n)
+		up, down = exchangeBeforeRead("control-after-totals-ack")
 		wantUp, wantDown = wantUp+up, wantDown+down
 		pid = barrier(t, data, "control-after-totals-ack")
 		kill(t, pid)
