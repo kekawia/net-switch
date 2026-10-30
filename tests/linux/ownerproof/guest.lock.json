@@ -12,7 +12,7 @@
     "configs": {
       "amd64": {
         "path": "tests/linux/ownerproof/kernel-5.8-amd64.config",
-        "sha256": "5925c117146461ded60f4e103219f44d9d9f2625a035b862ee0660d87961b94a",
+        "sha256": "93635e9f0ff988fe01556b50615755866aa1ed4bbee525b9f2046373da7e8547",
         "baseDefconfig": "x86_64_defconfig",
         "imageTarget": "bzImage",
         "imageRelativePath": "arch/x86/boot/bzImage",
@@ -24,7 +24,7 @@
       },
       "arm64": {
         "path": "tests/linux/ownerproof/kernel-5.8-arm64.config",
-        "sha256": "9605458f2ea79d342678cc27674de7da7d5d4253d6107f44b9c1b35fc24302be",
+        "sha256": "f5f0efecbb8ab1786b03ef71adf6d9dd143236189f6976a3529fd7e92bfc8614",
         "baseDefconfig": "defconfig",
         "imageTarget": "Image",
         "imageRelativePath": "arch/arm64/boot/Image",

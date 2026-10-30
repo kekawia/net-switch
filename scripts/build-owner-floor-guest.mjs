@@ -231,6 +231,9 @@ async function buildArchKernel(lock, arch, outDir) {
     `make ${cfgProfile.baseDefconfig}`,
     './scripts/kconfig/merge_config.sh -m .config /work/kernel.config',
     'make olddefconfig',
+    'grep -qx "CONFIG_KPROBES=y" .config',
+    'grep -qx "CONFIG_KPROBE_EVENTS=y" .config',
+    'grep -qx "CONFIG_DEBUG_INFO_BTF=y" .config',
     'cp .config /work/out/resolved-kernel.config',
     // Ensure pahole emits only BTF kinds supported by Linux 5.8 using DWARF-4 debug info.
     `make -j"$(nproc)" KCFLAGS="-gdwarf-4 -Wno-error -fcommon" HOSTCFLAGS="-Wno-error -fcommon" ${cfgProfile.imageTarget}`,
