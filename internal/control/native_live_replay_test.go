@@ -228,12 +228,14 @@ func nativeLiveRestartPlan(t *testing.T, clock *fakeClock, name, note string) []
 	if name == "lineOrder" {
 		names = append(names, "share-a1.json", "cut-a1.json")
 	}
-	add("directory-list", map[string]any{"directory": "/oracle/data", "names": names})
-	file("readdir", "", true)
-	// The directory is /oracle/data, without a trailing separator.
-	plan[len(plan)-1].Value = mustStartupJSON(t, map[string]any{"operation": "readdir", "file": "/oracle/data", "ok": true})
+	if name == "ipv6" {
+		add("file-completion", map[string]any{"operation": "readdir", "file": "/oracle/data", "ok": false, "code": "ERR_INVALID_ARG_TYPE"})
+	} else {
+		add("directory-list", map[string]any{"directory": "/oracle/data", "names": names})
+		add("file-completion", map[string]any{"operation": "readdir", "file": "/oracle/data", "ok": true})
+	}
 	removed := []string{"share-b2.json", "cut-b2.json"}
-	if name == "lineAdd" || name == "adapterRename" {
+	if name == "lineAdd" || name == "adapterRename" || name == "ipv6" {
 		removed = nil
 	}
 	if name == "lineRemove" {
@@ -252,7 +254,7 @@ func nativeLiveRestartPlan(t *testing.T, clock *fakeClock, name, note string) []
 	add("engine-reply", map[string]any{"route": "/version", "status": 200, "body": map[string]any{}})
 	log("routing on")
 	probeLines := []struct{ id, label string }{{"b2", "Wi-Fi"}, {"a1", "Ethernet"}}
-	if name == "adapterRename" {
+	if name == "adapterRename" || name == "ipv6" {
 		probeLines = []struct{ id, label string }{{"a1", "Ethernet"}, {"b2", "Wi-Fi"}}
 	}
 	if name == "lineAdd" {
@@ -268,7 +270,7 @@ func nativeLiveRestartPlan(t *testing.T, clock *fakeClock, name, note string) []
 		async("platform.readDefaultRoutes", []any{}, []map[string]string{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}, false)
 		add("engine", map[string]any{"route": probe, "method": "GET"})
 		add("probe-result", map[string]any{"route": probe, "status": 200, "body": map[string]any{"delay": 18}})
-		if i == 1 {
+		if i == 1 && name != "ipv6" {
 			add("probe-vote", map[string]any{"line": probeLines[0].id, "result": true, "at": clock.Now().UnixMilli()})
 		}
 		if name != "lineAdd" || i != 1 {
@@ -276,9 +278,9 @@ func nativeLiveRestartPlan(t *testing.T, clock *fakeClock, name, note string) []
 		}
 		async("engine."+probe+".json", []any{}, map[string]any{"delay": 18}, false)
 	}
-	if len(probeLines) > 0 {
+	if len(probeLines) > 0 && name != "ipv6" {
 		add("probe-vote", map[string]any{"line": probeLines[1].id, "result": true, "at": clock.Now().UnixMilli()})
-	} else {
+	} else if len(probeLines) == 0 {
 		async("platform.readDefaultRoutes", []any{}, []map[string]string{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}, false)
 	}
 	return plan

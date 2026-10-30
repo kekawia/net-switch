@@ -49,7 +49,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	}
 	firstLine, secondLine := "a1", "b2"
 	liveSlice := name == "lineOrder" || name == "lineRemove" || name == "lineAdd" || name == "adapterRename"
-	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute"
+	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute" || name == "ipv6"
 	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException" || name == "combiningNoOpenLine"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
@@ -452,7 +452,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
 	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice)
 	var pinEvidence map[int]string
-	if liveSlice {
+	if liveSlice || name == "ipv6" {
 		start, end, names := 66, 86, twoLineRevisionFiles()
 		if name == "lineAdd" {
 			start, end, names = 62, 67, []string{"apps-a1.json"}
@@ -498,7 +498,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			logIndex = len(files.logs)
 			break
 		}
-		if healthSlice && entry.Kind == "clock-tick" {
+		if healthSlice && (entry.Kind == "clock-tick" || name == "ipv6" && entry.Kind == "interfaces") {
 			check("startup counterpart exhaustion", counterparts.Finish())
 			if logIndex != len(files.logs) || len(pendingLogs) != 0 || len(files.events) != 0 {
 				t.Fatal("startup observation leftovers")

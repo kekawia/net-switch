@@ -1,9 +1,10 @@
 # Live line and IPv6 replay
 
-2026-10-30. Work in progress. lineOrder (274), lineRemove (234), lineAdd (201)
-and adapterRename (281) add 990 checked entries to the previous 3,985.
-The aggregate passes at **4,975 / 7,894**, with producer/lifecycle/report exits
-0/0/0. ipv6 (1,153) remains unregistered.
+2026-10-30. All five traces are registered: lineOrder (274), lineRemove (234),
+lineAdd (201), adapterRename (281) and ipv6 (1,153). They add **2,143** checked
+entries to the previous 3,985. The aggregate passes at **6,128 / 7,894**, with
+producer/lifecycle/report exits 0/0/0. The remaining 1,766 entries belong to
+other slices. Hosted race checks and independent logic review remain.
 
 The shared startup driver, native compiler boundary, HTTP transaction executor,
 ordered counterpart and exactly-once file cursor are reused. Startup rule files
@@ -57,10 +58,11 @@ with completed 18 ms quick probes. Timing is the original unchanged instant;
 response snapshots follow the acknowledged live revision. Diagnostics include
 startup and line order; retired restart diagnostics are explicit replacements.
 
-Nearby gaps: IPv6 transitions, failed durable writes or Apply,
+Nearby gaps: failed durable writes or Apply,
 concurrent requests, active probe races, installed services and actual traffic.
-No new hook runs on probe goroutines in this checkpoint. Existing synchronized
-startup callbacks are reused. Hosted race checks and independent review remain.
+New probe-observation maps/slices are mutex-protected; the health driver's
+generated-ID map retains its existing lock. Reads occur after joined rounds.
+Hosted race checks and independent review remain.
 
 ## Mutation evidence
 
@@ -118,3 +120,54 @@ Control policies preserve the held a1 record in the pure flow table and admit
 new traffic on a1 through the LAN binding. The trace uses exact GUID spelling;
 the existing TestServiceLiveRenameReconcilesIdentityBeforeApply in the same
 passing sweep separately covers brace/case normalization ({ABC} versus abc).
+
+## IPv6 settling and selective closure
+
+The unchanged interfaces inputs drive real network snapshots, Poll and
+Supervise for 62 one-second intervals. The frozen factory declares
+`const IPV6_SETTLE_MS = 30_000;`; native effectiveIPv6Locked uses
+`if now-*c.ipv6Since < 30000`. SYSTEM-DESIGN §5.7 requires the existing
+"30-second stable-change interval" through every writer. First observation
+at 1 s enables IPv6 at exactly 31 s; first observed loss at 32 s disables it
+at exactly 62 s. Each preceding tick retains the loaded policy and the
+original pending timestamp. Complete policies, IPv4/IPv6 admission decisions,
+unchanged instance and both API responses are checked. There are exactly
+three acknowledged revisions including startup and 62 connection reads.
+The existing Poll/Supervise-order tests also check 29,999 and 30,000 ms.
+
+The native probe cadence remains 15 seconds (10 requests including startup),
+and route reads remain on five-second boundaries. Old restarts at 31/62 s
+reset those schedules. The named retained-cadence replacement maps the old
+46/61-second checks to the independently checked native 45/60-second rounds;
+likewise each old post-restart route read consumes its prior native read once.
+The shared counterpart cursor requires an already-consumed native source
+position. Pending results cannot be overwritten or left over. Restart-only
+extra probes are explicit preservation replacements, not invented new votes.
+
+The two retired restart intervals (545–633 and 1061–1149) use the same
+ordered operation plan and complete rule-file cursor as the line cases.
+Their failed directory-list callbacks stay failed (ERR_INVALID_ARG_TYPE).
+The minute usage publication at 60 s consumes its own real write/rename;
+the policy observation and duplicate timer callbacks retain their order.
+No flow input is supplied by this trace: all 62 snapshots are empty.
+
+`checkNativeIPv6Closure` is a stronger companion selector witness. It compiles
+the actual enabled/disabled Control policies, establishes four synthetic held
+records (both address families on both physical lines), then applies the final
+policy and invokes the production IPv6 selector at its apply point. Exactly
+two IPv6 records close; both original IPv4 records retain ID, line and revision.
+Only companion admission pins are synthetic. Engine.Apply's automatic wiring
+of that selector is covered separately by the existing
+TestLiveApplyPreservesFlowsAndDisablesOnlyIPv6; this local replay does not run
+an engine or claim installed IPv6 address-loss evidence.
+
+Additional reverted mutations: changing native settlement from 30,000 to zero
+failed the literal policy check on the first interval; replacing the IPv6
+selector with line a1 still closed two records, but failed the exact IPv4
+survivor check. Both selected replay runs exited 1. The four aggregate gate
+mutations above cover the new shared live-replay registration path.
+
+Remaining scope outside these traces: physical IPv6 address validity and
+deprecation, real sockets and route reconciliation, custom/failed probes during
+the live change, lost acknowledgements, concurrent HTTP, and installed service
+life cycles. Existing failure, platform and hosted engine tests remain required.
