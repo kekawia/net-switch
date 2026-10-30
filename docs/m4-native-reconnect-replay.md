@@ -37,7 +37,33 @@ tests use. Appending the annotations preserves those tests; the restored full
 aggregate passes. Local compilation also caught two incorrect import paths in
 the new test before any replay ran.
 
+## Gate mutations
+
+Four temporary source mutations ran through the full aggregate and were
+reverted. Missing reconnectPinned receipt: 135 registered receipts missing,
+exits 0/0/1. Failing that subtest after its assertions: Receipt refused the
+failed test, exits 1/0/1. Dropping the full response comparison: exhaustion
+rejected 153/api and 150/api, exits 1/0/1. Swapping the pinned diagnostic and
+its async result in memory: the ordered plan rejected 151/async-result at
+position 14, exits 1/0/1. Frozen bytes were never edited.
+
+## Related obligations outside the trace count
+
+`TestReconnectPersistsItsOriginalSelectionBeforeClose` exercises real Control's
+lost-response retry: it checks the durable original request, introduces a new
+flow, advances time, and requires the retry request (including operation ID)
+to equal the original before clearing the intent. It runs in the pure Control
+sweep. It uses the boundary fake, not installed IPC.
+
+`TestClosureIsFencedToItsOriginalInstance` uses the native in-memory protocol
+fixture and an admitted real flow-table record. It rejects both an old-instance
+request and replacement between Control's check and the send, then proves the
+unrelated current flow was not marked closing. The final local aggregate also
+executes this selected lifecycle test. This is instance fencing evidence, not
+OS authentication or installed service evidence.
+
 Remaining trace work: hungEngine, quitFailure, routingAndReads,
 settingsSetupUpdate and migration. The additional obligations listed in
-m4-semantic-ledger.md remain outside this denominator and are not claimed here.
+m4-semantic-ledger.md remain outside this denominator; only the reconnect retry
+and instance-fencing mappings above are addressed by this slice.
 No engine process, service, TUN or host route was run locally.
