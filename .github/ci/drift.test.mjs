@@ -88,6 +88,10 @@ test('the go commands the oracle checks come from the workflows', () => {
   assert.ok(has(/^Linux ubuntu-24\.04 helper$/), 'the helper module from its working directory');
   assert.ok(has(/^Linux ubuntu-26\.04 tests\/quicfixture$/), 'the QUIC fixture on every acceptance runner');
   assert.ok(current.go.some(command => command.group === 'control' && command.patterns.includes('./cmd/netswitch')));
+  for (const source of ['./cmd/netswitch', './cmd/netswitch-engine', './cmd/netswitch-desktop', './cmd/netswitchctl']) {
+    assert.ok(current.go.some(command => command.group === 'control' && command.tags.includes('lifecycle_test') && command.patterns.includes(source)), `installed candidate ${source} is compiled explicitly`);
+  }
+  assert.ok(current.go.some(command => command.group === 'control' && command.tests && command.patterns.includes('./tests/lifecycle')), 'installed assertions are compiled by Control CI');
 });
 
 const fails = (options, pattern) => {

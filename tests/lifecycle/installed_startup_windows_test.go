@@ -2,23 +2,51 @@ package lifecycle_test
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
+
+// Invoked by the parent with its real unelevated owner token. No synthetic
+// descriptor or mocked identity can satisfy this installed-store proof.
+func TestInstalledStoreDeniesOwner(t *testing.T) {
+	data := os.Getenv("NETSWITCH_INSTALLED_STORE")
+	if !hosted() || data == "" {
+		t.Skip("launched only by installed owner-access proof")
+	}
+	if lifecycle.Administrator() {
+		t.Fatal("store denial probe is elevated")
+	}
+	file := filepath.Join(data, "owner.json")
+	if _, err := os.ReadFile(file); !errors.Is(err, os.ErrPermission) {
+		t.Fatal("owner could read enrollment or denial had wrong cause", err)
+	}
+	f, err := os.OpenFile(file, os.O_WRONLY, 0)
+	if err == nil {
+		f.Close()
+		t.Fatal("owner could open enrollment for writing")
+	}
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatal("write denial had wrong cause", err)
+	}
+}
 
 // Startup assertions formerly exercised the compatibility launcher's desktop
 // lifetime. Here the installer prepares the store and SCM owns Control. Worker
 // Win32 parity remains a separate comparison with the frozen implementation.
 func TestInstalledNativeStartup(t *testing.T) {
 	requireInstalledHarness(t)
-	root := t.TempDir()
+	root := installedRoot(t)
 	target := filepath.Join(root, "outside-target")
 	if err := os.Mkdir(target, 0700); err != nil {
 		t.Fatal(err)
@@ -134,6 +162,40 @@ func TestInstalledNativeStartup(t *testing.T) {
 		}
 		if got := getStatus(t, f.client); got.ControlPID != f.control.PID {
 			t.Fatal("original session replaced", got)
+		}
+		f.quit(t)
+	})
+	t.Run("automatic-main-and-worker-restrictions", func(t *testing.T) {
+		alias, _ := primaryInterface(t)
+		f := newInstalledFixture(t, filepath.Join(root, "automatic-main"))
+		f.start(t, map[string]any{"checkForUpdates": false, "ipv6": "off"})
+		var state struct {
+			Lines []struct {
+				Alias string `json:"alias"`
+			} `json:"lines"`
+		}
+		code, body := f.api(t, "GET", "/api/state", nil)
+		if err := json.Unmarshal(body, &state); err != nil || code != 200 || len(state.Lines) != 1 || state.Lines[0].Alias != alias {
+			t.Fatal("default line is not Windows' uplink", string(body), alias, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, filepath.Join(f.directory, "worker.test.exe"), "-test.v", "-test.timeout=90s", "-test.run=^TestReadWorkerCannotWriteControlHKLMOrTCP$")
+		cmd.Env = append(os.Environ(), "NETSWITCH_CONTROL_PID="+strconv.FormatUint(uint64(f.control.PID), 10))
+		b, err := cmd.CombinedOutput()
+		t.Logf("INSTALLED_WORKER_RESTRICTIONS %s", b)
+		if err != nil || !strings.Contains(string(b), "--- PASS: TestReadWorkerCannotWriteControlHKLMOrTCP (") {
+			t.Fatal("live Control worker restrictions failed or did not run", err)
+		}
+		if _, err := os.ReadFile(filepath.Join(f.data, "owner.json")); err != nil {
+			t.Fatal("enrollment must actually exist before denial probe", err)
+		}
+		proof := f.owner.command(filepath.Join(f.directory, "lifecycle.test.exe"), "-test.v", "-test.timeout=30s", "-test.run=^TestInstalledStoreDeniesOwner$")
+		proof.Env = append(proof.Env, "NETSWITCH_INSTALLED_STORE="+f.data)
+		b, err = proof.CombinedOutput()
+		t.Logf("INSTALLED_STORE_DENIAL %s", b)
+		if err != nil || !strings.Contains(string(b), "--- PASS: TestInstalledStoreDeniesOwner (") {
+			t.Fatal("actual owner store ACL proof failed or did not run", err)
 		}
 		f.quit(t)
 	})

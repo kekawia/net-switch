@@ -6,6 +6,13 @@ import { jobRuns, readWorkflow } from './workflows.mjs';
 
 const workflow = name => readWorkflow(readFileSync(new URL(`../workflows/${name}.yml`, import.meta.url), 'utf8'));
 
+test('Control matrix retains both native and historical branches on both architectures', () => {
+  const entries = workflow('control').jobs.get('windows').matrix;
+  assert.deepEqual(entries.map(({runner, control}) => `${runner}/${control}`).sort(), [
+    'windows-11-arm/go', 'windows-11-arm/node', 'windows-latest/go', 'windows-latest/node',
+  ]);
+});
+
 // Which group each job belongs to, written out independently of the files, so
 // a moved or new job fails here until someone decides what it depends on.
 // investigation: manual-only jobs that existed before gating. oracle: the go

@@ -2,7 +2,9 @@ package lifecycle_test
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -51,6 +53,28 @@ func requireInstalledHarness(t *testing.T) {
 	}
 }
 
+func installedRoot(t *testing.T) string {
+	t.Helper()
+	requireInstalledHarness(t)
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(os.Getenv("ProgramData"), "NetSwitch-Installed-"+hex.EncodeToString(nonce[:]))
+	if _, err := os.Lstat(root); !os.IsNotExist(err) {
+		t.Fatal("fixture root already exists or cannot be inspected", root, err)
+	}
+	if err := lifecycle.PrepareDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Error("fixture root cleanup", err)
+		}
+	})
+	return root
+}
+
 func newInstalledFixture(t *testing.T, data string) *installedFixture {
 	t.Helper()
 	requireInstalledHarness(t)
@@ -93,7 +117,7 @@ func newInstalledFixture(t *testing.T, data string) *installedFixture {
 		}
 		t.Logf("INSTALLED_CANDIDATE path=%q sha256=%x version=%q", image, sha256.Sum256(b), strings.TrimSpace(string(version)))
 	}
-	f.owner = newActor(t, "NSInstalledOwner")
+	f.owner = newActor(t, "NSNativeControlOwner")
 	closed := false
 	f.cleanup = func() error {
 		if closed {
@@ -109,6 +133,9 @@ func newInstalledFixture(t *testing.T, data string) *installedFixture {
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		if err := service.Uninstall(ctx); err != nil {
+			return err
+		}
+		if err := lifecycle.Cleanup(ctx, f.data); err != nil {
 			return err
 		}
 		closed = true
@@ -196,7 +223,7 @@ func installedIdentity(t *testing.T, name, expected string) service.Status {
 	return s
 }
 
-func installedProcessIdentity(t *testing.T, pid uint32, expected string) {
+func installedProcessIdentity(t *testing.T, pid uint32, expected string) uint64 {
 	t.Helper()
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, pid)
 	if err != nil {
@@ -229,6 +256,7 @@ func installedProcessIdentity(t *testing.T, pid uint32, expected string) {
 		t.Fatal("process exited during identity observation", pid, state, err)
 	}
 	t.Logf("INSTALLED_RUNNING pid=%d created=%d:%d user=SYSTEM path=%q sha256=%x", pid, created.HighDateTime, created.LowDateTime, image, sha256.Sum256(b))
+	return uint64(created.HighDateTime)<<32 | uint64(created.LowDateTime)
 }
 
 func (f *installedFixture) observe(t *testing.T) protocol.Status {
@@ -255,7 +283,7 @@ func (f *installedFixture) observe(t *testing.T) protocol.Status {
 	if err := f.observer.Call(ctx, map[string]any{"method": "hello"}, &hello); err != nil {
 		t.Fatal(err)
 	}
-	if hello.Instance == "" || hello.Epoch == 0 || hello.Status.Instance != hello.Instance {
+	if hello.Instance == "" || hello.Epoch == 0 || hello.Status.Instance != hello.Instance || hello.Status.State != "on" || hello.Status.Applied == nil {
 		t.Fatal("invalid installed native hello", hello)
 	}
 	for _, want := range []string{"revisions", "lease", "status", "paged-totals", "totals-ack", "terminal-stop", "probe-options"} {
