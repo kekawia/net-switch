@@ -465,12 +465,13 @@ func TestBridgeInfoLayout(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	wantPresent := !verifiedFloor58Profile()
 	for _, v := range c {
-		if !v.Present || v.ProgramID == 0 {
-			t.Fatalf("counter ABI missing: %+v", v)
+		if v.Present != wantPresent || v.ProgramID == 0 {
+			t.Fatalf("counter ABI mismatch (wantPresent=%t): %+v", wantPresent, v)
 		}
 	}
-	t.Log(fmt.Sprintf("BRIDGE_COUNTERS programs=%d field_present=true", len(c)))
+	t.Log(fmt.Sprintf("BRIDGE_COUNTERS programs=%d field_present=%t floor58=%t", len(c), wantPresent, !wantPresent))
 }
 
 func TestBridgeRelocations(t *testing.T) {

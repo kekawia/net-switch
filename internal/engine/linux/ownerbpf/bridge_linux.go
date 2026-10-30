@@ -304,7 +304,12 @@ func (b *Bridge) Register() (_ *BridgeReader, err error) {
 	if e != nil {
 		return nil, e
 	}
-	g, e := NewBurstGuard(counts)
+	var g *BurstGuard
+	if !counts[0].Present && !counts[1].Present && !counts[2].Present && verifiedFloor58Profile() {
+		g, e = NewFloor58BurstGuard(counts)
+	} else {
+		g, e = NewBurstGuard(counts)
+	}
 	if e != nil {
 		return nil, e
 	}
@@ -318,6 +323,17 @@ func (b *Bridge) Register() (_ *BridgeReader, err error) {
 	}
 	b.readers[index] = true
 	return r, nil
+}
+
+func verifiedFloor58Profile() bool {
+	if os.Getenv("NS_OWNERBPF_FLOOR58") != "1" {
+		return false
+	}
+	var uts unix.Utsname
+	if err := unix.Uname(&uts); err != nil {
+		return false
+	}
+	return unix.ByteSliceToString(uts.Release[:]) == "5.8.0"
 }
 
 type ReadFrame struct {

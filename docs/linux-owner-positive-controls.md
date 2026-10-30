@@ -65,8 +65,9 @@ in [run 40934322738](https://github.com/kekawia/net-switch/actions/runs/40934322
 - **Stale-record mutation (`TestBridgeStaleRecordMutation`):**
   - `amd64`: `skip_post_check=false` refused (`free_recursion_delta=8`, `decision=attribution_unknown_recursion`); `skip_post_check=true` accepted stale cookie `16` over live sender cookie `17` (`result=stale_accepted`).
   - `arm64`: `skip_post_check=false` refused (`free_recursion_delta=8`, `decision=attribution_unknown_recursion`); `skip_post_check=true` accepted stale cookie `16` over live sender cookie `17` (`result=stale_accepted`).
-- **Pre-loader socket (`TestBridgePreLoaderSocket`) and read lifetimes (`TestBridgeReadLifetimes`):**
-  - Both architectures verified `P1_PRE_LOADER` (`init_calls_delta=1 init_zero=0`) and `P2_LIFETIMES`.
+- **Pre-loader socket (`TestBridgePreLoaderSocket`) and read lifetimes (`TestBridgeReadLifetimes`) in [run 40975971592](https://github.com/kekawia/net-switch/actions/runs/40975971592) (`87d57477`, [amd64 job 123804282892](https://github.com/kekawia/net-switch/actions/runs/40975971592/job/123804282892), [arm64 job 123804282804](https://github.com/kekawia/net-switch/actions/runs/40975971592/job/123804282804)):**
+  - `amd64`: `P1_PRE_LOADER cookie=29 init_calls_delta=1 init_zero=0`, `P2_LIFETIMES empty=pass zero_read=pass eintr=pass truncated=60 cross_cpu=1 cross_cpu_health_bound=1_read shared_skb_rejected=1 multi_burst_refused=4 nested_terminal=8 ambiguous_reads=1 pub_fault_cookie=35 purge_deleted=510 packet_map_empty=true`
+  - `arm64`: `P1_PRE_LOADER cookie=28 init_calls_delta=1 init_zero=0`, `P2_LIFETIMES empty=pass zero_read=pass eintr=pass truncated=60 cross_cpu=1 cross_cpu_health_bound=1_read shared_skb_rejected=1 multi_burst_refused=4 nested_terminal=8 ambiguous_reads=1 pub_fault_cookie=34 purge_deleted=510 packet_map_empty=true`
 
 ## Source basis and remaining limits
 

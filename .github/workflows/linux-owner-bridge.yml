@@ -21,6 +21,7 @@ jobs:
           name: bridge-objects
           path: dist/ownerbpf/first/*.o
           if-no-files-found: error
+
   modern:
     needs: objects
     name: bridge-diagnostic / ${{ matrix.arch }}
@@ -51,9 +52,116 @@ jobs:
           path: dist/ownerbpf
       - name: Build and pure contracts
         run: |
-          go test -v -count=1 ./internal/engine/linux/ownerbpf
+          go test -v -count=1 ./internal/engine/linux/ownerbpf ./tests/linux/ownerproof
           go test -tags=ownerbpfproof -c -o dist/bridge-proof ./internal/engine/linux/ownerbpf
           go tool objdump -s 'ownerbpf.burstBarrier' dist/bridge-proof
       - name: Isolated kernel diagnostics (not complete P1/P2 qualification)
         run: |
           sudo env GOMAXPROCS=2 NS_OWNERBPF_PROOF=1 NS_BRIDGE_OBJECT="$PWD/dist/ownerbpf/bridge_${{ matrix.target }}_bpfel.o" NS_BRIDGE_FAULT_OBJECT="$PWD/dist/ownerbpf/fault_${{ matrix.target }}_bpfel.o" unshare --net -- dist/bridge-proof -test.v -test.timeout=90s -test.run='^TestBridge'
+
+  floor-5-8-amd64:
+    needs: objects
+    name: owner-proof / floor-5.8-amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: bridge-objects
+          path: dist/ownerbpf
+      - name: Build and boot upstream v5.8 amd64 floor guest under KVM
+        run: |
+          go test -v -count=1 ./tests/linux/ownerproof
+          node scripts/build-owner-floor-guest.mjs all amd64
+      - name: Upload amd64 floor guest kernel and initramfs artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: floor-5.8-amd64-guest
+          path: |
+            dist/ownerproof-guest/amd64/kernel-image
+            dist/ownerproof-guest/amd64/resolved-kernel.config
+            dist/ownerproof-guest/amd64/initramfs-5.8-amd64.cpio.gz
+          if-no-files-found: error
+
+  floor-5-8-arm64-build:
+    needs: objects
+    name: owner-proof / floor-5.8-arm64-build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: bridge-objects
+          path: dist/ownerbpf
+      - name: Build upstream v5.8 arm64 floor kernel and initramfs natively
+        run: |
+          go test -v -count=1 ./tests/linux/ownerproof
+          node scripts/build-owner-floor-guest.mjs build arm64
+      - name: Upload arm64 floor guest kernel and initramfs artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: floor-5.8-arm64-guest
+          path: |
+            dist/ownerproof-guest/arm64/kernel-image
+            dist/ownerproof-guest/arm64/resolved-kernel.config
+            dist/ownerproof-guest/arm64/initramfs-5.8-arm64.cpio.gz
+          if-no-files-found: error
+
+  floor-5-8-arm64-tcg-correctness:
+    needs: [objects, floor-5-8-arm64-build]
+    name: floor-5.8-arm64-tcg-correctness
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: floor-5.8-arm64-guest
+          path: dist/ownerproof-guest/arm64
+      - name: Boot upstream v5.8 arm64 floor guest under QEMU system-aarch64 TCG
+        run: node scripts/build-owner-floor-guest.mjs boot arm64
+
+  floor-5-8-gate:
+    needs: [modern, floor-5-8-amd64, floor-5-8-arm64-tcg-correctness]
+    if: always()
+    name: owner-proof / floor-5.8-gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require explicit success of modern and both 5.8 floor guest jobs (fail-not-skip)
+        run: |
+          echo "modern=${{ needs.modern.result }}"
+          echo "floor-5.8-amd64=${{ needs.floor-5-8-amd64.result }}"
+          echo "floor-5.8-arm64-tcg-correctness=${{ needs.floor-5-8-arm64-tcg-correctness.result }}"
+          test "${{ needs.modern.result }}" = "success"
+          test "${{ needs.floor-5-8-amd64.result }}" = "success"
+          test "${{ needs.floor-5-8-arm64-tcg-correctness.result }}" = "success"

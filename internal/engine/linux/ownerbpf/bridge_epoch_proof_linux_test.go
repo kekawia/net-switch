@@ -463,6 +463,24 @@ func TestBridgePreemptedReader(t *testing.T) {
 	}
 	var postState BridgeFault
 	_ = f.b.Collection.Maps["faults"].Lookup(uint32(0), &postState)
+	if !before[1].Present && verifiedFloor58Profile() {
+		// Upstream v5.8 __bpf_trace_run has no per-program recursion guard:
+		// either RCU keeps the callback non-preemptible across tasks (b.ended == 1)
+		// or B's consume_skb callback runs concurrently without being skipped (b.ended == 0),
+		// retiring both packets cleanly and attributing both A and B to their cookies.
+		if postState.Hits != 1 || postState.Serial == 0 {
+			t.Fatalf("v5.8 holder did not execute bounded hold: hits=%d hold_ns=%d", postState.Hits, postState.Serial)
+		}
+		if aerr != nil || len(a) != 1 || a[0].Decision.Status != ReadCookie || a[0].Decision.Packet.Cookie != cA {
+			t.Fatalf("v5.8 holder A read failed: err=%v frames=%+v", aerr, a)
+		}
+		if b.err != nil || len(b.frames) != 1 || b.frames[0].Decision.Status != ReadCookie || b.frames[0].Decision.Packet.Cookie != cB {
+			t.Fatalf("v5.8 reader B read failed: err=%v frames=%+v", b.err, b.frames)
+		}
+		t.Logf("P2_PREEMPT floor58=true raw_recursion_guard=false ended=%d hold_ns=%d both_readers_attributed=true", b.ended, postState.Serial)
+		reloadBridgeFixture(t, f)
+		return
+	}
 	if !preemptRCU && b.ended == 1 {
 		// On kernels without CONFIG_PREEMPT_RCU (e.g. CONFIG_PREEMPT_LAZY=y with TREE_RCU),
 		// __bpf_trace_run's rcu_read_lock_dont_migrate() -> __rcu_read_lock() calls
@@ -557,8 +575,9 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 		t.Fatal(err)
 	}
 	drops := l.Attrs().Statistics.TxDropped - beforeDrops
-	if ctl.Hits != 1 || ctl.Address == 0 || drops == 0 || after[2].Misses <= before[2].Misses {
-		t.Fatalf("nested skip not exercised: hold=%d hold_ns=%d observed_same_task=%d kernel_drops=%d free_before=%d free_after=%d", ctl.Hits, ctl.Serial, ctl.Address, drops, before[2].Misses, after[2].Misses)
+	floor58 := !before[2].Present && verifiedFloor58Profile()
+	if ctl.Hits != 1 || ctl.Address == 0 || drops == 0 || (!floor58 && after[2].Misses <= before[2].Misses) {
+		t.Fatalf("nested skip not exercised: hold=%d hold_ns=%d observed_same_task=%d kernel_drops=%d free_before=%d free_after=%d floor58=%t", ctl.Hits, ctl.Serial, ctl.Address, drops, before[2].Misses, after[2].Misses, floor58)
 	}
 	return ctl, after, drops
 }
@@ -611,6 +630,11 @@ func TestBridgeNestedFreeSkip(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctl, after, drops := triggerNestedFreeHold(t, f, s, beforeDrops, before)
+	if !before[2].Present && verifiedFloor58Profile() {
+		t.Logf("P2_NESTED_FREE floor58=true raw_recursion_guard=false full_ring_before=%d nested_same_task=%d kernel_drops=%d reload_required=true", occupied, ctl.Address, drops)
+		reloadBridgeFixture(t, f)
+		return
+	}
 	if f.b.UnknownRecursion.Load() != 1 {
 		t.Fatal("recursion event not classified exactly once")
 	}
@@ -683,10 +707,7 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 			}
 
 			// Step 1: Fill the ring with 500 packets from s1 (cookie c1) and trigger
-			// a real kernel kfree_skb recursion skip using f.r. The 8 dropped packets
-			// have their kfree_skb terminal suppressed by the kernel recursion guard,
-			// so their stale records (cookie c1) remain in the kernel packet map AND
-			// freed recursion_misses increments above r2's baseline!
+			// a real kernel kfree_skb recursion stimulus using f.r.
 			var c1 uint64
 			for range 500 {
 				c1 = bridgeSend(t, s1, []byte("fixed-size"))
@@ -718,8 +739,10 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 					t.Fatal("drain ring after nested free:", err)
 				}
 			}
-			// Any entries still in packets now are the exact skb addresses whose kfree_skb
-			// callback was suppressed by the kernel's raw_tracepoint recursion guard!
+			// On 6.1+ kernels, entries still in packets now are the exact skb addresses whose
+			// kfree_skb callback was suppressed by the kernel's raw_tracepoint recursion guard.
+			// On upstream v5.8 (rawRecursionGuard=false), nested kfree_skb runs without suppression
+			// so all 8 dropped records are deleted by freed() and retainedAddrs is empty!
 			var retainedAddrs []uint64
 			it = f.b.Collection.Maps["packets"].Iterate()
 			for it.Next(&k, &v) {
@@ -728,8 +751,20 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 				}
 				retainedAddrs = append(retainedAddrs, k)
 			}
-			if err := it.Err(); err != nil || len(retainedAddrs) == 0 {
-				t.Fatalf("kernel recursion skip did not leave retained stale records: len=%d err=%v", len(retainedAddrs), err)
+			if err := it.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if !before[2].Present && verifiedFloor58Profile() {
+				if len(retainedAddrs) != 0 {
+					t.Fatalf("v5.8 guard-free raw tracepoint unexpectedly left %d unretired records", len(retainedAddrs))
+				}
+				_ = netlink.QdiscDel(netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{}))
+				t.Logf("P2_STALE_MUTATION floor58=true raw_recursion_guard=false skip_post_check=%t nested_frees_retired_all=true retained_records=0", skipPostCheck)
+				reloadBridgeFixture(t, f)
+				return
+			}
+			if len(retainedAddrs) == 0 {
+				t.Fatalf("kernel recursion skip did not leave retained stale records: len=%d", len(retainedAddrs))
 			}
 			for _, addr := range retainedAddrs {
 				if err := f.b.Collection.Maps["packets"].Delete(addr); err != nil {

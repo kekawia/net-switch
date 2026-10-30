@@ -9,30 +9,30 @@
       "internal/engine/linux/ownerbpf/bpf/abi.h": "6fc35a531affc0e1576969f1f78992f9ccf443916148c2979484d8e162125f29",
       "internal/engine/linux/ownerbpf/bpf/attribution.c": "529ba7fa6eeef7be3c2649fcd5d7890a70a5575047a68300bebb9143f87029f5",
       "internal/engine/linux/ownerbpf/bpf/provenance.h": "96d2f1becbf0a89ef6394c8eeb6435ce04cfd8eab47be69b16c951b3e6e159b4",
-      "internal/engine/linux/ownerbpf/bpf/bridge.c": "6a8cbe7323a0eec3f6377bc7f5bcff3b72cdcc8f0b4a98d7aac2e9a1fdfad892"
+      "internal/engine/linux/ownerbpf/bpf/bridge.c": "5c17f84980b659cacd2e50547da9328e233dcbe86f48bd0268cc44e7cd924e96"
     },
     "objects": {
       "internal/engine/linux/ownerbpf/testdata/bridge_x86_bpfel.o": {
         "architecture": "amd64",
         "faultBuild": false,
-        "sha256": "e57c006c804b453c7f5554865ff93dd42b462be6123495a627da4907fff9e217"
+        "sha256": "d261ab6ce74c6f1a626497a0fd68eeb5ad1f8b6b34e461943efe257c0cb92425"
       },
       "internal/engine/linux/ownerbpf/testdata/bridge_arm64_bpfel.o": {
         "architecture": "arm64",
         "faultBuild": false,
-        "sha256": "e57c006c804b453c7f5554865ff93dd42b462be6123495a627da4907fff9e217"
+        "sha256": "d261ab6ce74c6f1a626497a0fd68eeb5ad1f8b6b34e461943efe257c0cb92425"
       },
       "internal/engine/linux/ownerbpf/testdata/fault_x86_bpfel.o": {
         "architecture": "amd64",
         "faultBuild": true,
         "compileDefine": "NS_OWNER_PROOF_FAULTS=1",
-        "sha256": "e88c98d439782800ed9f7cf93f933a4dfa6d3747aa6ce2c905499cf18ab6b529"
+        "sha256": "c9467a3e10fa396ccf100e38251b0a3b7bd5ea93b68a0d4bff835290a16d4eea"
       },
       "internal/engine/linux/ownerbpf/testdata/fault_arm64_bpfel.o": {
         "architecture": "arm64",
         "faultBuild": true,
         "compileDefine": "NS_OWNER_PROOF_FAULTS=1",
-        "sha256": "e88c98d439782800ed9f7cf93f933a4dfa6d3747aa6ce2c905499cf18ab6b529"
+        "sha256": "c9467a3e10fa396ccf100e38251b0a3b7bd5ea93b68a0d4bff835290a16d4eea"
       },
       "internal/engine/linux/ownerbpf/testdata/proof_x86_bpfel.o": {
         "architecture": "amd64",

@@ -101,3 +101,22 @@ func TestBurstStaleEvidenceMutationModel(t *testing.T) {
 	// Mutant omits Certify: CheckRead alone returns the stale cookie above.
 	t.Log("BURST_MODEL stale_without_postcheck=accepted stale_with_postcheck=refused kernel_proof=false")
 }
+
+func TestFloor58BurstGuard(t *testing.T) {
+	floorSamples := [3]CounterSample{{ProgramID: 10}, {ProgramID: 20}, {ProgramID: 30}}
+	g, err := NewFloor58BurstGuard(floorSamples)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.Certify(floorSamples, nil) {
+		t.Fatal("valid v5.8 floor sample rejected")
+	}
+	if _, err := NewFloor58BurstGuard(counters()); err == nil {
+		t.Fatal("counter-bearing sample accepted by v5.8 floor constructor")
+	}
+	replaced := floorSamples
+	replaced[1].ProgramID = 99
+	if g.Certify(replaced, nil) || g.Certify(floorSamples, nil) {
+		t.Fatal("program replacement accepted or poison cleared on v5.8 floor guard")
+	}
+}

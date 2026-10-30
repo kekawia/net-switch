@@ -11,6 +11,7 @@ const expected = new Set([
   'TestBurstReadersDoNotConsumeEachOthersMisses',
   'TestBurstCounterFailures',
   'TestBurstStaleEvidenceMutationModel',
+  'TestFloor58BurstGuard',
   'TestLoadErrorRetainsEveryVerifierLine',
   'TestConsumeContextLayoutRefusesMismatch',
 ]);
