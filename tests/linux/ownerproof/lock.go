@@ -30,6 +30,7 @@ type GuestLock struct {
 		TarballSHA256        string                       `json:"tarballSha256"`
 		RawRecursionGuard    bool                         `json:"rawRecursionGuard"`
 		RecursionMissesField bool                         `json:"recursionMissesField"`
+		BuildAdjustments     []string                     `json:"buildAdjustments"`
 		Configs              map[string]KernelArchProfile `json:"configs"`
 	} `json:"kernel"`
 	CompilerImage struct {
@@ -41,13 +42,21 @@ type GuestLock struct {
 		BasePackages          map[string]string `json:"basePackages"`
 	} `json:"compilerImage"`
 	DebianPackages struct {
-		Mirror          string          `json:"mirror"`
-		Suite           string          `json:"suite"`
-		ReleaseVersion  string          `json:"releaseVersion"`
-		AMD64           []PinnedPackage `json:"amd64"`
-		ARM64           []PinnedPackage `json:"arm64"`
-		QEMURunnerAMD64 []PinnedPackage `json:"qemuRunnerAmd64"`
+		Mirror         string          `json:"mirror"`
+		Suite          string          `json:"suite"`
+		ReleaseVersion string          `json:"releaseVersion"`
+		AMD64          []PinnedPackage `json:"amd64"`
+		ARM64          []PinnedPackage `json:"arm64"`
 	} `json:"debianPackages"`
+	UnverifiedRunnerInputs struct {
+		QEMU struct {
+			Verified    bool   `json:"verified"`
+			Source      string `json:"source"`
+			AMD64Binary string `json:"amd64Binary"`
+			ARM64Binary string `json:"arm64Binary"`
+			Note        string `json:"note"`
+		} `json:"qemu"`
+	} `json:"unverifiedRunnerInputs"`
 	Initramfs struct {
 		GoVersion          string                       `json:"goVersion"`
 		PID1Package        string                       `json:"pid1Package"`
@@ -70,16 +79,17 @@ type GuestLock struct {
 }
 
 type KernelArchProfile struct {
-	Path              string `json:"path"`
-	SHA256            string `json:"sha256"`
-	BaseDefconfig     string `json:"baseDefconfig"`
-	ImageTarget       string `json:"imageTarget"`
-	ImageRelativePath string `json:"imageRelativePath"`
-	QEMUBinary        string `json:"qemuBinary"`
-	Accelerator       string `json:"accelerator"`
-	Console           string `json:"console"`
-	CPUs              int    `json:"cpus"`
-	MemoryMiB         int    `json:"memoryMiB"`
+	Path                 string `json:"path"`
+	SHA256               string `json:"sha256"`
+	ResolvedConfigSHA256 string `json:"resolvedConfigSha256"`
+	BaseDefconfig        string `json:"baseDefconfig"`
+	ImageTarget          string `json:"imageTarget"`
+	ImageRelativePath    string `json:"imageRelativePath"`
+	QEMUBinary           string `json:"qemuBinary"`
+	Accelerator          string `json:"accelerator"`
+	Console              string `json:"console"`
+	CPUs                 int    `json:"cpus"`
+	MemoryMiB            int    `json:"memoryMiB"`
 }
 
 type PinnedPackage struct {
@@ -131,6 +141,9 @@ func ValidateGuestLock(lock *GuestLock) error {
 	if lock.Kernel.RawRecursionGuard || lock.Kernel.RecursionMissesField {
 		return errors.New("upstream v5.8 floor profile must record rawRecursionGuard=false and recursionMissesField=false")
 	}
+	if len(lock.Kernel.BuildAdjustments) != 3 {
+		return fmt.Errorf("expected 3 documented v5.8 kernel build adjustments, got %d", len(lock.Kernel.BuildAdjustments))
+	}
 	for _, arch := range []string{"amd64", "arm64"} {
 		cfg, ok := lock.Kernel.Configs[arch]
 		if !ok {
@@ -142,6 +155,9 @@ func ValidateGuestLock(lock *GuestLock) error {
 		}
 		if got := sha256Hex(raw); got != cfg.SHA256 {
 			return fmt.Errorf("%s kernel config sha256 mismatch: embedded=%s lock=%s", arch, got, cfg.SHA256)
+		}
+		if len(cfg.ResolvedConfigSHA256) != 64 {
+			return fmt.Errorf("%s resolvedConfigSha256 missing or invalid: %q", arch, cfg.ResolvedConfigSHA256)
 		}
 		if err := ValidateKernelConfigText(arch, string(raw)); err != nil {
 			return err
@@ -158,7 +174,7 @@ func ValidateGuestLock(lock *GuestLock) error {
 		lock.CompilerImage.Platforms["arm64"] != "sha256:a90d803a53c4af08fd5c51a289eec7d9f45f5a5dc09af60c25c59a1b25f20b84" {
 		return fmt.Errorf("compiler container digest mismatch: %+v", lock.CompilerImage)
 	}
-	for _, list := range [][]PinnedPackage{lock.DebianPackages.AMD64, lock.DebianPackages.ARM64, lock.DebianPackages.QEMURunnerAMD64} {
+	for _, list := range [][]PinnedPackage{lock.DebianPackages.AMD64, lock.DebianPackages.ARM64} {
 		if len(list) == 0 {
 			return errors.New("empty pinned package list")
 		}
@@ -167,6 +183,12 @@ func ValidateGuestLock(lock *GuestLock) error {
 				return fmt.Errorf("invalid pinned package entry: %+v", pkg)
 			}
 		}
+	}
+	if lock.UnverifiedRunnerInputs.QEMU.Verified ||
+		lock.UnverifiedRunnerInputs.QEMU.AMD64Binary != "qemu-system-x86_64" ||
+		lock.UnverifiedRunnerInputs.QEMU.ARM64Binary != "qemu-system-aarch64" ||
+		lock.UnverifiedRunnerInputs.QEMU.Source == "" {
+		return fmt.Errorf("invalid unverifiedRunnerInputs.qemu declaration: %+v", lock.UnverifiedRunnerInputs.QEMU)
 	}
 	return nil
 }

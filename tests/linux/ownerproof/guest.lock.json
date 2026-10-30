@@ -9,10 +9,16 @@
     "tarballSha256": "e7f75186aa0642114af8f19d99559937300ca27acaf7451b36d4f9b0f85cf1f5",
     "rawRecursionGuard": false,
     "recursionMissesField": false,
+    "buildAdjustments": [
+      "sed -i \"s/-Werror//g\" tools/lib/subcmd/Makefile tools/objtool/Makefile",
+      "sed -i \"s/-J /--skip_encoding_btf_enum64 -J /g\" scripts/link-vmlinux.sh",
+      "KCFLAGS=\"-gdwarf-4 -Wno-error -fcommon\" HOSTCFLAGS=\"-Wno-error -fcommon\""
+    ],
     "configs": {
       "amd64": {
         "path": "tests/linux/ownerproof/kernel-5.8-amd64.config",
         "sha256": "93635e9f0ff988fe01556b50615755866aa1ed4bbee525b9f2046373da7e8547",
+        "resolvedConfigSha256": "42309a5b01aef7aec5a856561eef8c049dd247501b3edaad746382413aff9252",
         "baseDefconfig": "x86_64_defconfig",
         "imageTarget": "bzImage",
         "imageRelativePath": "arch/x86/boot/bzImage",
@@ -25,6 +31,7 @@
       "arm64": {
         "path": "tests/linux/ownerproof/kernel-5.8-arm64.config",
         "sha256": "f5f0efecbb8ab1786b03ef71adf6d9dd143236189f6976a3529fd7e92bfc8614",
+        "resolvedConfigSha256": "8f2fd8ae8b40b3875083d636f8308d5b16e4b43c3e8abf1170780e6ea27e2a0b",
         "baseDefconfig": "defconfig",
         "imageTarget": "Image",
         "imageRelativePath": "arch/arm64/boot/Image",
@@ -239,45 +246,16 @@
         "path": "pool/main/r/rsync/rsync_3.2.7-1+deb12u6_arm64.deb",
         "sha256": "217a855088547e384e67c3a3ff2f8f57b159f9f829be1f78d552b3da15796484"
       }
-    ],
-    "qemuRunnerAmd64": [
-      {
-        "name": "qemu-system-x86",
-        "version": "1:7.2+dfsg-7+deb12u18+b3",
-        "path": "pool/main/q/qemu/qemu-system-x86_7.2+dfsg-7+deb12u18+b3_amd64.deb",
-        "sha256": "faf17e2cc7323acbb36bbd6329b61080e7ead0ebb92d33155f41b17d8db6fe15"
-      },
-      {
-        "name": "qemu-system-arm",
-        "version": "1:7.2+dfsg-7+deb12u18+b3",
-        "path": "pool/main/q/qemu/qemu-system-arm_7.2+dfsg-7+deb12u18+b3_amd64.deb",
-        "sha256": "78c4adf16152bb8ae1994784e966365128cae04d8ae37bc161bb0b6617c17d9c"
-      },
-      {
-        "name": "qemu-system-common",
-        "version": "1:7.2+dfsg-7+deb12u18+b3",
-        "path": "pool/main/q/qemu/qemu-system-common_7.2+dfsg-7+deb12u18+b3_amd64.deb",
-        "sha256": "cc6bbe2d5e0b9ed6306f054008967b0564dc06b2558ea5142590f522ccca9b2b"
-      },
-      {
-        "name": "qemu-system-data",
-        "version": "1:7.2+dfsg-7+deb12u18",
-        "path": "pool/main/q/qemu/qemu-system-data_7.2+dfsg-7+deb12u18_all.deb",
-        "sha256": "8d7647370573fe9871949acf60d0c000546c2c089008a70accb3d015781e6bf1"
-      },
-      {
-        "name": "seabios",
-        "version": "1.16.2-1",
-        "path": "pool/main/s/seabios/seabios_1.16.2-1_all.deb",
-        "sha256": "08e5b3f761379f17a6051731cafa03e97686049e2cc1b8bdccc5a910646e2d8e"
-      },
-      {
-        "name": "ipxe-qemu",
-        "version": "1.0.0+git-20190125.36a4c85-5.1",
-        "path": "pool/main/i/ipxe/ipxe-qemu_1.0.0+git-20190125.36a4c85-5.1_all.deb",
-        "sha256": "5c2419ce07f4d80ac5e88e32ac09cdc523c048af86c4730d682ba969d3189db2"
-      }
     ]
+  },
+  "unverifiedRunnerInputs": {
+    "qemu": {
+      "verified": false,
+      "source": "ubuntu-24.04-runner-apt-or-preinstalled",
+      "amd64Binary": "qemu-system-x86_64",
+      "arm64Binary": "qemu-system-aarch64",
+      "note": "Host QEMU emulator binaries execute on the Ubuntu 24.04 runner outside the Bookworm compiler container and are recorded at runtime via --version as unverified runner inputs."
+    }
   },
   "initramfs": {
     "goVersion": "1.27.3",
@@ -302,11 +280,11 @@
     "reproducibilityStage": "double-build-verified",
     "amd64": {
       "kernelImageSha256": "3eb59a8a763a874dd4b8c012846a2c0a34c70b9821d1a286b8134e5b787dd52e",
-      "initramfsSha256": "90c9c49868e418d6d9f626aeb77083708357f89fda681f49492a7f6bd25c505e"
+      "initramfsSha256": "989179ec39985d952dc5d8f823edf1732d775639147299aea28c33cc82b4f738"
     },
     "arm64": {
       "kernelImageSha256": "f578daf914edbf3c6b8d20ad4b033f7d4630784c8cbb152f675c529272331a0d",
-      "initramfsSha256": "3ed689d5e6f1d536b992980414da7ff14ab0886670449949f132662cc5bf1d01"
+      "initramfsSha256": "4c0d7e569a88597b666e08e94fc22b6ae1c0dc15d22fc2e75ade729f1446cea5"
     }
   }
 }

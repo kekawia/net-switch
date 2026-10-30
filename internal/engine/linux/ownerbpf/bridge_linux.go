@@ -59,11 +59,27 @@ type Bridge struct {
 	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord atomic.Uint64
 }
 
+func actualOnlineCPUCount() (uint32, error) {
+	raw, err := os.ReadFile("/sys/devices/system/cpu/online")
+	if err != nil {
+		return 0, err
+	}
+	cpus, err := onlineCPUs(string(raw))
+	if err != nil {
+		return 0, err
+	}
+	return uint32(len(cpus)), nil
+}
+
 func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
-	if cfg.ABI != ProvenanceABI || cfg.Epoch == 0 || cfg.Ifindex == 0 || cfg.NetNS == 0 || cfg.Enabled != 0 || cfg.Readers != ReaderLimit {
+	onlineCount, err := actualOnlineCPUCount()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.ABI != ProvenanceABI || cfg.Epoch == 0 || cfg.Ifindex == 0 || cfg.NetNS == 0 || cfg.Enabled != 0 || cfg.Readers != ReaderLimit || cfg.CPUs != onlineCount {
 		return nil, errors.New("invalid/initially enabled bridge configuration")
 	}
-	if err := ValidateProofCapacity(500, uint64(cfg.CPUs), uint64(cfg.Readers)); err != nil {
+	if err := ValidateProofCapacity(500, uint64(onlineCount), uint64(cfg.Readers)); err != nil {
 		return nil, err
 	}
 	spec, err := ebpf.LoadCollectionSpec(object)
@@ -256,7 +272,11 @@ func (b *Bridge) Enable(actualQueue uint64) error {
 	if b.stopped || actualQueue != 500 {
 		return errors.New("bridge stopped or queue readback differs from proof queue 500")
 	}
-	if err := ValidateProofCapacity(actualQueue, uint64(b.config.CPUs), ReaderLimit); err != nil {
+	onlineCount, err := actualOnlineCPUCount()
+	if err != nil {
+		return err
+	}
+	if err := ValidateProofCapacity(actualQueue, uint64(onlineCount), ReaderLimit); err != nil {
 		return err
 	}
 	b.config.Enabled = 1
@@ -325,17 +345,6 @@ func (b *Bridge) Register() (_ *BridgeReader, err error) {
 	return r, nil
 }
 
-func verifiedFloor58Profile() bool {
-	if os.Getenv("NS_OWNERBPF_FLOOR58") != "1" {
-		return false
-	}
-	var uts unix.Utsname
-	if err := unix.Uname(&uts); err != nil {
-		return false
-	}
-	return unix.ByteSliceToString(uts.Release[:]) == "5.8.0"
-}
-
 type ReadFrame struct {
 	Data     []byte
 	Decision ReadDecision
@@ -381,9 +390,9 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 		data := make([]byte, 65536)
 		atomic.StoreUint64(&r.slot.Control.Armed, 1)
 		n, e := read(fd, data)
+		atomic.StoreUint64(&r.slot.Control.Armed, 0)
 		_ = atomic.LoadUint64(&r.slot.Completion.Count)
 		snapshot := *r.slot
-		atomic.StoreUint64(&r.slot.Control.Armed, 0)
 		// First-arm stamp is fetched once, outside the armed section. Later
 		// callbacks compare task start themselves; no map syscall per raw read.
 		if r.reg.Flags == 0 && snapshot.Completion.Count != 0 {

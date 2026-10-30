@@ -188,6 +188,9 @@ async function buildArchInitramfs(lock, arch, outDir) {
   const expectedInitramfsSha = lock.outputs?.[arch]?.initramfsSha256;
   const lockMatch = expectedInitramfsSha === digest;
   console.log(`FLOOR_GUEST_INITRAMFS arch=${arch} target=${target} bytes=${initramfs.length} sha256=${digest} init_sha256=${sha256(initBytes)} test_sha256=${sha256(testBytes)} double_build_verified=true lock_match=${lockMatch}`);
+  if (!expectedInitramfsSha || !lockMatch) {
+    throw new Error(`Initramfs SHA-256 mismatch on ${arch}: got ${digest}, expected ${expectedInitramfsSha}`);
+  }
   return { initramfsPath, digest };
 }
 
@@ -273,12 +276,29 @@ async function buildArchKernel(lock, arch, outDir) {
   if (!expectedKernelSha || expectedKernelSha !== imageHash) {
     throw new Error(`Kernel image SHA-256 mismatch on ${arch}: got ${imageHash}, expected ${expectedKernelSha}`);
   }
+  if (!cfgProfile.resolvedConfigSha256 || cfgProfile.resolvedConfigSha256 !== resolvedHash) {
+    throw new Error(`Resolved kernel config SHA-256 mismatch on ${arch}: got ${resolvedHash}, expected ${cfgProfile.resolvedConfigSha256}`);
+  }
   console.log(`FLOOR_GUEST_KERNEL_IMAGE arch=${arch} target=${cfgProfile.imageTarget} bytes=${imageBytes.length} sha256=${imageHash} resolved_config_sha256=${resolvedHash} lock_verified=true`);
   return { imagePath, imageHash, resolvedConfigPath, resolvedHash };
 }
 
 async function bootFloorGuest(lock, arch, kernelImagePath, initramfsPath) {
   const cfgProfile = lock.kernel.configs[arch];
+  const imageBytes = await readFile(kernelImagePath);
+  const initramfsBytes = await readFile(initramfsPath);
+  const imageHash = sha256(imageBytes);
+  const initramfsHash = sha256(initramfsBytes);
+  const expectedKernelSha = lock.outputs?.[arch]?.kernelImageSha256;
+  const expectedInitramfsSha = lock.outputs?.[arch]?.initramfsSha256;
+  if (!expectedKernelSha || imageHash !== expectedKernelSha) {
+    throw new Error(`Boot kernel image SHA-256 mismatch on ${arch}: got ${imageHash}, expected ${expectedKernelSha}`);
+  }
+  if (!expectedInitramfsSha || initramfsHash !== expectedInitramfsSha) {
+    throw new Error(`Boot initramfs SHA-256 mismatch on ${arch}: got ${initramfsHash}, expected ${expectedInitramfsSha}`);
+  }
+  console.log(`FLOOR_GUEST_BOOT_INPUTS arch=${arch} kernel_sha256=${imageHash} initramfs_sha256=${initramfsHash} lock_verified=true`);
+
   if (arch === 'amd64') {
     const kvmStat = await stat('/dev/kvm').catch(err => {
       throw new Error(`Required /dev/kvm missing on amd64 floor guest runner: ${err.message}`);
@@ -288,28 +308,17 @@ async function bootFloorGuest(lock, arch, kernelImagePath, initramfsPath) {
     }
   }
 
-  // Install pinned Bookworm QEMU binary packages on the amd64 runner or verify host QEMU.
-  const cacheDir = join(distRoot, 'cache');
-  const qemuDebDir = join(cacheDir, 'debs-qemu-amd64');
-  await mkdir(qemuDebDir, { recursive: true });
-  for (const pkg of lock.debianPackages.qemuRunnerAmd64) {
-    const fileName = pkg.path.split('/').at(-1);
-    await fetchPinned(
-      `${lock.debianPackages.mirror}/${pkg.path}`,
-      pkg.sha256,
-      join(qemuDebDir, fileName),
-    );
-  }
-  console.log(`FLOOR_GUEST_QEMU_PACKAGES verified=${lock.debianPackages.qemuRunnerAmd64.length}`);
-
   const qemuBin = cfgProfile.qemuBinary;
+  let qemuVersionOut;
   try {
-    run(qemuBin, ['--version']);
+    qemuVersionOut = run(qemuBin, ['--version']);
   } catch {
     run('sudo', ['apt-get', 'update'], { timeout: 300_000 });
     run('sudo', ['apt-get', 'install', '-y', '--no-install-recommends', 'qemu-system-x86', 'qemu-system-arm'], { timeout: 300_000 });
-    run(qemuBin, ['--version']);
+    qemuVersionOut = run(qemuBin, ['--version']);
   }
+  const firstLine = (qemuVersionOut ?? '').split('\n')[0]?.trim() ?? 'unknown';
+  console.log(`FLOOR_GUEST_QEMU_HOST_INPUT arch=${arch} binary=${qemuBin} verified=false version="${firstLine}"`);
 
   const qemuArgs = arch === 'amd64'
     ? [

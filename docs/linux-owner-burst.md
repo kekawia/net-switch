@@ -21,9 +21,16 @@ replacement, unavailable field or query error on an unaudited profile refuses
 attribution and requests quiescence; never silently treat it as zero.
 
 The only initially named no-counter profiles are **original upstream v5.8
-amd64 and arm64**, with the committed floor source/config/object hashes and
-guest identity verified before enabling capture. These profiles are not yet
-runtime-qualified. No arbitrary 5.x uname or vendor/backported kernel is an
+amd64 and arm64** (where `struct bpf_prog_info` is 208 bytes ending at `run_cnt`
+and lacks `recursion_misses` at offset 208..216), with the committed floor
+source/config/object hashes (`tests/linux/ownerproof/guest.lock.json`, including
+the two build-script `sed` adjustments for GCC 12 `-Werror` in `subcmd`/`objtool`
+and `pahole --skip_encoding_btf_enum64` with DWARF-4) and running `/proc/config.gz`
+SHA-256 (`resolvedConfigSha256`) verified inside `nsownerinit` and
+`verifiedFloor58Profile()`. `verifiedFloor58Profile()` is compiled only under the
+`ownerbpfproof` build tag (`floor58_proof_linux.go`; `floor58_default_linux.go`
+returns `false` in all non-proof builds) so the no-counter exemption cannot ship
+in a product binary. No arbitrary 5.x uname or vendor/backported kernel is an
 exemption. If the field exists, use the check even on a no-guard upstream tag.
 Other absent-field profiles select labelled unknown/degraded attribution until
 their exact sources/configuration are audited. No app owner is invented.

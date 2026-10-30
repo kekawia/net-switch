@@ -115,7 +115,20 @@ func verifyFloorKernel() error {
 		return fmt.Errorf("write /boot/config-%s: %w", rel, err)
 	}
 	cfgSum := sha256.Sum256(cfgBytes)
-	fmt.Printf("FLOOR_GUEST_RUNNING_CONFIG release=%s bytes=%d sha256=%s\n", rel, len(cfgBytes), hex.EncodeToString(cfgSum[:]))
+	gotConfigSHA := hex.EncodeToString(cfgSum[:])
+	wantConfigSHA := ""
+	switch runtime.GOARCH {
+	case "amd64":
+		wantConfigSHA = "42309a5b01aef7aec5a856561eef8c049dd247501b3edaad746382413aff9252"
+	case "arm64":
+		wantConfigSHA = "8f2fd8ae8b40b3875083d636f8308d5b16e4b43c3e8abf1170780e6ea27e2a0b"
+	default:
+		return fmt.Errorf("unsupported floor guest GOARCH %q", runtime.GOARCH)
+	}
+	if gotConfigSHA != wantConfigSHA {
+		return fmt.Errorf("running /proc/config.gz sha256 mismatch on %s: got=%s want=%s", runtime.GOARCH, gotConfigSHA, wantConfigSHA)
+	}
+	fmt.Printf("FLOOR_GUEST_RUNNING_CONFIG release=%s bytes=%d sha256=%s lock_verified=true\n", rel, len(cfgBytes), gotConfigSHA)
 	for _, line := range strings.Split(string(cfgBytes), "\n") {
 		if strings.HasPrefix(line, "CONFIG_BPF") || strings.HasPrefix(line, "CONFIG_DEBUG_INFO") || strings.HasPrefix(line, "CONFIG_PREEMPT") || strings.HasPrefix(line, "CONFIG_NET_SCH_NETEM") || strings.HasPrefix(line, "CONFIG_HZ") {
 			fmt.Printf("FLOOR_GUEST_KCONFIG %s\n", line)

@@ -11,7 +11,7 @@ func validRead() (ReadBinding, ReaderRegistration, ReaderSlot) {
 	r := ReaderRegistration{Slot: 2, Ifindex: 7, NetNS: 42, Flags: ReaderStamped,
 		Generation: 11, Epoch: 13, StartBoottime: 123456789}
 	s := ReaderSlot{
-		Control:    ReadControl{ABI: ProvenanceABI, Registration: 11, Epoch: 13, Sequence: 17, Armed: 1},
+		Control:    ReadControl{ABI: ProvenanceABI, Registration: 11, Epoch: 13, Sequence: 17, Armed: 0},
 		Completion: ReadCompletion{Count: 1, Sequence: 17, Registration: 11, Terminal: TerminalConsume, Status: PacketCaptured},
 		Packet: PacketRecord{ABI: ProvenanceABI, Status: PacketCaptured, Epoch: 13,
 			Ifindex: 7, NetNS: 42, CPU: 3, Serial: 19, Cookie: 23, Length: 64, Users: 1},
@@ -42,8 +42,79 @@ func TestProvenanceReadDecision(t *testing.T) {
 	t.Log("PROVENANCE positive_consume=pass copied_evidence=pass complete_identity=unimplemented")
 }
 
+func TestProvenanceDisarmBeforeCopy(t *testing.T) {
+	b, r, base := validRead()
+	bgPacket := base.Packet
+	bgPacket.Serial = 99
+	bgPacket.Cookie = 999
+
+	// Simulate softirq terminal(skb, NS_TERMINAL_FREE) on the reader's CPU (bridge.c:240-266):
+	// it mutates the slot iff Control.Armed == 1.
+	softirqFree := func(live *ReaderSlot) {
+		if live.Control.Armed != 1 {
+			return
+		}
+		live.Completion.Count++
+		live.Completion.Sequence = live.Control.Sequence
+		live.Completion.Registration = live.Control.Registration
+		live.Completion.Terminal = TerminalFree
+		live.Completion.Status = bgPacket.Status
+		live.Packet = bgPacket
+	}
+
+	// 1. Old buggy ordering (copy Completion, softirq fires before copy Packet, then disarm):
+	// produces a torn snapshot with Count=1, Terminal=TerminalConsume, and the background
+	// packet's Cookie=999.
+	liveBuggy := base
+	liveBuggy.Control.Armed = 1
+	var tornSnapshot ReaderSlot
+	tornSnapshot.Control = liveBuggy.Control
+	tornSnapshot.Completion = liveBuggy.Completion
+	softirqFree(&liveBuggy)
+	tornSnapshot.Packet = liveBuggy.Packet
+	liveBuggy.Control.Armed = 0
+	// First, CheckRead rejects any snapshot taken while Armed == 1.
+	if got := CheckRead(b, r, tornSnapshot, 64, nil, 0); got.Status != ReadInvalid || !got.Rebuild {
+		t.Fatalf("undisarmed snapshot was not rejected: %+v", got)
+	}
+	// And if Armed were cleared on the torn snapshot, the torn copy would have
+	// attributed the read to bgPacket.Cookie (999) instead of 23.
+	tornDisarmed := tornSnapshot
+	tornDisarmed.Control.Armed = 0
+	if got := CheckRead(b, r, tornDisarmed, 64, nil, 0); got.Status != ReadCookie || got.Packet.Cookie != bgPacket.Cookie {
+		t.Fatalf("expected torn copy-before-disarm model to demonstrate wrong cookie %d, got %+v", bgPacket.Cookie, got)
+	}
+
+	// 2. Fixed ordering (disarm Armed=0 first, then copy) when softirq fires DURING the copy:
+	// because Armed is already 0, softirqFree is a no-op and the consumed packet (Cookie=23) is preserved.
+	liveFixedAfter := base
+	liveFixedAfter.Control.Armed = 1
+	liveFixedAfter.Control.Armed = 0
+	var snapAfter ReaderSlot
+	snapAfter.Control = liveFixedAfter.Control
+	snapAfter.Completion = liveFixedAfter.Completion
+	softirqFree(&liveFixedAfter)
+	snapAfter.Packet = liveFixedAfter.Packet
+	if got := CheckRead(b, r, snapAfter, 64, nil, 0); got.Status != ReadCookie || got.Rebuild || got.Packet.Cookie != 23 {
+		t.Fatalf("disarm-before-copy with later softirq failed: %+v", got)
+	}
+
+	// 3. Fixed ordering when softirq fires BEFORE disarm Armed=0:
+	// softirq increments Count to 2 and overwrites Terminal/Packet before the copy begins,
+	// so the disarmed copy observes Count=2 and CheckRead refuses with ReadAmbiguous.
+	liveFixedBefore := base
+	liveFixedBefore.Control.Armed = 1
+	softirqFree(&liveFixedBefore)
+	liveFixedBefore.Control.Armed = 0
+	snapBefore := liveFixedBefore
+	if got := CheckRead(b, r, snapBefore, 64, nil, 0); got.Status != ReadAmbiguous || got.Rebuild || got.Packet != (PacketRecord{}) {
+		t.Fatalf("disarm-before-copy with earlier softirq did not refuse as ReadAmbiguous: %+v", got)
+	}
+	t.Log("PROVENANCE disarm_before_copy=pass earlier_softirq=ambiguous later_softirq=ignored")
+}
+
 func TestProvenanceRejectsUnboundEvidence(t *testing.T) {
-	// Mutate each required field independently while all other evidence is valid.
+	// Mutate each required binding/ABI field independently while all other evidence is valid.
 	cases := []struct{ part, field string }{
 		{"binding", "Slot"}, {"binding", "Ifindex"}, {"binding", "NetNS"},
 		{"binding", "Registration"}, {"binding", "Epoch"}, {"binding", "Sequence"},
@@ -54,7 +125,7 @@ func TestProvenanceRejectsUnboundEvidence(t *testing.T) {
 		{"control", "Epoch"}, {"control", "Sequence"}, {"control", "Armed"},
 		{"completion", "Sequence"}, {"completion", "Registration"}, {"completion", "Status"},
 		{"packet", "ABI"}, {"packet", "Status"}, {"packet", "Epoch"},
-		{"packet", "Ifindex"}, {"packet", "NetNS"}, {"packet", "Users"},
+		{"packet", "Ifindex"}, {"packet", "NetNS"},
 		{"packet", "OwnerVersion"}, {"packet", "Identity"},
 	}
 	for _, tc := range cases {
@@ -70,12 +141,44 @@ func TestProvenanceRejectsUnboundEvidence(t *testing.T) {
 			}
 		})
 	}
-	for _, field := range []string{"Serial", "Cookie", "Length"} {
+	for _, field := range []string{"Serial", "Length", "Users"} {
 		t.Run("zero/"+field, func(t *testing.T) {
 			b, r, s := validRead()
 			reflect.ValueOf(&s.Packet).Elem().FieldByName(field).SetUint(0)
-			if got := CheckRead(b, r, s, 64, nil, 0); got.Status != ReadInvalid {
+			if got := CheckRead(b, r, s, 64, nil, 0); got.Status != ReadInvalid || !got.Rebuild || got.Packet != (PacketRecord{}) {
 				t.Fatalf("zero %s accepted: %+v", field, got)
+			}
+		})
+	}
+	// Cookie-less (Cookie == 0) and shared (Users > 1) packets are per-packet
+	// unknown outcomes (ReadUnknown, Rebuild=false), not epoch-stopping faults.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ReaderSlot)
+	}{
+		{"cookie_missing_status_zero", func(s *ReaderSlot) {
+			s.Packet.Cookie = 0
+			s.Packet.Status = 0
+			s.Completion.Status = 0
+		}},
+		{"cookie_missing_status_captured", func(s *ReaderSlot) {
+			s.Packet.Cookie = 0
+		}},
+		{"shared_users_2_status_zero", func(s *ReaderSlot) {
+			s.Packet.Users = 2
+			s.Packet.Status = 0
+			s.Completion.Status = 0
+		}},
+		{"shared_users_2_status_captured", func(s *ReaderSlot) {
+			s.Packet.Users = 2
+		}},
+	} {
+		t.Run("unknown/"+tc.name, func(t *testing.T) {
+			b, r, s := validRead()
+			tc.mutate(&s)
+			got := CheckRead(b, r, s, 64, nil, 0)
+			if got.Status != ReadUnknown || got.Rebuild || got.Packet != (PacketRecord{}) {
+				t.Fatalf("%s: got %+v, want status=%s rebuild=false empty packet", tc.name, got, ReadUnknown)
 			}
 		})
 	}

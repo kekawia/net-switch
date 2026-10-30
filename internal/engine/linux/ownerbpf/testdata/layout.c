@@ -16,7 +16,7 @@ int main(void)
     slot.control.registration = 0x1020304050607080ULL;
     slot.control.epoch = 0x1122334455667788ULL;
     slot.control.sequence = 0x8877665544332211ULL;
-    slot.control.armed = 1;
+    slot.control.armed = 0;
     slot.completion.count = 1;
     slot.completion.sequence = slot.control.sequence;
     slot.completion.registration = slot.control.registration;

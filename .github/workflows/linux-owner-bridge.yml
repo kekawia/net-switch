@@ -1,6 +1,16 @@
 name: Linux owner bridge diagnostic
 on:
   workflow_call:
+  pull_request:
+    paths:
+      - 'internal/engine/linux/ownerbpf/**'
+      - 'tests/linux/ownerproof/**'
+      - 'scripts/generate-owner-bpf.mjs'
+      - 'scripts/build-owner-floor-guest.mjs'
+      - '.github/ci/owner-provenance-contract.mjs'
+      - '.github/workflows/linux-owner-bridge.yml'
+      - 'docs/linux-owner-*.md'
+      - 'docs/linux-owner-*.json'
 permissions:
   contents: read
 jobs:

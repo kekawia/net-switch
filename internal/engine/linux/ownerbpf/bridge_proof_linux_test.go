@@ -680,7 +680,8 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	// 3c. Uninitialized AF_PACKET skb (cookie_missing) and shared-skb rejection (users != 1):
 	// First, an AF_PACKET TPACKET_V2 PACKET_TX_RING send bypasses INET cgroup egress
 	// cookie initialization, so capture observes p.cookie == 0 (state->cookie_missing > 0,
-	// p.status = 0) and CheckRead refuses the read with ReadInvalid and Rebuild=true.
+	// p.status = 0) and CheckRead refuses attribution with ReadUnknown and Rebuild=false
+	// without tearing down the epoch.
 	ethPIP := binary.BigEndian.Uint16([]byte{byte(unix.ETH_P_IP >> 8), byte(unix.ETH_P_IP & 0xff)})
 	pktFD, err := unix.Socket(unix.AF_PACKET, unix.SOCK_DGRAM, int(ethPIP))
 	if err != nil {
@@ -739,19 +740,17 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		t.Fatalf("AF_PACKET TPACKET_V2 TX_RING did not record cookie_missing on CPU %d: state=%+v", f.cpu, states[f.cpu])
 	}
 	noCookieFrames, noCookieErr := f.r.ReadBurst(f.fd, 1)
-	if !errors.Is(noCookieErr, ErrEpochRebuild) || len(noCookieFrames) != 1 || noCookieFrames[0].Decision.Status != ReadInvalid || !noCookieFrames[0].Decision.Rebuild {
-		t.Fatalf("uninitialized AF_PACKET skb (cookie == 0) was not rejected with ReadInvalid+Rebuild: err=%v frames=%+v", noCookieErr, noCookieFrames)
+	if noCookieErr != nil || f.b.stopped || len(noCookieFrames) != 1 || noCookieFrames[0].Decision.Status != ReadUnknown || noCookieFrames[0].Decision.Rebuild {
+		t.Fatalf("uninitialized AF_PACKET skb (cookie == 0) was not classified as ReadUnknown with Rebuild=false: err=%v stopped=%t frames=%+v", noCookieErr, f.b.stopped, noCookieFrames)
 	}
 	_ = unix.Munmap(ringMem)
 	ringMem = nil
 	_ = unix.Close(pktFD)
 	pktFD = -1
-	reloadBridgeFixture(t, f, true)
-	s, _ = bridgeSocket(t, 0)
 
 	// Next, verify shared-skb rejection (users != 1) when an skb has users == 2 at capture
 	// (mode 64): capture increments state->shared and sets p.status = 0, and CheckRead
-	// refuses the read with ReadInvalid and Rebuild=true.
+	// refuses attribution with ReadUnknown and Rebuild=false in the same live epoch.
 	sharedCtl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 64}
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), sharedCtl, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
@@ -765,11 +764,12 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		t.Fatalf("shared-skb fault control did not record shared skb (users != 1) on CPU %d: state=%+v", f.cpu, states[f.cpu])
 	}
 	sharedFrames, sharedErr := f.r.ReadBurst(f.fd, 1)
-	if !errors.Is(sharedErr, ErrEpochRebuild) || len(sharedFrames) != 1 || sharedFrames[0].Decision.Status != ReadInvalid || !sharedFrames[0].Decision.Rebuild {
-		t.Fatalf("shared skb (users != 1) was not rejected with ReadInvalid+Rebuild: err=%v frames=%+v", sharedErr, sharedFrames)
+	if sharedErr != nil || f.b.stopped || len(sharedFrames) != 1 || sharedFrames[0].Decision.Status != ReadUnknown || sharedFrames[0].Decision.Rebuild {
+		t.Fatalf("shared skb (users != 1) was not classified as ReadUnknown with Rebuild=false: err=%v stopped=%t frames=%+v", sharedErr, f.b.stopped, sharedFrames)
 	}
-	reloadBridgeFixture(t, f, true)
-	s, _ = bridgeSocket(t, 0)
+	if err := f.b.Collection.Maps["faults"].Update(uint32(0), BridgeFault{}, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
 
 	// 4. Publication suppression (mode 2) on a multi-packet burst (4 datagrams):
 	// retires all dequeued packet records while refusing the whole 4-packet burst,

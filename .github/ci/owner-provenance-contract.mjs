@@ -2,6 +2,7 @@
 import { spawnSync } from 'node:child_process';
 const expected = new Set([
   'TestProvenanceReadDecision',
+  'TestProvenanceDisarmBeforeCopy',
   'TestProvenanceRejectsUnboundEvidence',
   'TestProvenanceTerminalAndHealth',
   'TestProvenanceSizing',

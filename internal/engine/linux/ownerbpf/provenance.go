@@ -119,6 +119,7 @@ type ReadStatus string
 
 const (
 	ReadCookie     ReadStatus = "packet_cookie"
+	ReadUnknown    ReadStatus = "unknown_packet"
 	ReadNoData     ReadStatus = "no_data"
 	ReadMissing    ReadStatus = "delivered_without_record"
 	ReadAmbiguous  ReadStatus = "ambiguous_terminal"
@@ -135,10 +136,11 @@ type ReadDecision struct {
 	Packet  PacketRecord
 }
 
-// CheckRead validates an already-copied slot after the synchronous read on its
-// registered thread. n/error are the actual syscall outcome. epochFaults must
-// be sampled before acceptance; the pump must sample it again next iteration.
-// No packet bytes, tuple, scanner answer, or arrival position enter this join.
+// CheckRead validates an already-disarmed, already-copied slot after the
+// synchronous read on its registered thread. n/error are the actual syscall
+// outcome. epochFaults must be sampled before acceptance; the pump must sample
+// it again next iteration. No packet bytes, tuple, scanner answer, or arrival
+// position enter this join.
 func CheckRead(b ReadBinding, r ReaderRegistration, s ReaderSlot, n int, readErr error, epochFaults uint64) ReadDecision {
 	refuse := func(status ReadStatus, rebuild bool) ReadDecision {
 		return ReadDecision{Status: status, Rebuild: rebuild}
@@ -164,13 +166,22 @@ func CheckRead(b ReadBinding, r ReaderRegistration, s ReaderSlot, n int, readErr
 		r.Flags != ReaderStamped || r.StartBoottime == 0 || r.StampGuard != 0 ||
 		c.ABI != ProvenanceABI || c.Reserved != 0 || c.Padding != [24]byte{} ||
 		c.Registration != b.Registration || c.Epoch != b.Epoch ||
-		c.Sequence != b.Sequence || c.Armed != 1 ||
+		c.Sequence != b.Sequence || c.Armed != 0 ||
 		done.Sequence != b.Sequence || done.Registration != b.Registration ||
-		done.Status != PacketCaptured || done.Padding != [32]byte{} ||
-		p.ABI != ProvenanceABI || p.Status != PacketCaptured || p.Epoch != b.Epoch ||
+		done.Padding != [32]byte{} ||
+		p.ABI != ProvenanceABI || p.Epoch != b.Epoch ||
 		p.Ifindex != b.Ifindex || p.NetNS != b.NetNS ||
-		p.Serial == 0 || p.Cookie == 0 || p.Length == 0 || p.Users != 1 ||
+		p.Serial == 0 || p.Length == 0 || p.Users == 0 ||
 		p.OwnerVersion != 0 || p.Identity != 0 || p.Reserved != [56]byte{} {
+		return refuse(ReadInvalid, true)
+	}
+	if p.Cookie == 0 || p.Users != 1 {
+		if (p.Status != 0 && p.Status != PacketCaptured) || done.Status != p.Status {
+			return refuse(ReadInvalid, true)
+		}
+		return refuse(ReadUnknown, false)
+	}
+	if done.Status != PacketCaptured || p.Status != PacketCaptured {
 		return refuse(ReadInvalid, true)
 	}
 	return ReadDecision{Status: ReadCookie, Packet: p}

@@ -34,9 +34,10 @@ func NewBurstGuard(initial [3]CounterSample) (*BurstGuard, error) {
 }
 
 // NewFloor58BurstGuard constructs a guard ONLY for the verified original upstream
-// Linux v5.8 floor guest (where bpf_prog_info is 184 bytes and lacks
-// recursion_misses, and __bpf_trace_run has no recursion guard). If the field is
-// present, or any program ID is missing/duplicated, this constructor refuses.
+// Linux v5.8 floor guest (where bpf_prog_info is 208 bytes ending at run_cnt and
+// lacks recursion_misses at offset 208..216, and __bpf_trace_run has no recursion
+// guard). If the field is present, or any program ID is missing/duplicated, this
+// constructor refuses.
 func NewFloor58BurstGuard(initial [3]CounterSample) (*BurstGuard, error) {
 	for i, c := range initial {
 		if c.Present || c.ProgramID == 0 || c.Misses != 0 {
