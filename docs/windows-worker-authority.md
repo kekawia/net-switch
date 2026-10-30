@@ -3,6 +3,61 @@
 Candidate design, 2026-10-30. Hosted qualification and independent security review
 are required before this can merge.
 
+## Current WMI and network candidate
+
+Both native-services jobs on 2c3b4a9 (123944520917 and 123944520716) reached
+ExecQuery and returned WBEM_E_ACCESS_DENIED, 0x80041003. This is distinct from
+the earlier loader failure. The class returns per-template dynamic and auto-reuse
+ranges, including inherited nulls. Searches did not establish a documented
+GetDynamicPortRange API or registry mapping preserving this entire result.
+[MSFT_NetTCPSetting](https://learn.microsoft.com/en-us/windows/win32/fwp/wmi/nettcpipprov/msft-nettcpsetting)
+is the documented source. Do not substitute a global range and claim parity.
+
+[Microsoft's namespace-security documentation](https://learn.microsoft.com/en-us/windows/win32/wmisdk/access-to-wmi-namespaces)
+describes token/namespace ACL checks, default Authenticated Users membership and
+Enable Account read permission. The candidate adds Authenticated Users to the
+restricting set for tcp-port-configuration only. It retains SYSTEM/admin
+deny-only, stripped privileges and Medium integrity. This must pass the native
+provider oracle without changing any namespace ACL or restoring HKLM writes.
+
+Chosen network mechanism: two WFP ALE_AUTH_CONNECT filters per read worker,
+covering IPv4 and IPv6, installed before worker execution. Each matches the
+executable plus a token descriptor containing a deny ACE for a fresh worker SID.
+The descriptor's failed MATCH_FILTER check is matched with NOT_EQUAL; Control,
+probes and other workers must continue to pass the descriptor. That matching
+behavior is a **hosted proof obligation**, not yet a successful result.
+[Microsoft's application/user filtering documentation](https://learn.microsoft.com/en-us/windows/win32/fwp/permitting-and-blocking-applications-and-users)
+documents the descriptor access check and application-ID condition. GUIDs and
+enum values were checked in Microsoft's WinSDK metadata headers, not guessed.
+
+Each worker has its own sublayer. Normal close waits for the child before
+removing filters. Filters are static, not dynamic: [WFP object lifetimes](https://learn.microsoft.com/en-us/windows/win32/fwp/object-management)
+say a dynamic session disappears on parent exit, which would race job cleanup.
+Static filters survive parent exit but disappear when BFE stops. **Crash-orphan
+reclamation still needs implementation and qualification before merge.** A
+static filter only targets its random token marker; it must never be generalized
+to block every process running the shared executable.
+
+[AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+without network capabilities was evaluated: it provides network isolation but
+runs at Low integrity and requires independent file/COM grants. WFP was chosen
+to preserve Medium integrity and native metadata access. If descriptor matching
+does not identify the intended restricted token reliably, this candidate must
+not ship; adding a broad executable block would also break Control and probes.
+
+The pilot adds actual bound TCP and certificate-verified HTTPS checks using a
+generated test certificate, with no machine certificate-store changes. It also
+substitutes the original main-branch token constructor into a disposable child
+while the current filter remains active. This is an in-test constructor
+mutation; it does not edit production source or constitute completed mutation
+evidence until both current-policy success and old-policy failure execute.
+
+The retained-metadata-handle test now launches an ordinary Medium adversary,
+not a product-sandbox worker. That test must acquire WRITE_DAC before hardening
+to prove quarantine protects against an already-held handle. The stronger
+worker token had prevented its attack precondition. No product exception was
+added for that fixture.
+
 ## Boundary and evidence
 
 Assume a helper is compromised after parsing untrusted OS metadata. It must not

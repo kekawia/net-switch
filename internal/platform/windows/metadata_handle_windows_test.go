@@ -12,7 +12,6 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/platform/worker"
 	"golang.org/x/sys/windows"
 )
 
@@ -37,6 +36,7 @@ func TestMain(m *testing.M) {
 		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 			os.Exit(2)
 		}
+		installWorkerTestRoots()
 		os.Exit(Run(os.Args[2:]))
 	}
 	os.Exit(m.Run())
@@ -207,7 +207,7 @@ func TestExistingMetadataHandleCannotUndoMachineProtection(t *testing.T) {
 			setProofSecurity(t, target, user.User.Sid.String(), rights)
 			before := fileSecurity(t, target)
 			rootBefore := fileSecurity(t, root)
-			p, err := worker.Start(exe, []string{"worker", "acl-proof"})
+			p, err := startMetadataAttacker(exe)
 			if err != nil {
 				t.Fatal(err)
 			}

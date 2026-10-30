@@ -1,8 +1,10 @@
 package worker
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,6 +22,8 @@ type process struct {
 	wait          sync.Once
 	waitErr       error
 	close         sync.Once
+	fence         *networkFence
+	closeErr      error
 }
 
 func (p *process) Input() io.WriteCloser { return p.input }
@@ -51,8 +55,14 @@ func (p *process) Close() error {
 		p.errors.Close()
 		windows.CloseHandle(p.handle)
 		windows.CloseHandle(p.job)
+		if p.fence != nil {
+			p.closeErr = p.fence.close()
+			if p.closeErr != nil {
+				log.Printf("worker network filter cleanup: %v", p.closeErr)
+			}
+		}
 	})
-	return nil
+	return p.closeErr
 }
 
 const workerUILimits = windows.JOB_OBJECT_UILIMIT_DESKTOP | windows.JOB_OBJECT_UILIMIT_DISPLAYSETTINGS |
@@ -75,10 +85,39 @@ func Start(executable string, args []string) (Process, error) {
 // The explicit startup inputs let hosted tests distinguish loader, desktop and
 // job failures. Production callers always go through Start's fixed policy.
 func start(executable string, args []string, desktop *uint16, creationFlags, uiLimits uint32) (Process, error) {
-	return startWithToken(executable, args, desktop, creationFlags, uiLimits, func(token windows.Token) (windows.Token, error) {
-		mode := workerMode(args)
-		return workerTokenForMode(token, adminWorker(args), mode == "probe" || mode == "line-check")
+	if !filepath.IsAbs(executable) || len(args) < 2 || args[0] != "worker" {
+		return nil, fmt.Errorf("worker launcher requires its absolute executable and a worker mode")
+	}
+	mode := workerMode(args)
+	admin := adminWorker(args)
+	network := mode == "probe" || mode == "line-check"
+	var fence *networkFence
+	var marker string
+	var err error
+	if !admin && !network {
+		marker, err = workerNetworkMarker()
+		if err != nil {
+			return nil, err
+		}
+		fence, err = fenceWorkerNetwork(executable, marker)
+		if err != nil {
+			return nil, fmt.Errorf("block %s worker network: %w", mode, err)
+		}
+	}
+	p, err := startWithToken(executable, args, desktop, creationFlags, uiLimits, func(token windows.Token) (windows.Token, error) {
+		if admin {
+			return workerTokenForMode(token, true, false)
+		}
+		return workerTokenWithSIDs(token, false, workerReadSIDs(mode, marker))
 	})
+	if err != nil {
+		if fence != nil {
+			err = errors.Join(err, fence.close())
+		}
+		return nil, err
+	}
+	p.(*process).fence = fence
+	return p, nil
 }
 
 // Token injection is private to this package's hosted compatibility tests.
@@ -213,6 +252,20 @@ func startWithToken(executable string, args []string, desktop *uint16, creationF
 
 func workerToken(token windows.Token, administrative bool) (windows.Token, error) {
 	return workerTokenForMode(token, administrative, false)
+}
+
+func workerReadSIDs(mode, marker string) []string {
+	sids := []string{"S-1-5-12"}
+	if mode == "probe" || mode == "line-check" {
+		sids = append(sids, "S-1-5-32-545")
+	}
+	if mode == "tcp-port-configuration" {
+		sids = append(sids, "S-1-5-11")
+	}
+	if marker != "" {
+		sids = append(sids, marker)
+	}
+	return sids
 }
 
 func workerTokenForMode(token windows.Token, administrative, network bool) (windows.Token, error) {

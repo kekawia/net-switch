@@ -51,6 +51,19 @@ func TestWorkerNativeReads(t *testing.T) {
 				t.Fatalf("missing native result: %s %v", b, err)
 			}
 			t.Logf("native result: %s", b)
+			if operation == "app-info" || operation == "installed-apps" {
+				// These APIs intentionally omit unavailable metadata instead of
+				// returning an error. Compare with the unsandboxed native call so
+				// an empty list or missing icon cannot masquerade as compatibility.
+				baseline, err := Execute(operation, map[string]any{"paths": []any{exe}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, err := json.Marshal(baseline)
+				if err != nil || string(want) != string(b) {
+					t.Fatalf("native metadata mismatch: worker=%s parent=%s error=%v", b, want, err)
+				}
+			}
 		})
 	}
 	for _, mode := range []string{"meters", "network", "outside", "policy"} {
