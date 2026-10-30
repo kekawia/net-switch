@@ -353,18 +353,21 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 	if e := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); e != nil {
 		t.Fatal(e)
 	}
-	var captured, dropped uint64
+	var captured, dropped, deleted uint64
+	activeCPUs := 0
 	for _, s := range states {
 		captured += s.Captures
 		dropped += s.Frees
-	}
-	if captured != 1200 || dropped == 0 {
-		t.Fatalf("drop precondition captured=%d dropped=%d", captured, dropped)
-	}
-	for i := range senders {
-		if i >= len(states) || states[i].Captures != 600 || states[i].Frees == 0 {
-			t.Fatalf("kernel per-CPU concurrency/drop evidence missing on cpu %d: %+v", i, states)
+		deleted += s.Deleted
+		if s.Captures > 0 || s.Frees > 0 {
+			if s.Captures == 0 || s.Frees == 0 || s.Deleted != s.Frees {
+				t.Fatalf("active CPU missing concurrent captures/frees/deletes: %+v", states)
+			}
+			activeCPUs++
 		}
+	}
+	if captured != 1200 || dropped == 0 || deleted != dropped || activeCPUs < senders {
+		t.Fatalf("drop precondition captured=%d dropped=%d deleted=%d active_cpus=%d states=%+v", captured, dropped, deleted, activeCPUs, states)
 	}
 	afterLink, err := netlink.LinkByName("nsbridge0")
 	if err != nil || afterLink.Attrs().Statistics == nil {
@@ -375,6 +378,7 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 		t.Fatalf("independent kernel drop counter=%d BPF frees=%d", kernelDrops, dropped)
 	}
 	delivered := 0
+	var deliveredBySender [senders]int
 	var seen [senders][600]bool
 	for {
 		frames, e := f.r.ReadBurst(f.fd, BurstLimit)
@@ -397,7 +401,13 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 				t.Fatal("invalid or duplicate independently labelled datagram", i, sequence)
 			}
 			seen[i][sequence] = true
+			deliveredBySender[i]++
 			delivered++
+		}
+	}
+	for i := range senders {
+		if deliveredBySender[i] == 0 || deliveredBySender[i] >= 600 {
+			t.Fatalf("sender %d did not experience both delivery and drops: delivered=%d/600 (all=%v)", i, deliveredBySender[i], deliveredBySender)
 		}
 	}
 	// A fresh packet AFTER observed drops defeats a capture-cookie FIFO which
@@ -411,7 +421,8 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 	if uint64(delivered)+dropped != captured {
 		t.Fatalf("independent sent/read/drop accounting: read=%d drop=%d sent=%d", delivered, dropped, captured)
 	}
-	t.Logf("P1_DROP sent=1200 read=%d dropped=%d kernel_dropped=%d unique_payloads=true post_drop_cookie=correct", delivered, dropped, kernelDrops)
+	t.Logf("P1_DROP sent=1200 read=%d dropped=%d kernel_dropped=%d active_cpus=%d cpu0_captures=%d cpu0_frees=%d cpu1_captures=%d cpu1_frees=%d sender0_read=%d sender0_dropped=%d sender1_read=%d sender1_dropped=%d unique_payloads=true post_drop_cookie=correct",
+		delivered, dropped, kernelDrops, activeCPUs, states[0].Captures, states[0].Frees, states[1].Captures, states[1].Frees, deliveredBySender[0], 600-deliveredBySender[0], deliveredBySender[1], 600-deliveredBySender[1])
 }
 
 func TestBridgePointerReuse(t *testing.T) {
