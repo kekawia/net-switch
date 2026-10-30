@@ -374,9 +374,22 @@ export async function capacity({ server, harness, directory, line, stopHeld }) {
     assert.equal(progress.wrongLine.unknownTCPAdmissions, 0, 'A capacity SYN lost its owner and left on the default line');
     assert(refusedStats.socketResources.exhaustions >= 128, 'Native bind failures were not counted');
     assert(refusedStats.tcpDialFailed - limitStats.tcpDialFailed >= 128, 'Refused app flows were not counted by the engine');
-    const health = await capacityHealthProbe(server, line, target);
-    assert.equal(health.kind, 'quick', 'Capacity health must exercise TCP allocation only');
-    assert.equal(health.outcome, 'engineUnavailable', 'Local port exhaustion was treated as line failure');
+    // The tail above proves the OS pool was exhausted only for that moment:
+    // refused ordinary connects release their app-side ports and unrelated
+    // sockets close, so a single quick probe can find a free port and succeed
+    // (x64 job 123892731903 got 'ok' from a correct engine). The guarantee is
+    // that a local allocation failure is never a line failure, so probe a
+    // small batch: every probe must stay off lineFailed, and at least one must
+    // still meet the exhausted pool as engineUnavailable.
+    const healthProbes = await Promise.all(Array.from({ length: 8 },
+      () => capacityHealthProbe(server, line, target)));
+    progress.healthProbes = healthProbes.map(({ kind, outcome, error }) => ({ kind, outcome, error: error ?? null }));
+    assert(healthProbes.every((health) => health.kind === 'quick'),
+      `Capacity health must exercise TCP allocation only: ${JSON.stringify(progress.healthProbes)}`);
+    assert(healthProbes.every((health) => health.outcome !== 'lineFailed'),
+      `Local port exhaustion was treated as line failure: ${JSON.stringify(progress.healthProbes)}`);
+    assert(healthProbes.some((health) => health.outcome === 'engineUnavailable'),
+      `Harness condition: the OS port pool was not exhausted at probe time, so engineUnavailable is unproven: ${JSON.stringify(progress.healthProbes)}`);
     const portStats = await until(async () => {
       const stats = await engineStats();
       udpHold.checkStats(stats);
