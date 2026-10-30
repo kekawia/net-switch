@@ -27,8 +27,7 @@ type imageOwner struct {
 	Created uint64
 }
 type imagePolicy struct {
-	SubLayer windows.GUID
-	Filters  [2]windows.GUID
+	Filters [2]windows.GUID
 }
 type workerImage struct {
 	directory, executable string
@@ -79,6 +78,9 @@ func newWorkerImage(source string) (_ *workerImage, err error) {
 	if err != nil {
 		return nil, err
 	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
 	var random [16]byte
 	if _, err = rand.Read(random[:]); err != nil {
 		return nil, err
@@ -105,9 +107,6 @@ func newWorkerImage(source string) (_ *workerImage, err error) {
 			err = errors.Join(err, w.removeFiles())
 		}
 	}()
-	if w.policy.SubLayer, err = windows.GenerateGUID(); err != nil {
-		return nil, err
-	}
 	for i := range w.policy.Filters {
 		if w.policy.Filters[i], err = windows.GenerateGUID(); err != nil {
 			return nil, err
@@ -255,6 +254,9 @@ func recoverWorkerImages() error {
 	root, err := imageRoot()
 	if err != nil {
 		return err
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {

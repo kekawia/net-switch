@@ -339,7 +339,10 @@ func workerReadSIDs(mode string) []string {
 	if mode == "probe" || mode == "line-check" {
 		sids = append(sids, "S-1-5-32-545")
 	}
-	if mode == "tcp-port-configuration" {
+	if mode == "line-check" {
+		sids = append(sids, "S-1-1-0")
+	}
+	if mode == "tcp-port-configuration" || mode == "autostart" {
 		sids = append(sids, "S-1-5-11")
 	}
 	return sids

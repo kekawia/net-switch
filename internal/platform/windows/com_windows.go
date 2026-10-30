@@ -55,7 +55,12 @@ func (o *comObject) release() {
 func comThread(run func() (any, error)) (any, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
-	r, _, _ := ole32.NewProc("CoInitializeEx").Call(0, 2)
+	// Initialize the multi-threaded apartment (COINIT_MULTITHREADED = 0).
+	// COINIT_APARTMENTTHREADED (2) registers OleMainThreadWndClass and creates
+	// a message-only window on the process window station/desktop, which
+	// Session 0's Service-0x0-3e7$\Default DACL denies to WRITE_RESTRICTED
+	// read workers under SYSTEM (0x80070005).
+	r, _, _ := ole32.NewProc("CoInitializeEx").Call(0, 0)
 	if err := hresult(r); err != nil {
 		return nil, err
 	}

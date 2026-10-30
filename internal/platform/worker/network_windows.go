@@ -45,18 +45,9 @@ type networkFilter struct {
 	id              uint64
 	effective       networkValue
 }
-type networkSubLayer struct {
-	key      windows.GUID
-	display  networkDisplay
-	flags    uint32
-	provider *windows.GUID
-	data     networkBlob
-	weight   uint16
-}
 type networkFence struct {
-	engine   windows.Handle
-	filters  []uint64
-	sublayer *windows.GUID
+	engine  windows.Handle
+	filters []uint64
 }
 
 var networkDLL = windows.NewLazySystemDLL("fwpuclnt.dll")
@@ -81,17 +72,11 @@ func (f *networkFence) close() error {
 			errs = append(errs, err)
 		}
 	}
-	if f.sublayer != nil {
-		if err := networkCall("FwpmSubLayerDeleteByKey0", uintptr(f.engine), uintptr(unsafe.Pointer(f.sublayer))); err != nil && !errors.Is(err, windows.Errno(windows.FWP_E_SUBLAYER_NOT_FOUND)) {
-			errs = append(errs, err)
-		}
-	}
 	if f.engine != 0 {
 		errs = append(errs, networkCall("FwpmEngineClose0", uintptr(f.engine)))
 	}
 	f.engine = 0
 	f.filters = nil
-	f.sublayer = nil
 	return errors.Join(errs...)
 }
 
@@ -126,7 +111,6 @@ func fenceWorkerNetwork(w *workerImage) (_ *networkFence, err error) {
 	if err != nil {
 		return nil, err
 	}
-	sublayer := w.policy.SubLayer
 	name, _ := windows.UTF16PtrFromString(networkFenceName)
 	conditions := [1]networkCondition{
 		{field: appID, value: networkValue{kind: 12, value: uintptr(unsafe.Pointer(app))}},
@@ -140,20 +124,14 @@ func fenceWorkerNetwork(w *workerImage) (_ *networkFence, err error) {
 		if err != nil {
 			_ = networkCall("FwpmTransactionAbort0", uintptr(f.engine))
 			f.filters = nil
-			f.sublayer = nil
 		}
 	}()
-	sub := networkSubLayer{key: sublayer, display: networkDisplay{name: name}, data: data, weight: 65535}
-	if err := networkCall("FwpmSubLayerAdd0", uintptr(f.engine), uintptr(unsafe.Pointer(&sub)), 0); err != nil {
-		return nil, err
-	}
-	f.sublayer = &sublayer
 	for i, text := range []string{"{c38d57d1-05a7-4c33-904f-7fbceee60e82}", "{4a72393b-319f-44bc-84c3-ba54dcb3b6b4}"} {
 		layer, parseErr := windows.GUIDFromString(text)
 		if parseErr != nil {
 			return nil, parseErr
 		}
-		filter := networkFilter{key: w.policy.Filters[i], display: networkDisplay{name: name}, data: data, layer: layer, sublayer: sublayer,
+		filter := networkFilter{key: w.policy.Filters[i], display: networkDisplay{name: name}, data: data, layer: layer,
 			weight: networkValue{kind: 1, value: 15}, count: 1, conditions: &conditions[0], action: networkAction{kind: 0x1001}}
 		var id uint64
 		if err := networkCall("FwpmFilterAdd0", uintptr(f.engine), uintptr(unsafe.Pointer(&filter)), 0, uintptr(unsafe.Pointer(&id))); err != nil {
@@ -164,6 +142,7 @@ func fenceWorkerNetwork(w *workerImage) (_ *networkFence, err error) {
 	if err := networkCall("FwpmTransactionCommit0", uintptr(f.engine)); err != nil {
 		return nil, err
 	}
+	runtime.KeepAlive(name)
 	runtime.KeepAlive(tag)
 	runtime.KeepAlive(conditions)
 	return f, nil
@@ -180,7 +159,7 @@ func sameFenceTag(blob networkBlob, w *workerImage) bool {
 // another provider's object merely because a record contains its GUID.
 func removeImageFence(w *workerImage) (err error) {
 	zero := windows.GUID{}
-	if w.policy.SubLayer == zero || w.policy.Filters[0] == zero || w.policy.Filters[1] == zero || w.policy.Filters[0] == w.policy.Filters[1] {
+	if w.policy.Filters[0] == zero || w.policy.Filters[1] == zero || w.policy.Filters[0] == w.policy.Filters[1] {
 		return fmt.Errorf("invalid worker network policy keys")
 	}
 	var engine windows.Handle
@@ -188,18 +167,6 @@ func removeImageFence(w *workerImage) (err error) {
 		return err
 	}
 	defer func() { err = errors.Join(err, networkCall("FwpmEngineClose0", uintptr(engine))) }()
-	var sub *networkSubLayer
-	err = networkCall("FwpmSubLayerGetByKey0", uintptr(engine), uintptr(unsafe.Pointer(&w.policy.SubLayer)), uintptr(unsafe.Pointer(&sub)))
-	if err != nil && !errors.Is(err, windows.Errno(windows.FWP_E_SUBLAYER_NOT_FOUND)) {
-		return err
-	}
-	if sub != nil {
-		valid := sub.key == w.policy.SubLayer && sub.flags == 0 && sub.weight == 65535 && sameFenceTag(sub.data, w) && windows.UTF16PtrToString(sub.display.name) == networkFenceName
-		networkDLL.NewProc("FwpmFreeMemory0").Call(uintptr(unsafe.Pointer(&sub)))
-		if !valid {
-			return fmt.Errorf("worker sublayer ownership mismatch")
-		}
-	}
 	for i := range w.policy.Filters {
 		var filter *networkFilter
 		err = networkCall("FwpmFilterGetByKey0", uintptr(engine), uintptr(unsafe.Pointer(&w.policy.Filters[i])), uintptr(unsafe.Pointer(&filter)))
@@ -209,7 +176,7 @@ func removeImageFence(w *workerImage) (err error) {
 		if err != nil {
 			return err
 		}
-		valid := filter.key == w.policy.Filters[i] && filter.sublayer == w.policy.SubLayer && filter.flags == 0 && filter.action.kind == 0x1001 && sameFenceTag(filter.data, w) && windows.UTF16PtrToString(filter.display.name) == networkFenceName
+		valid := filter.key == w.policy.Filters[i] && filter.action.kind == 0x1001 && sameFenceTag(filter.data, w) && windows.UTF16PtrToString(filter.display.name) == networkFenceName
 		networkDLL.NewProc("FwpmFreeMemory0").Call(uintptr(unsafe.Pointer(&filter)))
 		if !valid {
 			return fmt.Errorf("worker filter ownership mismatch")
@@ -218,9 +185,5 @@ func removeImageFence(w *workerImage) (err error) {
 			return err
 		}
 	}
-	err = networkCall("FwpmSubLayerDeleteByKey0", uintptr(engine), uintptr(unsafe.Pointer(&w.policy.SubLayer)))
-	if errors.Is(err, windows.Errno(windows.FWP_E_SUBLAYER_NOT_FOUND)) {
-		err = nil
-	}
-	return err
+	return nil
 }

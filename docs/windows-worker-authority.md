@@ -45,8 +45,14 @@ Non-administrative workers keep their normal user identity for native reads,
 disable privileged group grants, remove privileges except SeChangeNotifyPrivilege,
 and run at Medium integrity. WRITE_RESTRICTED adds an independent restricting-SID
 check for writes. The restricting set never contains SYSTEM or Administrators:
-it contains RESTRICTED, plus Users for probes, and Authenticated Users for the
-TCP-settings query. Retaining SYSTEM in the normal identity is now compared
+it contains RESTRICTED, plus Users for probes, Users and Everyone for line-check
+(because Windows' `crypt32.dll` certificate chain verifier creates synchronization
+objects in `\BaseNamedObjects`, whose DACL grants `DIRECTORY_CREATE_OBJECT` to
+Everyone rather than RESTRICTED or Users), and Authenticated Users for the
+TCP-settings and autostart queries (because `Schedule.Service` folder lookup checks
+`C:\Windows\System32\Tasks`, whose DACL grants write access to Authenticated Users
+rather than RESTRICTED while Medium integrity and folder ACLs still deny modifying
+existing tasks). Retaining SYSTEM in the normal identity is now compared
 against SYSTEM deny-only in the hosted diagnostic; privileged operations must
 still be denied by the real tests, including registry WRITE_DAC.
 
@@ -97,11 +103,16 @@ links. Source binaries and machine-store ACLs are never modified. The copy cost
 must be measured in qualification before merge.
 
 [FwpmGetAppIdFromFileName](https://learn.microsoft.com/en-us/windows/win32/api/fwpmu/nf-fwpmu-fwpmgetappidfromfilename0)
-provides the application's identifier.
+provides the application's identifier after canonicalizing any 8.3 short-path
+components (`EvalSymlinks`).
 [Microsoft's application filtering example](https://learn.microsoft.com/en-us/windows/win32/fwp/permitting-and-blocking-applications-and-users)
 documents ALE_APP_ID matching. Each private image gets IPv4 and IPv6
-ALE_AUTH_CONNECT block filters in its own sublayer before its suspended process
-is resumed. No broad rule is added for the shared Control/probe executable.
+ALE_AUTH_CONNECT block filters in the default universal sublayer (weight 15) before
+its suspended process is resumed, avoiding sublayer-weight collisions with the
+routing engine's custom sublayer. No broad rule is added for the shared
+Control/probe executable. COM read workers initialize `COINIT_MULTITHREADED`
+and query WMI through `CLSID_WbemLocator` (`ThreadingModel=Both`) so they never
+register STA window classes on Session 0's restricted service window station.
 
 [AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
 without network capabilities was considered. It changes integrity to Low and

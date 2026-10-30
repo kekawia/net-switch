@@ -21,8 +21,9 @@ func TestWorkerRestrictingSIDs(t *testing.T) {
 	}{
 		{"read", false, false, []string{"S-1-5-12"}},
 		{"probe", false, true, []string{"S-1-5-12", "S-1-5-32-545"}},
-		{"line-check", false, true, []string{"S-1-5-12", "S-1-5-32-545"}},
+		{"line-check", false, true, []string{"S-1-5-12", "S-1-5-32-545", "S-1-1-0"}},
 		{"tcp-port-configuration", false, false, []string{"S-1-5-12", "S-1-5-11"}},
+		{"autostart", false, false, []string{"S-1-5-12", "S-1-5-11"}},
 		{"outside", true, false, nil},
 	} {
 		t.Run(test.name, func(t *testing.T) {
