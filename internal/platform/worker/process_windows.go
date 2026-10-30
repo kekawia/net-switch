@@ -218,9 +218,9 @@ func workerToken(token windows.Token, administrative bool) (windows.Token, error
 func workerTokenForMode(token windows.Token, administrative, network bool) (windows.Token, error) {
 	var sids []string
 	if !administrative {
-		sids = []string{"S-1-0-0"}
+		sids = []string{"S-1-5-12"}
 		if network {
-			sids = []string{"S-1-5-32-545"}
+			sids = append(sids, "S-1-5-32-545")
 		}
 	}
 	return workerTokenWithSIDs(token, administrative, sids)
@@ -260,8 +260,9 @@ func workerTokenWithSIDs(token windows.Token, administrative bool, sids []string
 	var restrictions []windows.SIDAndAttributes
 	if !administrative {
 		// A second write access check must succeed independently of SYSTEM's
-		// user SID. Read workers receive no write grants; probes may use the
-		// ordinary Users grants for sockets, never the SYSTEM/admin grants.
+		// user SID. RESTRICTED is needed by the native DLL environment; probes
+		// also retain ordinary Users grants. This check does not block sockets:
+		// the hosted outbound test deliberately remains a separate requirement.
 		if len(sids) == 0 {
 			return 0, fmt.Errorf("read worker requires restricting SIDs")
 		}

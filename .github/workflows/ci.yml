@@ -162,7 +162,10 @@ jobs:
           go-version-file: go.mod
           cache: false
       - name: Native migration, uninstall and token regressions with race checks
-        run: go test -race -v -count=1 ./internal/platform/windows ./internal/platform/worker
+        run: |
+          $race = @()
+          if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { $race = @('-race') }
+          go test @race -v -count=1 ./internal/platform/windows ./internal/platform/worker
       - name: Worker isolation as SYSTEM
         if: always()
         shell: pwsh
@@ -174,15 +177,21 @@ jobs:
           Invoke-WebRequest https://download.sysinternals.com/files/PSTools.zip -OutFile "$env:RUNNER_TEMP/PSTools.zip"
           Expand-Archive "$env:RUNNER_TEMP/PSTools.zip" "$env:RUNNER_TEMP/PSTools"
           $launcher = Join-Path $env:RUNNER_TEMP 'PSTools/PsExec64.exe'
-          if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { $launcher = Join-Path $env:RUNNER_TEMP 'PSTools/PsExec64a.exe' }
           $signature = Get-AuthenticodeSignature $launcher
           if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw 'Untrusted SYSTEM test launcher' }
           $binary = (Join-Path $env:RUNNER_TEMP 'worker.test.exe').Replace("'", "''")
           $platform = (Join-Path $env:RUNNER_TEMP 'platform.test.exe').Replace("'", "''")
           $command = "`$env:GITHUB_ACTIONS='true'; `$env:RUNNER_ENVIRONMENT='github-hosted'; `$env:NETSWITCH_EXPECT_SYSTEM='1'; & '$binary' '-test.v' '-test.timeout=3m' '-test.run=^(TestWorkerDLLCompatibility|TestReadWorkerCannotWriteControlHKLMOrTCP|TestWorkerRestrictingSIDs)$'; `$workerResult=`$LASTEXITCODE; & '$platform' '-test.v' '-test.timeout=6m' '-test.run=^TestWorkerNativeReads$'; if (`$workerResult -ne 0 -or `$LASTEXITCODE -ne 0) { exit 1 }"
           $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
-          & $launcher -accepteula -nobanner -s (Get-Command pwsh).Source -NoProfile -EncodedCommand $encoded
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # PsExec's console session is needed to relay the child's complete
+          # stdout; the token identity is still SYSTEM and asserted by the tests.
+          $proof = & $launcher -accepteula -nobanner -s -i 0 (Get-Command pwsh).Source -NoProfile -EncodedCommand $encoded 2>&1
+          $result = $LASTEXITCODE
+          $proof | Write-Output
+          if ($result -ne 0) { exit $result }
+          foreach ($test in @('TestWorkerDLLCompatibility', 'TestReadWorkerCannotWriteControlHKLMOrTCP', 'TestWorkerRestrictingSIDs', 'TestWorkerNativeReads')) {
+            if (-not ($proof -match ('^--- PASS: ' + [regex]::Escape($test) + ' '))) { throw "Missing SYSTEM PASS: $test" }
+          }
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -80,7 +81,11 @@ func TestWorkerDLLCompatibility(t *testing.T) {
 		t.Run(variant.name, func(t *testing.T) {
 			p, err := startWithToken(exe, []string{"worker", "app-info"}, nil, windows.DETACHED_PROCESS, workerUILimits,
 				func(source windows.Token) (windows.Token, error) {
-					return workerTokenWithSIDs(source, false, variant.sids)
+					restricted, err := workerTokenWithSIDs(source, false, variant.sids)
+					if err == nil {
+						logWorkerDesktopAccess(t, restricted)
+					}
+					return restricted, err
 				})
 			if err != nil {
 				t.Errorf("start: %v", err)
@@ -111,5 +116,44 @@ func TestWorkerDLLCompatibility(t *testing.T) {
 			// has no live victim tuple. The separate isolation test supplies one.
 			fmt.Printf("WORKER_DLL_CANDIDATE %s %s\n", variant.name, b)
 		})
+	}
+}
+
+// Inspect the real desktop ACL; do not infer a denied object from error 1114.
+func logWorkerDesktopAccess(t *testing.T, token windows.Token) {
+	t.Helper()
+	var impersonation windows.Token
+	if err := windows.DuplicateTokenEx(token, windows.TOKEN_QUERY, nil, windows.SecurityIdentification, windows.TokenImpersonation, &impersonation); err != nil {
+		t.Fatal(err)
+	}
+	defer impersonation.Close()
+	user32 := windows.NewLazySystemDLL("user32.dll")
+	station, _, _ := user32.NewProc("GetProcessWindowStation").Call()
+	desktop, _, _ := user32.NewProc("GetThreadDesktop").Call(uintptr(windows.GetCurrentThreadId()))
+	for _, object := range []struct {
+		name   string
+		handle uintptr
+		rights []uint32
+	}{
+		{"window-station", station, []uint32{0x2, 0x8, 0x20}},
+		{"desktop", desktop, []uint32{0x1, 0x2, 0x80}},
+	} {
+		sd, err := windows.GetSecurityInfo(windows.Handle(object.handle), windows.SE_WINDOW_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			t.Errorf("%s descriptor: %v", object.name, err)
+			continue
+		}
+		t.Logf("%s SDDL=%s", object.name, sd.String())
+		for _, access := range object.rights {
+			mapping := [4]uint32{0x20000, 0x20000, 0x20000, 0xf0000}
+			privileges := new([64]uint64)
+			size := uint32(unsafe.Sizeof(*privileges))
+			var granted, allowed uint32
+			ok, _, callErr := windows.NewLazySystemDLL("advapi32.dll").NewProc("AccessCheck").Call(uintptr(unsafe.Pointer(sd)), uintptr(impersonation), uintptr(access), uintptr(unsafe.Pointer(&mapping[0])), uintptr(unsafe.Pointer(privileges)), uintptr(unsafe.Pointer(&size)), uintptr(unsafe.Pointer(&granted)), uintptr(unsafe.Pointer(&allowed)))
+			t.Logf("OBJECT_ACCESS object=%s requested=%#x api=%d error=%v allowed=%d granted=%#x", object.name, access, ok, callErr, allowed, granted)
+			if ok == 0 {
+				t.Errorf("AccessCheck failed: %v", callErr)
+			}
+		}
 	}
 }

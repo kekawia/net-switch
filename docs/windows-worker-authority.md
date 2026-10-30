@@ -50,8 +50,8 @@ not weaken the expectation to any integrity label.
 
 Use CreateRestrictedToken with DISABLE_MAX_PRIVILEGE, elevated groups deny-only,
 SYSTEM user deny-only, Medium integrity, and WRITE_RESTRICTED for non-admin modes.
-Read-only workers use the Null SID as the sole restricting SID; network probes
-use Builtin Users. No SYSTEM, Administrators, Everyone or logon SID is added to
+Read-only workers use RESTRICTED as the sole restricting SID; network probes
+also include Builtin Users. No SYSTEM, Administrators, Everyone or logon SID is added to
 the restricting list. These are candidate grants, subject to hosted startup and
 functional compatibility checks. Existing explicit pipe inheritance and detached,
 suspended launch remain in place.
@@ -85,6 +85,36 @@ copied. Our read helpers still need native metadata access, which is why full
 read restrictions or Chromium's fully locked-down policy are not adopted blindly.
 
 ## Qualification still required
+
+### Results from diagnostic run 41016341189
+
+The x64 diagnostic (job 123933429628) demonstrates that RESTRICTED alone lets
+all six tested DLLs initialize. Null, Users, Everyone and write-restricted SID
+alone fail USER32 and consequently OLE32/SHELL32 initialization. Adding the logon
+SID to RESTRICTED is not necessary for this observed x64 result. The production
+candidate now includes RESTRICTED; the exact underlying object denial is still
+unproven. The next diagnostic evaluates the actual station and desktop ACLs
+against each token rather than claiming that error 1114 identifies an object.
+
+**Network isolation is not implemented by this candidate.** Every x64 variant,
+including Null, successfully opened the outbound socket. No network-denial
+assertion has been removed or relaxed. A successful DLL fix must not be reported
+as successful worker isolation. The authority table above remains the required
+contract, not a statement of achieved protection.
+
+The ARM64 pilot (123933429866) did not run the tests: -race is unsupported and
+PSTools did not contain the assumed PsExec64a.exe. The workflow now applies race
+checks only on x64 and uses the signed x64 launcher for both runners. The x64
+empty restricted-SID query exposed an allocation smaller than the Go
+TOKEN_GROUPS struct; the test now reserves at least the typed structure size.
+SYSTEM output was incomplete with the prior PsExec invocation, so the launch
+now explicitly selects session 0 with interactive I/O, as its usage documents.
+These are harness repairs, not evidence of SYSTEM qualification.
+
+The same OLE32/CLSIDFromString package-init stack appears in native-services
+ARM64 job 123933410231 and initial network scans in lifecycle jobs 123933496511
+and 123933496437. Other failures must still be checked after the loader repair.
+No shared or Linux source is changed; Linux job 123934294693 is outside scope.
 
 ### Loader failure found in the first candidate
 
