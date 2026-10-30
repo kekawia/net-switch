@@ -98,7 +98,11 @@ func fenceWorkerNetwork(w *workerImage) (_ *networkFence, err error) {
 			err = errors.Join(err, f.close())
 		}
 	}()
-	path, err := windows.UTF16PtrFromString(w.executable)
+	executable, err := filepath.EvalSymlinks(w.executable)
+	if err != nil {
+		return nil, err
+	}
+	path, err := windows.UTF16PtrFromString(executable)
 	if err != nil {
 		return nil, err
 	}
@@ -181,7 +185,7 @@ func removeImageFence(w *workerImage) (err error) {
 		if !valid {
 			return fmt.Errorf("worker filter ownership mismatch")
 		}
-		if err = networkCall("FwpmFilterDeleteByKey0", uintptr(engine), uintptr(unsafe.Pointer(&w.policy.Filters[i]))); err != nil {
+		if err = networkCall("FwpmFilterDeleteByKey0", uintptr(engine), uintptr(unsafe.Pointer(&w.policy.Filters[i]))); err != nil && !errors.Is(err, windows.Errno(windows.FWP_E_FILTER_NOT_FOUND)) {
 			return err
 		}
 	}

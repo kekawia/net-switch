@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -32,6 +33,7 @@ func TestWorkerNativeReads(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := worker.Supervisor{Executable: exe}
+	appPath := filepath.Join(os.Getenv("SystemRoot"), "System32", "notepad.exe")
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +44,7 @@ func TestWorkerNativeReads(t *testing.T) {
 		t.Run(operation, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			value, err := s.Once(ctx, operation, map[string]any{"paths": []string{exe}, "port": port})
+			value, err := s.Once(ctx, operation, map[string]any{"paths": []string{appPath}, "port": port})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -55,7 +57,7 @@ func TestWorkerNativeReads(t *testing.T) {
 				// These APIs intentionally omit unavailable metadata instead of
 				// returning an error. Compare with the unsandboxed native call so
 				// an empty list or missing icon cannot masquerade as compatibility.
-				baseline, err := Execute(operation, map[string]any{"paths": []any{exe}})
+				baseline, err := Execute(operation, map[string]any{"paths": []any{appPath}})
 				if err != nil {
 					t.Fatal(err)
 				}

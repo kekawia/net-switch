@@ -69,6 +69,7 @@ func (p *process) Close() error {
 			log.Print(p.closeErr)
 			return
 		}
+		imageRecovery.Lock()
 		if p.image != nil {
 			p.closeErr = p.image.removeExecutable()
 		}
@@ -78,6 +79,7 @@ func (p *process) Close() error {
 		if p.image != nil && p.closeErr == nil {
 			p.closeErr = p.image.removeFiles()
 		}
+		imageRecovery.Unlock()
 		if p.closeErr != nil && p.fence != nil && p.fence.engine != 0 {
 			// Static rules stay active without leaking the parent's RPC handle.
 			p.closeErr = errors.Join(p.closeErr, networkCall("FwpmEngineClose0", uintptr(p.fence.engine)))
@@ -158,21 +160,26 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 		return workerTokenWithSIDs(token, false, workerReadSIDs(mode))
 	}, policy)
 	if err != nil {
-		if fence != nil {
-			err = errors.Join(err, fence.close())
-		}
+		imageRecovery.Lock()
+		var cleanup error
 		if image != nil {
-			var cleanup error
-			if fenceIntent {
-				cleanup = removeImageFence(image)
-			}
-			if cleanup != nil {
-				err = errors.Join(err, cleanup)
-			} else {
-				err = errors.Join(err, image.removeFiles())
-			}
+			cleanup = image.removeExecutable()
 		}
-		return nil, err
+		if fence != nil && cleanup == nil {
+			cleanup = fence.close()
+		}
+		if image != nil && fenceIntent && cleanup == nil {
+			cleanup = removeImageFence(image)
+		}
+		if image != nil && cleanup == nil {
+			cleanup = image.removeFiles()
+		}
+		imageRecovery.Unlock()
+		if cleanup != nil && fence != nil && fence.engine != 0 {
+			cleanup = errors.Join(cleanup, networkCall("FwpmEngineClose0", uintptr(fence.engine)))
+			fence.engine = 0
+		}
+		return nil, errors.Join(err, cleanup)
 	}
 	p.(*process).fence = fence
 	p.(*process).image = image
@@ -365,8 +372,11 @@ func workerTokenWithSIDs(token windows.Token, administrative bool, sids []string
 
 func constructWorkerToken(token windows.Token, administrative bool, sids []string, disableSystemUser bool) (windows.Token, error) {
 	var disabled []windows.SIDAndAttributes
+	var groups *windows.Tokenuser
+	var tokenGroups *windows.Tokengroups
 	if !administrative {
-		groups, err := token.GetTokenGroups()
+		var err error
+		tokenGroups, err = token.GetTokenGroups()
 		if err != nil {
 			return 0, err
 		}
@@ -374,16 +384,16 @@ func constructWorkerToken(token windows.Token, administrative bool, sids []strin
 		if err != nil {
 			return 0, err
 		}
-		disabled, err = disabledWorkerGroups(groups.AllGroups(), filtered)
+		disabled, err = disabledWorkerGroups(tokenGroups.AllGroups(), filtered)
 		if err != nil {
 			return 0, err
 		}
-		user, err := token.GetTokenUser()
+		groups, err = token.GetTokenUser()
 		if err != nil {
 			return 0, err
 		}
-		if disableSystemUser && user.User.Sid.String() == "S-1-5-18" {
-			disabled = append(disabled, windows.SIDAndAttributes{Sid: user.User.Sid})
+		if disableSystemUser && groups.User.Sid.String() == "S-1-5-18" {
+			disabled = append(disabled, windows.SIDAndAttributes{Sid: groups.User.Sid})
 		}
 	}
 	var disabledSIDs *windows.SIDAndAttributes
@@ -415,6 +425,10 @@ func constructWorkerToken(token windows.Token, administrative bool, sids []strin
 	}
 	proc := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
 	result, _, callErr := proc.Call(uintptr(token), flags, uintptr(len(disabled)), uintptr(unsafe.Pointer(disabledSIDs)), 0, 0, restrictingCount, uintptr(unsafe.Pointer(restricting)), uintptr(unsafe.Pointer(&restricted)))
+	runtime.KeepAlive(tokenGroups)
+	runtime.KeepAlive(groups)
+	runtime.KeepAlive(disabled)
+	runtime.KeepAlive(restrictions)
 	if result == 0 {
 		return 0, fmt.Errorf("restrict worker token: %w", callErr)
 	}
@@ -470,7 +484,7 @@ func disabledWorkerGroups(groups, filtered []windows.SIDAndAttributes) ([]window
 		if text == "" {
 			return nil, fmt.Errorf("could not read a worker token group SID")
 		}
-		if denyOnly[text] || (filtered == nil && elevatedGroupText(text)) {
+		if denyOnly[text] || elevatedGroupText(text) {
 			disabled = append(disabled, windows.SIDAndAttributes{Sid: group.Sid})
 		}
 	}
@@ -484,8 +498,12 @@ func mediumIntegrity(token windows.Token) error {
 	}
 	label := windows.Tokenmandatorylabel{Label: windows.SIDAndAttributes{Sid: medium, Attributes: windows.SE_GROUP_INTEGRITY}}
 	if err := windows.SetTokenInformation(token, windows.TokenIntegrityLevel, (*byte)(unsafe.Pointer(&label)), label.Size()); err != nil {
+		runtime.KeepAlive(medium)
+		runtime.KeepAlive(label)
 		return fmt.Errorf("lower worker integrity: %w", err)
 	}
+	runtime.KeepAlive(medium)
+	runtime.KeepAlive(label)
 	return nil
 }
 

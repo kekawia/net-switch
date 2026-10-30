@@ -78,8 +78,9 @@ func newWorkerImage(source string) (_ *workerImage, err error) {
 	if err != nil {
 		return nil, err
 	}
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
 	}
 	var random [16]byte
 	if _, err = rand.Read(random[:]); err != nil {
@@ -160,22 +161,30 @@ func ownerAlive(owner imageOwner) (bool, error) {
 	if owner.PID == 0 || owner.Created == 0 {
 		return false, fmt.Errorf("invalid worker image owner")
 	}
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, owner.PID)
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, owner.PID)
 	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	defer windows.CloseHandle(h)
 	created, err := processCreated(h)
+	windows.CloseHandle(h)
 	if err != nil {
 		return false, err
 	}
 	if created != owner.Created {
 		return false, nil
 	}
-	state, err := windows.WaitForSingleObject(h, 0)
+	syncHandle, err := windows.OpenProcess(windows.SYNCHRONIZE, false, owner.PID)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(syncHandle)
+	state, err := windows.WaitForSingleObject(syncHandle, 0)
 	return state == uint32(windows.WAIT_TIMEOUT), err
 }
 
@@ -255,8 +264,9 @@ func recoverWorkerImages() error {
 	if err != nil {
 		return err
 	}
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		root = resolved
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return err
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -298,13 +308,8 @@ func recoverWorkerImage(directory string) error {
 			}
 			return err
 		}
-	} else {
-		if parentAlive {
-			return nil
-		} // creation/record write may still be in progress
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
+	} else if parentAlive {
+		return nil // creation/record write may still be in progress
 	}
 	w := &workerImage{directory: directory, executable: filepath.Join(directory, "worker.exe")}
 	if err := readImageRecord(filepath.Join(directory, "policy.json"), &w.policy); err != nil {
