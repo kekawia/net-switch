@@ -38,6 +38,8 @@ type isolationResult struct {
 	Error                                    string
 	OutboundDenied                           bool
 	OutboundCode                             string
+	DLLs                                     map[string]string
+	EventCode                                string
 }
 
 func TestMain(m *testing.M) {
@@ -131,6 +133,21 @@ func TestWorkerBootstrapDiagnostics(t *testing.T) {
 
 func isolationProbe(input isolationRequest) (isolationResult, error) {
 	result := isolationResult{Groups: map[string]uint32{}}
+	result.DLLs = map[string]string{}
+	// Find returns an error with the DLL name; LazyProc.Call would panic and
+	// lose the other authority results before they reach the parent.
+	for dll, procedure := range map[string]string{
+		"ole32.dll": "CLSIDFromString", "oleaut32.dll": "VariantClear",
+		"combase.dll": "RoInitialize", "shell32.dll": "SHGetFileInfoW",
+		"user32.dll": "GetDesktopWindow", "iphlpapi.dll": "GetAdaptersAddresses",
+	} {
+		result.DLLs[dll] = fmt.Sprint(windows.NewLazySystemDLL(dll).NewProc(procedure).Find())
+	}
+	event, eventErr := windows.CreateEvent(nil, 0, 0, nil)
+	result.EventCode = fmt.Sprint(eventErr)
+	if eventErr == nil {
+		windows.CloseHandle(event)
+	}
 	token := windows.GetCurrentProcessToken()
 	groups, err := token.GetTokenGroups()
 	if err != nil {
@@ -230,6 +247,12 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 		{"app-info", false, false}, {"installed-apps", false, false},
 		{"line-check", true, false}, {"probe", true, false},
 		{"meters", false, false}, {"network", false, false}, {"outside", true, true},
+		{"tcp-port-configuration", false, false}, {"architecture", false, false},
+		{"policy", false, false}, {"metrics", false, false}, {"port-holder", false, false},
+		{"tcp-identity", false, false}, {"autostart", false, false},
+		{"policy-set", true, true}, {"metrics-set", true, true}, {"metrics-restore", true, true},
+		{"protect-directory", true, true}, {"stop-process", true, true}, {"close-tcp", true, true},
+		{"autostart-set", true, true}, {"autostart-upgrade", true, true},
 	} {
 		mode := policy.mode
 		t.Run(mode, func(t *testing.T) {
@@ -261,6 +284,10 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer p.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			stop := context.AfterFunc(ctx, func() { _ = p.Kill() })
+			defer stop()
 			if err := json.NewEncoder(p.Input()).Encode(input); err != nil {
 				t.Fatal(err)
 			}
@@ -277,6 +304,11 @@ func TestReadWorkerCannotWriteControlHKLMOrTCP(t *testing.T) {
 				t.Fatal(string(b), err)
 			}
 			t.Logf("%s: %+v", mode, got)
+			for dll, code := range got.DLLs {
+				if code != "<nil>" {
+					t.Errorf("%s initialization: %s", dll, code)
+				}
+			}
 			if (policy.network && got.OutboundCode != "<nil>") || (!policy.network && !got.OutboundDenied) {
 				t.Fatalf("outbound TCP policy (allowed=%t): %+v", policy.network, got)
 			}

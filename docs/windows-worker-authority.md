@@ -86,6 +86,40 @@ read restrictions or Chromium's fully locked-down policy are not adopted blindly
 
 ## Qualification still required
 
+### Loader failure found in the first candidate
+
+Job 123928118497 failed before the TCP-settings worker reached its operation:
+`winengine.init -> mustGUID -> windows.GUIDFromString -> clsidFromString ->
+LazyProc.mustFind`. The vendored wrapper binds CLSIDFromString to **ole32.dll**.
+This is DLL initialization failure (1114), not a missing entry point. Our
+production flags include WRITE_RESTRICTED, so it is incorrect to infer that
+ordinary read access was denied merely because the token has restricting SIDs.
+The failing internal object has not yet been identified.
+
+[Chromium's token policy source](https://raw.githubusercontent.com/chromium/chromium/main/sandbox/win/src/restricted_token_utils.cc)
+adds the logon SID for BaseNamedObjects creation in USER_LIMITED. Its
+[token construction](https://raw.githubusercontent.com/chromium/chromium/main/sandbox/win/src/restricted_token.cc)
+also adjusts the default DACL; a restricting-SID list alone is not the complete
+compatibility recipe. [Microsoft's service SID description](https://learn.microsoft.com/en-us/windows/win32/api/winsvc/ns-winsvc-service_sid_info)
+lists World, service logon and write-restricted SIDs for restricted services.
+That policy is not equivalent to a worker forbidden outbound networking.
+
+| Candidate grant | Compatibility reason to test | Boundary risk |
+| --- | --- | --- |
+| RESTRICTED (S-1-5-12) | Objects explicitly accessible to restricted code | Grants every matching object's writes, not only loader objects |
+| actual logon SID | Named objects within that logon | Other objects shared with that session; absent in some SYSTEM tokens |
+| Everyone | Common object grants | May restore sockets and world-writable objects |
+| Users | Ordinary application access | Intended for probes, potentially too permissive for metadata workers |
+| write-restricted SID (S-1-5-33) | Windows service compatibility | Needs measured object access, not an assumption |
+
+The next two-job pilot compares these without changing production policy. It
+reports named DLL initialization errors, anonymous event creation, registry and
+process write denial, and outbound socket access. It also runs real native read
+operations separately from synthetic authority probes. A candidate's diagnostic
+completion is **not** a passing isolation result. The production test now covers
+every named worker mode's token, and fails on any tested DLL initialization error.
+No candidate is promoted until the original denials and functional calls pass.
+
 The focused dispatch uses two jobs total: x64 and ARM64. Each exercises elevated
 admin, then SYSTEM using Microsoft's signed PsExec on the disposable runner only.
 The SYSTEM test asserts its actual user SID. No local service, engine or TUN runs.

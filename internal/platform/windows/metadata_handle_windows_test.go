@@ -33,6 +33,12 @@ func TestMain(m *testing.M) {
 		}
 		os.Exit(runMetadataProof())
 	}
+	if len(os.Args) > 2 && os.Args[1] == "worker" {
+		if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+			os.Exit(2)
+		}
+		os.Exit(Run(os.Args[2:]))
+	}
 	os.Exit(m.Run())
 }
 

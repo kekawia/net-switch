@@ -169,6 +169,8 @@ jobs:
         run: |
           go test -c -o "$env:RUNNER_TEMP/worker.test.exe" ./internal/platform/worker
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -c -o "$env:RUNNER_TEMP/platform.test.exe" ./internal/platform/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Invoke-WebRequest https://download.sysinternals.com/files/PSTools.zip -OutFile "$env:RUNNER_TEMP/PSTools.zip"
           Expand-Archive "$env:RUNNER_TEMP/PSTools.zip" "$env:RUNNER_TEMP/PSTools"
           $launcher = Join-Path $env:RUNNER_TEMP 'PSTools/PsExec64.exe'
@@ -176,7 +178,8 @@ jobs:
           $signature = Get-AuthenticodeSignature $launcher
           if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') { throw 'Untrusted SYSTEM test launcher' }
           $binary = (Join-Path $env:RUNNER_TEMP 'worker.test.exe').Replace("'", "''")
-          $command = "`$env:GITHUB_ACTIONS='true'; `$env:RUNNER_ENVIRONMENT='github-hosted'; `$env:NETSWITCH_EXPECT_SYSTEM='1'; & '$binary' '-test.v' '-test.timeout=90s' '-test.run=^(TestReadWorkerCannotWriteControlHKLMOrTCP|TestWorkerRestrictingSIDs)$'; exit `$LASTEXITCODE"
+          $platform = (Join-Path $env:RUNNER_TEMP 'platform.test.exe').Replace("'", "''")
+          $command = "`$env:GITHUB_ACTIONS='true'; `$env:RUNNER_ENVIRONMENT='github-hosted'; `$env:NETSWITCH_EXPECT_SYSTEM='1'; & '$binary' '-test.v' '-test.timeout=3m' '-test.run=^(TestWorkerDLLCompatibility|TestReadWorkerCannotWriteControlHKLMOrTCP|TestWorkerRestrictingSIDs)$'; `$workerResult=`$LASTEXITCODE; & '$platform' '-test.v' '-test.timeout=6m' '-test.run=^TestWorkerNativeReads$'; if (`$workerResult -ne 0 -or `$LASTEXITCODE -ne 0) { exit 1 }"
           $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
           & $launcher -accepteula -nobanner -s (Get-Command pwsh).Source -NoProfile -EncodedCommand $encoded
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

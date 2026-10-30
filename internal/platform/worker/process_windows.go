@@ -75,6 +75,15 @@ func Start(executable string, args []string) (Process, error) {
 // The explicit startup inputs let hosted tests distinguish loader, desktop and
 // job failures. Production callers always go through Start's fixed policy.
 func start(executable string, args []string, desktop *uint16, creationFlags, uiLimits uint32) (Process, error) {
+	return startWithToken(executable, args, desktop, creationFlags, uiLimits, func(token windows.Token) (windows.Token, error) {
+		mode := workerMode(args)
+		return workerTokenForMode(token, adminWorker(args), mode == "probe" || mode == "line-check")
+	})
+}
+
+// Token injection is private to this package's hosted compatibility tests.
+// Start and start always select the production policy above.
+func startWithToken(executable string, args []string, desktop *uint16, creationFlags, uiLimits uint32, makeToken func(windows.Token) (windows.Token, error)) (Process, error) {
 	if !filepath.IsAbs(executable) || len(args) < 2 || args[0] != "worker" {
 		return nil, fmt.Errorf("worker launcher requires its absolute executable and a worker mode")
 	}
@@ -107,8 +116,7 @@ func start(executable string, args []string, desktop *uint16, creationFlags, uiL
 		return nil, err
 	}
 	defer token.Close()
-	mode := workerMode(args)
-	restricted, err := workerTokenForMode(token, adminWorker(args), mode == "probe" || mode == "line-check")
+	restricted, err := makeToken(token)
 	if err != nil {
 		return nil, err
 	}
@@ -208,6 +216,17 @@ func workerToken(token windows.Token, administrative bool) (windows.Token, error
 }
 
 func workerTokenForMode(token windows.Token, administrative, network bool) (windows.Token, error) {
+	var sids []string
+	if !administrative {
+		sids = []string{"S-1-0-0"}
+		if network {
+			sids = []string{"S-1-5-32-545"}
+		}
+	}
+	return workerTokenWithSIDs(token, administrative, sids)
+}
+
+func workerTokenWithSIDs(token windows.Token, administrative bool, sids []string) (windows.Token, error) {
 	var disabled []windows.SIDAndAttributes
 	if !administrative {
 		groups, err := token.GetTokenGroups()
@@ -238,20 +257,23 @@ func workerTokenForMode(token windows.Token, administrative, network bool) (wind
 	flags := uintptr(1) // DISABLE_MAX_PRIVILEGE
 	var restricting *windows.SIDAndAttributes
 	var restrictingCount uintptr
+	var restrictions []windows.SIDAndAttributes
 	if !administrative {
 		// A second write access check must succeed independently of SYSTEM's
 		// user SID. Read workers receive no write grants; probes may use the
 		// ordinary Users grants for sockets, never the SYSTEM/admin grants.
-		text := "S-1-0-0"
-		if network {
-			text = "S-1-5-32-545"
+		if len(sids) == 0 {
+			return 0, fmt.Errorf("read worker requires restricting SIDs")
 		}
-		sid, err := windows.StringToSid(text)
-		if err != nil {
-			return 0, err
+		for _, text := range sids {
+			sid, err := windows.StringToSid(text)
+			if err != nil {
+				return 0, err
+			}
+			restrictions = append(restrictions, windows.SIDAndAttributes{Sid: sid})
 		}
-		restricting = &windows.SIDAndAttributes{Sid: sid}
-		restrictingCount = 1
+		restricting = &restrictions[0]
+		restrictingCount = uintptr(len(restrictions))
 		flags |= 8 // WRITE_RESTRICTED (supported Windows versions)
 	}
 	proc := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
