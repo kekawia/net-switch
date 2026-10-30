@@ -299,14 +299,11 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 	if clearWaiting {
 		remove = append(remove, "waitingApps")
 	}
-	if err := c.save(map[string]any{"lines": items, "appLines": pins, "combine": combining}, remove...); err != nil {
+	if err := c.saveWithAddedLine(map[string]any{"lines": items, "appLines": pins, "combine": combining}, addedID, remove...); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	c.syncLanesLocked()
-	if c.op.ServiceMode && addedID != "" && c.op.Engine.Snapshot().Status == "on" {
-		c.sampleSelectedLinesLocked(c.op.Engine.Snapshot(), addedID)
-	}
 	c.mu.Unlock()
 	if err := c.ApplyPolicy(ctx); err != nil {
 		return err

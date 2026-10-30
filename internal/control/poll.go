@@ -119,7 +119,9 @@ func (c *Core) sampleLinesLocked(s engine.Snapshot) {
 // A live add must initialise its new lane without resampling accumulated
 // health on unrelated lines between their normal poll deadlines.
 func (c *Core) sampleSelectedLinesLocked(s engine.Snapshot, only string) {
-	c.initialSampled = true
+	if only == "" {
+		c.initialSampled = true
+	}
 	now := c.now()
 	items := c.itemsLocked()
 	for _, item := range items {

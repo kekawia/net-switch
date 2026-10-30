@@ -325,6 +325,13 @@ func (c *Core) pinsLocked() apps.Pins {
 	return p
 }
 func (c *Core) save(changes map[string]any, remove ...string) error {
+	return c.saveWithAddedLine(changes, "", remove...)
+}
+
+// Live additions must publish settings and sampled lane state together, and
+// build the first durable revision from that complete state. addedID is a new
+// identity, so journal failure can discard its lane without touching others.
+func (c *Core) saveWithAddedLine(changes map[string]any, addedID string, remove ...string) error {
 	if c.op.ServiceMode {
 		c.applyMu.Lock()
 		defer c.applyMu.Unlock()
@@ -352,12 +359,22 @@ func (c *Core) save(changes map[string]any, remove ...string) error {
 			}
 		}
 		c.values = next
+		if addedID != "" {
+			c.syncLanesLocked()
+			if snapshot := c.op.Engine.Snapshot(); snapshot.Status == "on" {
+				c.sampleSelectedLinesLocked(snapshot, addedID)
+			}
+		}
 		p := c.policyLocked()
 		intents := append([]closureIntent{}, c.closures...)
 		c.mu.Unlock()
 		if _, err := c.persistRevision(p, intents); err != nil {
 			c.mu.Lock()
 			c.values = old
+			if addedID != "" {
+				delete(c.lanes, addedID)
+				delete(c.evidence, addedID)
+			}
 			c.mu.Unlock()
 			return err
 		}
