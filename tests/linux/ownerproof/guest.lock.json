@@ -1,0 +1,290 @@
+{
+  "schemaVersion": 1,
+  "profile": "linux-5.8-floor-guest",
+  "kernel": {
+    "tag": "v5.8",
+    "release": "5.8.0",
+    "sourceCommit": "bcf876870b95592b52519ed4aafcf9d95999bc9c",
+    "tarballUrl": "https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.8.tar.xz",
+    "tarballSha256": "e7f75186aa0642114af8f19d99559937300ca27acaf7451b36d4f9b0f85cf1f5",
+    "rawRecursionGuard": false,
+    "recursionMissesField": false,
+    "buildAdjustments": [
+      "sed -i \"s/-Werror//g\" tools/lib/subcmd/Makefile tools/objtool/Makefile",
+      "sed -i \"s/-J /--skip_encoding_btf_enum64 -J /g\" scripts/link-vmlinux.sh",
+      "KCFLAGS=\"-gdwarf-4 -Wno-error -fcommon\" HOSTCFLAGS=\"-Wno-error -fcommon\""
+    ],
+    "configs": {
+      "amd64": {
+        "path": "tests/linux/ownerproof/kernel-5.8-amd64.config",
+        "sha256": "93635e9f0ff988fe01556b50615755866aa1ed4bbee525b9f2046373da7e8547",
+        "resolvedConfigSha256": "42309a5b01aef7aec5a856561eef8c049dd247501b3edaad746382413aff9252",
+        "baseDefconfig": "x86_64_defconfig",
+        "imageTarget": "bzImage",
+        "imageRelativePath": "arch/x86/boot/bzImage",
+        "qemuBinary": "qemu-system-x86_64",
+        "accelerator": "kvm",
+        "console": "ttyS0",
+        "cpus": 2,
+        "memoryMiB": 2048
+      },
+      "arm64": {
+        "path": "tests/linux/ownerproof/kernel-5.8-arm64.config",
+        "sha256": "f5f0efecbb8ab1786b03ef71adf6d9dd143236189f6976a3529fd7e92bfc8614",
+        "resolvedConfigSha256": "8f2fd8ae8b40b3875083d636f8308d5b16e4b43c3e8abf1170780e6ea27e2a0b",
+        "baseDefconfig": "defconfig",
+        "imageTarget": "Image",
+        "imageRelativePath": "arch/arm64/boot/Image",
+        "qemuBinary": "qemu-system-aarch64",
+        "accelerator": "tcg",
+        "console": "ttyAMA0",
+        "cpus": 2,
+        "memoryMiB": 2048
+      }
+    }
+  },
+  "compilerImage": {
+    "repository": "docker.io/library/buildpack-deps",
+    "tag": "bookworm",
+    "indexDigest": "sha256:ccb050a415a94a3a78acbe35084ec8f06ae46fa158e3650c96f9b4fb514de6d3",
+    "platforms": {
+      "amd64": "sha256:0ac99c7dcee4d051ea036dd4dc6db33cef4c5d2088c0bed4001d81e3d6cf53bd",
+      "arm64": "sha256:a90d803a53c4af08fd5c51a289eec7d9f45f5a5dc09af60c25c59a1b25f20b84"
+    },
+    "spdxAttestationDigest": "sha256:bb074c720072675f087dafab65f9a0efb9c9ed868e2919b6e860237e5c2eefd0",
+    "basePackages": {
+      "gcc-12": "12.2.0-14+deb12u1",
+      "gcc": "4:12.2.0-3",
+      "binutils": "2.40-2",
+      "make": "4.3-4.1"
+    }
+  },
+  "debianPackages": {
+    "mirror": "https://deb.debian.org/debian",
+    "suite": "bookworm",
+    "releaseVersion": "12.15",
+    "amd64": [
+      {
+        "name": "bc",
+        "version": "1.07.1-3+b1",
+        "path": "pool/main/b/bc/bc_1.07.1-3+b1_amd64.deb",
+        "sha256": "baaa4e935c5e3bcd57d4f2f4e7a1ddc67bd4eb8629d98f97a696548849ae01ac"
+      },
+      {
+        "name": "bison",
+        "version": "2:3.8.2+dfsg-1+b1",
+        "path": "pool/main/b/bison/bison_3.8.2+dfsg-1+b1_amd64.deb",
+        "sha256": "a414afd7519c53bfa33415ba5b951bc8b4906877004c49723ffda50a6033c3e8"
+      },
+      {
+        "name": "cpio",
+        "version": "2.13+dfsg-7.1",
+        "path": "pool/main/c/cpio/cpio_2.13+dfsg-7.1_amd64.deb",
+        "sha256": "73d4a22bdd7eb6be1e480d6884b103eb500cfd539cc20ae0f3e44dd8b0614798"
+      },
+      {
+        "name": "dwarves",
+        "version": "1.24-4.1",
+        "path": "pool/main/d/dwarves/dwarves_1.24-4.1_all.deb",
+        "sha256": "d2a1eebf86e8ddcf2c87946d7ad19d8bb208ca89897a8062d9467a2baa5c310a"
+      },
+      {
+        "name": "flex",
+        "version": "2.6.4-8.2",
+        "path": "pool/main/f/flex/flex_2.6.4-8.2_amd64.deb",
+        "sha256": "da3fd55dbb6aff4f7b3187580813e0ef707d0c596402e37c8fd144df60003636"
+      },
+      {
+        "name": "kmod",
+        "version": "30+20221128-1",
+        "path": "pool/main/k/kmod/kmod_30+20221128-1_amd64.deb",
+        "sha256": "e21ae247204fe8a14ac29a5f510227d45b41cd3c41059cc942f2502d25765165"
+      },
+      {
+        "name": "libkmod2",
+        "version": "30+20221128-1",
+        "path": "pool/main/k/kmod/libkmod2_30+20221128-1_amd64.deb",
+        "sha256": "af63bbbfc15fbd1f254b15c393b3b95b18b18cc81348fc1b4f1c9c34b4d672d7"
+      },
+      {
+        "name": "libbpf1",
+        "version": "1:1.1.2-0+deb12u1",
+        "path": "pool/main/libb/libbpf/libbpf1_1.1.2-0+deb12u1_amd64.deb",
+        "sha256": "5e7505ef77ebc84ad0203411e4afdeb8a98f40fb7f78f013aa4dd8710e49f8ed"
+      },
+      {
+        "name": "libdw1",
+        "version": "0.188-2.1",
+        "path": "pool/main/e/elfutils/libdw1_0.188-2.1_amd64.deb",
+        "sha256": "ffd7b1bad982ad1afd9c2b75ab2edd18e229508df731a8f4d8443f093a91442f"
+      },
+      {
+        "name": "libelf-dev",
+        "version": "0.188-2.1",
+        "path": "pool/main/e/elfutils/libelf-dev_0.188-2.1_amd64.deb",
+        "sha256": "79cb66b55021bd0130308369524bac5240d0b5463cb252cd44be6a1500fdebec"
+      },
+      {
+        "name": "libelf1",
+        "version": "0.188-2.1",
+        "path": "pool/main/e/elfutils/libelf1_0.188-2.1_amd64.deb",
+        "sha256": "619add379c606b3ac6c1a175853b918e6939598a83d8ebadf3bdfd50d10b3c8c"
+      },
+      {
+        "name": "libpopt0",
+        "version": "1.19+dfsg-1",
+        "path": "pool/main/p/popt/libpopt0_1.19+dfsg-1_amd64.deb",
+        "sha256": "6f94b488255acd996254f775c77ff3956557c61f860a3c9caeaf65457554194f"
+      },
+      {
+        "name": "m4",
+        "version": "1.4.19-3",
+        "path": "pool/main/m/m4/m4_1.4.19-3_amd64.deb",
+        "sha256": "b2dd7bfca426712416e651bb5ff6dabe7d05e4caebbac61d714dbe261b31e4c3"
+      },
+      {
+        "name": "pahole",
+        "version": "1.24-4.1",
+        "path": "pool/main/d/dwarves/pahole_1.24-4.1_amd64.deb",
+        "sha256": "009c0e0a970d7b04ad6601316a2eff1bd9566c3b5b07d60380a8235fa03f18dd"
+      },
+      {
+        "name": "rsync",
+        "version": "3.2.7-1+deb12u6",
+        "path": "pool/main/r/rsync/rsync_3.2.7-1+deb12u6_amd64.deb",
+        "sha256": "ce99de6b36cbb62dc614a73463e467f2c1ef509545a9a2b33cab19b50530b672"
+      }
+    ],
+    "arm64": [
+      {
+        "name": "bc",
+        "version": "1.07.1-3",
+        "path": "pool/main/b/bc/bc_1.07.1-3_arm64.deb",
+        "sha256": "05c76885eb988eb171087e7c41dd7d2e3da521ffd1fe88f955f8e69c81ff16fb"
+      },
+      {
+        "name": "bison",
+        "version": "2:3.8.2+dfsg-1+b1",
+        "path": "pool/main/b/bison/bison_3.8.2+dfsg-1+b1_arm64.deb",
+        "sha256": "00301cacacd98f2bece7cfc1d2eaf133596bfba4c5fd89d6bf5f8c3d51d62755"
+      },
+      {
+        "name": "cpio",
+        "version": "2.13+dfsg-7.1",
+        "path": "pool/main/c/cpio/cpio_2.13+dfsg-7.1_arm64.deb",
+        "sha256": "9af6bd9db2643d0422cdd77ec2df50e0ca11da78456321cbeaac445f998f96fd"
+      },
+      {
+        "name": "dwarves",
+        "version": "1.24-4.1",
+        "path": "pool/main/d/dwarves/dwarves_1.24-4.1_all.deb",
+        "sha256": "d2a1eebf86e8ddcf2c87946d7ad19d8bb208ca89897a8062d9467a2baa5c310a"
+      },
+      {
+        "name": "flex",
+        "version": "2.6.4-8.2",
+        "path": "pool/main/f/flex/flex_2.6.4-8.2_arm64.deb",
+        "sha256": "e457c7052b77de6526b417387d676b63e1b51d4be36be255cf868b2a3c8f23ed"
+      },
+      {
+        "name": "kmod",
+        "version": "30+20221128-1",
+        "path": "pool/main/k/kmod/kmod_30+20221128-1_arm64.deb",
+        "sha256": "641057647e90b035148a40a56da51f030838f7b614e6f7896d36a18a316ef2c4"
+      },
+      {
+        "name": "libkmod2",
+        "version": "30+20221128-1",
+        "path": "pool/main/k/kmod/libkmod2_30+20221128-1_arm64.deb",
+        "sha256": "a3d13b1a5d01fff740356d3a8dad6c13f34988180a5d68a9a2e095995054d828"
+      },
+      {
+        "name": "libbpf1",
+        "version": "1:1.1.2-0+deb12u1",
+        "path": "pool/main/libb/libbpf/libbpf1_1.1.2-0+deb12u1_arm64.deb",
+        "sha256": "c9929839798e7d8e66b212f345ecf1653ba7f1a9e1b753d0eb67bd521b0b5511"
+      },
+      {
+        "name": "libdw1",
+        "version": "0.188-2.1",
+        "path": "pool/main/e/elfutils/libdw1_0.188-2.1_arm64.deb",
+        "sha256": "3b403c886653e2ea496b74cf3b5c89aa0f50a7c2af9eda343be185970d3f440d"
+      },
+      {
+        "name": "libelf-dev",
+        "version": "0.188-2.1",
+        "path": "pool/main/e/elfutils/libelf-dev_0.188-2.1_arm64.deb",
+        "sha256": "fe16ede10e1b80a2f882f0e83c52695e77280c61eebe7106f016d4025e82399b"
+      },
+      {
+        "name": "libelf1",
+        "version": "0.188-2.1",
+        "path": "pool/main/e/elfutils/libelf1_0.188-2.1_arm64.deb",
+        "sha256": "32971952d8f5d563447bf275f24e26057500924da2d855c1edb53b0f0400bd11"
+      },
+      {
+        "name": "libpopt0",
+        "version": "1.19+dfsg-1",
+        "path": "pool/main/p/popt/libpopt0_1.19+dfsg-1_arm64.deb",
+        "sha256": "636165b8135fe303ea00ae6d30841b65dabbc5c4fff56083d431d8bb669350e9"
+      },
+      {
+        "name": "m4",
+        "version": "1.4.19-3",
+        "path": "pool/main/m/m4/m4_1.4.19-3_arm64.deb",
+        "sha256": "54238d48d2b7b90c9146d156cfa0d80254c4892730c5b57fce8dee0747127228"
+      },
+      {
+        "name": "pahole",
+        "version": "1.24-4.1",
+        "path": "pool/main/d/dwarves/pahole_1.24-4.1_arm64.deb",
+        "sha256": "8a3b3c4e0222af322bbee98eeff2003194293b41f6db24ca68a2f2f12f487f8c"
+      },
+      {
+        "name": "rsync",
+        "version": "3.2.7-1+deb12u6",
+        "path": "pool/main/r/rsync/rsync_3.2.7-1+deb12u6_arm64.deb",
+        "sha256": "217a855088547e384e67c3a3ff2f8f57b159f9f829be1f78d552b3da15796484"
+      }
+    ]
+  },
+  "unverifiedRunnerInputs": {
+    "qemu": {
+      "verified": false,
+      "source": "ubuntu-24.04-runner-apt-or-preinstalled",
+      "amd64Binary": "qemu-system-x86_64",
+      "arm64Binary": "qemu-system-aarch64",
+      "note": "Host QEMU emulator binaries execute on the Ubuntu 24.04 runner outside the Bookworm compiler container and are recorded at runtime via --version as unverified runner inputs."
+    }
+  },
+  "initramfs": {
+    "goVersion": "1.27.3",
+    "pid1Package": "./tests/linux/ownerproof/cmd/nsownerinit",
+    "proofTestPackage": "./internal/engine/linux/ownerbpf",
+    "proofTestTag": "ownerbpfproof",
+    "bpfGeneratorScript": "scripts/generate-owner-bpf.mjs",
+    "bpfObjects": {
+      "amd64": {
+        "proof_x86_bpfel.o": "369d0c8ba113159dcc18d0d8f4597ccfaefe6c38a73896af813af4e2fd4987b8",
+        "bridge_x86_bpfel.o": "d261ab6ce74c6f1a626497a0fd68eeb5ad1f8b6b34e461943efe257c0cb92425",
+        "fault_x86_bpfel.o": "c9467a3e10fa396ccf100e38251b0a3b7bd5ea93b68a0d4bff835290a16d4eea"
+      },
+      "arm64": {
+        "proof_arm64_bpfel.o": "07aa1228e8f8656c52ae4dcc05d1559425c567d194cee51623edd8c30e89ffbb",
+        "bridge_arm64_bpfel.o": "d261ab6ce74c6f1a626497a0fd68eeb5ad1f8b6b34e461943efe257c0cb92425",
+        "fault_arm64_bpfel.o": "c9467a3e10fa396ccf100e38251b0a3b7bd5ea93b68a0d4bff835290a16d4eea"
+      }
+    }
+  },
+  "outputs": {
+    "reproducibilityStage": "double-build-verified",
+    "amd64": {
+      "kernelImageSha256": "3eb59a8a763a874dd4b8c012846a2c0a34c70b9821d1a286b8134e5b787dd52e",
+      "initramfsSha256": "62eec91f22ce469deb4b5bade5805aa732b84a93ba78d2480274bbc7e3f7585f"
+    },
+    "arm64": {
+      "kernelImageSha256": "f578daf914edbf3c6b8d20ad4b033f7d4630784c8cbb152f675c529272331a0d",
+      "initramfsSha256": "2fbcdfb3dc221b61c73eaf4b7bc6f625187af3850dd7318bc293f362e160f418"
+    }
+  }
+}

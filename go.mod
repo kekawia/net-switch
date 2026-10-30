@@ -3,6 +3,7 @@ module github.com/AyoubAchour/net-switch
 go 1.27.3
 
 require (
+	github.com/cilium/ebpf v0.22.0
 	github.com/godbus/dbus/v5 v5.2.4
 	github.com/quic-go/quic-go v0.64.0
 	github.com/vishvananda/netlink v1.3.1
@@ -22,3 +23,5 @@ require (
 )
 
 replace gvisor.dev/gvisor => ./third_party/gvisor
+
+tool github.com/cilium/ebpf/cmd/bpf2go

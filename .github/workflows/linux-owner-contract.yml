@@ -1,0 +1,43 @@
+name: Linux owner contract
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'internal/engine/linux/ownerbpf/**'
+      - '.github/ci/owner-provenance-contract.mjs'
+      - '.github/workflows/linux-owner-contract.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  contract:
+    name: owner-contract / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Pure ABI and acceptance contracts (not a floor kernel proof)
+        run: |
+          git rev-parse HEAD
+          uname -m
+          cc --version
+          node .github/ci/owner-provenance-contract.mjs
