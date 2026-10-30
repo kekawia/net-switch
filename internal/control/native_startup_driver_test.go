@@ -48,6 +48,8 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
+	migration := name == "migration"
+	migrated := name == "legacyCaseOrder" || migration
 	quitSlice := name == "quitFailure" || name == "routingAndReads"
 	reconnectSlice := name == "reconnectPinned" || name == "reconnectShared"
 	liveSlice := name == "lineOrder" || name == "lineRemove" || name == "lineAdd" || name == "adapterRename"
@@ -66,7 +68,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		owners = []string{`C:\Apps\Firefox.exe`}
 		ownerLine = secondLine
 	}
-	if name == "legacyCaseOrder" || name == "lineAdd" {
+	if migrated || name == "lineAdd" {
 		ids := map[string]string{"060606": "000001"}
 		if name == "legacyCaseOrder" {
 			firstLine, secondLine = "000001", "000002"
@@ -74,6 +76,13 @@ func replayNativeStartup(t *testing.T, name string) {
 			pins = map[string]string{`c:\apps\x.exe`: secondLine}
 			owners = []string{`c:\apps\x.exe`, `C:\Apps\X.exe`}
 			ids = map[string]string{"010101": firstLine, "020202": secondLine}
+		}
+		if migration {
+			firstLine, secondLine = "000007", "000008"
+			ownerLine = secondLine
+			pins = map[string]string{`c:\apps\firefox.exe`: secondLine}
+			owners = []string{`C:\Apps\Firefox.exe`}
+			ids = map[string]string{"050505": firstLine, "060606": secondLine}
 		}
 		// A bijection of generated identities only. Saved paths and their order
 		// remain untouched; embedded settings/usage JSON retains object order.
@@ -195,11 +204,14 @@ func replayNativeStartup(t *testing.T, name string) {
 	}
 	c.op.Engine = e
 	construction := []string{"read:settings.json:ok", "read:control-journal.json:missing", "read:windows-undo.json:missing"}
-	if name == "legacyCaseOrder" {
+	if migration {
+		construction = append(construction, "write:windows-undo.json", "write:windows-undo.json.bak", "write:control-journal.json", "write:control-journal.json.bak", "write:settings.json", "write:settings.json.bak")
+	}
+	if migrated {
 		construction = append(construction, "write:control-journal.json", "write:control-journal.json.bak", "write:settings.json", "write:settings.json.bak", "log")
 	}
 	construction = append(construction, "log", "log", "read:usage.json:missing", "read:usage.recovery.json:missing")
-	if name == "legacyCaseOrder" {
+	if migrated {
 		construction = append(construction, "write:settings.json", "write:settings.json.bak")
 	}
 	check("store construction order", cmp.Effects(construction...))
@@ -210,14 +222,16 @@ func replayNativeStartup(t *testing.T, name string) {
 	var saved map[string]json.RawMessage
 	stableSettings := append([]byte(nil), files.data[filepath.Join("/test", "settings.json")]...)
 	expectedSettings := initial.Settings
-	if name == "legacyCaseOrder" {
+	if migrated {
 		for _, entry := range trace.Entries {
 			if entry.Kind == "write" {
 				var v struct{ File, Text string }
 				check("migration write", json.Unmarshal(entry.Value, &v))
 				if filepath.Base(v.File) == "settings.json" {
 					expectedSettings = []byte(v.Text)
-					break
+					if !migration || entry.Seq == 35 {
+						break
+					}
 				}
 			}
 		}
@@ -474,11 +488,17 @@ func replayNativeStartup(t *testing.T, name string) {
 
 	// Compare external observations in trace order and associate each callback
 	// with its checked native operation. No default handler can earn a receipt.
-	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
-	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice || name == "hungEngine")
+	fileCursor := newStartupFileCursor(files, migrated)
+	if migration {
+		fileCursor.repairAfter = 2
+	}
+	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, migrated, name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice || quitSlice || name == "hungEngine")
 	var pinEvidence map[int]string
-	if liveSlice || name == "ipv6" || reconnectSlice || quitSlice || name == "hungEngine" {
+	if liveSlice || name == "ipv6" || reconnectSlice || quitSlice || name == "hungEngine" || migration {
 		start, end, names := 66, 86, twoLineRevisionFiles()
+		if migration {
+			start, end, names = 99, 119, []string{"apps-" + firstLine + ".json", "apps-" + secondLine + ".json", "share-" + secondLine + ".json", "cut-" + secondLine + ".json"}
+		}
 		if name == "lineAdd" {
 			start, end, names = 62, 67, []string{"apps-a1.json"}
 		}
@@ -501,6 +521,17 @@ func replayNativeStartup(t *testing.T, name string) {
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		if migration && entry.Seq == 164 {
+			check("startup counterpart exhaustion", counterparts.Finish())
+			if logIndex != len(files.logs) || len(pendingLogs) != 0 {
+				t.Fatal("migration startup leftovers")
+			}
+			for seq, guard := range replayNativeSuccessfulQuit(t, c, e, files, trace, cmp, fileCursor, 164) {
+				checked[seq] = guard
+			}
+			logIndex = len(files.logs)
+			break
+		}
 		if name == "routingAndReads" && entry.Kind == "http" {
 			check("startup counterpart exhaustion", counterparts.Finish())
 			if logIndex != len(files.logs) || len(pendingLogs) != 0 {
@@ -654,7 +685,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			}
 			file := filepath.Base(js.Text(v["file"]))
 			switch file {
-			case "server.json", "usage.json", "settings.json", "settings.json.bak":
+			case "server.json", "usage.json", "settings.json", "settings.json.bak", "windows-undo.json", "windows-undo.json.bak":
 				check("distinct ordered publication", fileCursor.Publication(file, []byte(js.Text(v["text"]))))
 				guard = "actual atomic native publication"
 			default:

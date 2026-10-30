@@ -7,6 +7,10 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
+Completed migration, 2026-10-30: 191 more entries, passing local aggregate
+**7,553 / 7,894** (341 uncovered), exits 0/0/0. Only settingsSetupUpdate
+remains among the original traces.
+
 Completed routingAndReads, 2026-10-30: 268 more entries, passing local aggregate
 **7,362 / 7,894** (532 uncovered), exits 0/0/0. Settings/setup/update and
 migration are the only remaining original traces.

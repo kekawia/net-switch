@@ -1,5 +1,26 @@
 # Remaining native trace slices
 
+## migration
+
+All 191 entries execute through the same native startup driver. Real Core.New
+migrates setupUndo into both Undo copies before removing that legacy setting,
+then converts legacy lines and pins. Both settings publications and backups
+are compared in order, including the unknown keep:1.25 field. The final journal
+and settings mirror match the literal complete native policy at startup.
+
+Generated old IDs 050505/060606 map bijectively to native 000007/000008. The
+native sequence follows the two Undo publications and first journal/settings
+transaction. Labels, saved pin spelling, order and unknown settings retain their
+original values. The startup rule cursor consumes all four files and one ack.
+GET/state and successful Quit compare complete responses and cleanup.
+
+The shared file cursor now distinguishes windows-undo.json.bak from the primary
+file. Migration's final mirror repair follows its second settings publication;
+the older single-stage migration still repairs after the first. Each repair
+must equal its corresponding checked publication, without another receipt.
+
+Aggregate **7,553 / 7,894**, 341 uncovered, exits **0/0/0**. No product changes.
+
 ## routingAndReads
 
 All 268 entries are registered. Ping, installed apps, missing icon, routing off,

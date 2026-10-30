@@ -174,6 +174,7 @@ type startupFileCursor struct {
 	files        *memoryFiles
 	next         int
 	legacy       bool
+	repairAfter  int
 	pending      map[string]recordedFileResult
 	published    map[string]bool
 	renames      map[string]int
@@ -182,11 +183,11 @@ type startupFileCursor struct {
 }
 
 func newStartupFileCursor(files *memoryFiles, legacy bool) *startupFileCursor {
-	return &startupFileCursor{files: files, legacy: legacy, pending: map[string]recordedFileResult{}, published: map[string]bool{}, renames: map[string]int{}, repair: map[string][]byte{}}
+	return &startupFileCursor{files: files, legacy: legacy, repairAfter: 1, pending: map[string]recordedFileResult{}, published: map[string]bool{}, renames: map[string]int{}, repair: map[string][]byte{}}
 }
 func startupFileName(path string) string {
 	base := filepath.Base(path)
-	for _, name := range []string{"control-journal.json.bak", "control-journal.json", "settings.json.bak", "settings.json", "windows-undo.json", "usage.recovery.json", "usage.json", "server.json"} {
+	for _, name := range []string{"control-journal.json.bak", "control-journal.json", "settings.json.bak", "settings.json", "windows-undo.json.bak", "windows-undo.json", "usage.recovery.json", "usage.json", "server.json"} {
 		if base == name || strings.HasPrefix(base, name+".") {
 			return name
 		}
@@ -216,7 +217,7 @@ func (c *startupFileCursor) record(r recordedFileResult) error {
 		delete(c.pending, name)
 		delete(c.published, name)
 		c.renames[name]++
-		if c.legacy && strings.HasPrefix(name, "settings.json") && c.renames[name] == 1 {
+		if c.legacy && strings.HasPrefix(name, "settings.json") && c.renames[name] == c.repairAfter {
 			c.repair[name] = append([]byte(nil), r.Bytes...)
 		}
 	default:
@@ -229,7 +230,7 @@ func (c *startupFileCursor) skipNative() error {
 		r := c.files.fileResults[c.next]
 		name := startupFileName(r.Path)
 		native := strings.HasPrefix(name, "control-journal.json") || name == "usage.recovery.json"
-		repair := c.legacy && (name == "settings.json" || name == "settings.json.bak") && c.renames[name] == 1 && r.Operation != "readFile"
+		repair := c.legacy && (name == "settings.json" || name == "settings.json.bak") && c.renames[name] == c.repairAfter && r.Operation != "readFile"
 		if !native && !repair {
 			break
 		}
@@ -256,7 +257,7 @@ func (c *startupFileCursor) Observe(entry replayledger.Entry) (bool, error) {
 	}
 	name := startupFileName(v.File)
 	switch name {
-	case "settings.json", "settings.json.bak", "windows-undo.json", "usage.json", "server.json":
+	case "settings.json", "settings.json.bak", "windows-undo.json", "windows-undo.json.bak", "usage.json", "server.json":
 	default:
 		return false, nil
 	}
