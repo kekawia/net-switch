@@ -113,10 +113,21 @@ func (c *Core) Poll(ctx context.Context) error {
 }
 
 func (c *Core) sampleLinesLocked(s engine.Snapshot) {
-	c.initialSampled = true
+	c.sampleSelectedLinesLocked(s, "")
+}
+
+// A live add must initialise its new lane without resampling accumulated
+// health on unrelated lines between their normal poll deadlines.
+func (c *Core) sampleSelectedLinesLocked(s engine.Snapshot, only string) {
+	if only == "" {
+		c.initialSampled = true
+	}
 	now := c.now()
 	items := c.itemsLocked()
 	for _, item := range items {
+		if only != "" && item.ID != only {
+			continue
+		}
 		l := c.lanes[item.ID]
 		l.sampled = true
 		address := false

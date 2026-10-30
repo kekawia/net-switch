@@ -7,6 +7,12 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
+Completed live line/IPv6 slice, 2026-10-30: adapterRename, ipv6, lineAdd,
+lineOrder and lineRemove add 2,143 entries, bringing the passing local
+aggregate to **6,128 / 7,894** (1,766 uncovered). Gate mutations fail and were
+reverted. Hosted race checks and independent review remain. See
+[live replay evidence](m4-native-live-replay.md). Earlier checkpoints follow.
+
 Completed health slice, 2026-10-30: failoverFailback, busyFailedChecks,
 probeFailover and lostDefaultRoute add 2,063 entries, bringing the passing local
 aggregate to **3,985 / 7,894** (3,909 uncovered). All four requested gate mutations

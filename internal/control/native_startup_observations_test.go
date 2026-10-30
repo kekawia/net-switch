@@ -77,8 +77,14 @@ func newStartupCounterparts(files *memoryFiles, cmp *nativeTraceComparator, firs
 	appendLog(i)
 	i++ // session announcement
 	add("counter-sample", "Ethernet", find("native:initial-poll"))
-	add("counter-sample", "Wi-Fi", find("native:initial-poll"))
-	for _, op := range []string{"platform.detectAdapters", "platform.readDefaultRoutes", "platform.readDefaultRoutes"} {
+	if second != "" {
+		add("counter-sample", "Wi-Fi", find("native:initial-poll"))
+	}
+	networkOps := []string{"platform.detectAdapters", "platform.readDefaultRoutes"}
+	if second != "" {
+		networkOps = append(networkOps, "platform.readDefaultRoutes")
+	}
+	for _, op := range networkOps {
 		add("async-result", op, find("platform:network"))
 	}
 	log(i)
@@ -90,6 +96,9 @@ func newStartupCounterparts(files *memoryFiles, cmp *nativeTraceComparator, firs
 	log(i)
 	appendLog(i)
 	i++ // routing on
+	if second == "" {
+		return c
+	}
 	for n, line := range []string{first, second} {
 		add("engine", "PUT /proxies/lane-"+line, find("native:ack"))
 		add("engine-reply", "/proxies/lane-"+line, find("native:ack"))

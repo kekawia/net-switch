@@ -11,6 +11,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/replayledger"
 )
 
@@ -18,7 +19,7 @@ import (
 // probe kinds/operators, counts completed rounds and publishes lane revisions.
 func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, fileCursor *startupFileCursor, start int) map[int]string {
 	t.Helper()
-	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" && trace.Name != "probeFailover" && trace.Name != "lostDefaultRoute" {
+	if trace.Name != "failoverFailback" && trace.Name != "busyFailedChecks" && trace.Name != "probeFailover" && trace.Name != "lostDefaultRoute" && trace.Name != "ipv6" {
 		t.Fatal("health trace not yet implemented", trace.Name)
 	}
 	checked := map[int]string{}
@@ -113,6 +114,9 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 		return id
 	}
 	last := origin
+	ipv6 := trace.Name == "ipv6"
+	deferredSources := map[string]int{}
+	var ipv6Enabled engine.Policy
 	completion := 0
 	for _, x := range trace.Entries[:start] {
 		if x.Kind == "completion" {
@@ -224,11 +228,19 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 			logsAt, eventsAt, effectAt := len(files.logs), len(files.events), len(files.order)
 			before := e.Snapshot()
 			want := twoLineNativeConfig(map[string]string{})
+			if ipv6 {
+				want.IPv6 = elapsed >= 31000 && elapsed < 62000
+			}
 			down := trace.Name == "failoverFailback" && elapsed >= 3000 && elapsed < 5000 || trace.Name == "probeFailover" && elapsed >= 26000 && elapsed < 41000 || trace.Name == "lostDefaultRoute" && elapsed >= 11000 && elapsed < 16000
 			if down {
 				want.Lanes["a1"] = "b2"
 			}
 			e.want = want
+			if ipv6 && elapsed%60000 == 0 {
+				if err := c.SaveUsage(); err != nil {
+					t.Fatal(err)
+				}
+			}
 			// A worker network input supplies addresses every poll. Health itself
 			// spaces route votes; the five-second discovery callback is separate.
 			p := c.op.Platform.(*fakePlatform)
@@ -240,13 +252,20 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 					a[k] = v
 				}
 				ips := []any{}
+				hasIPv6 := false
 				for _, addr := range interfaces[a["alias"].(string)] {
+					if addr["family"] == "IPv6" && addr["internal"] == false {
+						hasIPv6 = true
+					}
 					if addr["family"] == "IPv4" && addr["internal"] == false {
 						ips = append(ips, addr["address"])
 						routes = append(routes, map[string]any{"interfaceAddress": addr["address"]})
 					}
 				}
 				a["ipv4s"] = ips
+				if ipv6 {
+					a["ipv6"] = hasIPv6
+				}
 				adapters = append(adapters, a)
 			}
 			if routeOverride != nil {
@@ -309,8 +328,37 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				}
 			}
 			changed := before.StartedWith.Lanes["a1"] != want.Lanes["a1"]
-			if (e.Snapshot().AppliedRevision != before.AppliedRevision) != changed {
+			ipv6Changed := ipv6 && before.Policy.IPv6 != want.IPv6
+			if (e.Snapshot().AppliedRevision != before.AppliedRevision) != (changed || ipv6Changed) {
 				t.Fatal("unexpected/missing health revision")
+			}
+			if ipv6 {
+				if e.Snapshot().Instance != before.Instance || e.Snapshot().Status != "on" || e.Snapshot().Policy.IPv6 != want.IPv6 {
+					t.Fatal("IPv6 live instance/loaded policy", elapsed)
+				}
+				deadline := origin + 1000
+				if elapsed >= 32000 {
+					deadline = origin + 32000
+				}
+				if elapsed != 31000 && elapsed != 62000 && (c.ipv6Since == nil || *c.ipv6Since != deadline) {
+					t.Fatal("stable IPv6 observation interval", elapsed, c.ipv6Since)
+				}
+				if elapsed == 31000 {
+					ipv6Enabled = e.Snapshot().Policy
+				}
+				if elapsed == 62000 {
+					checkNativeIPv6Closure(t, ipv6Enabled, e.Snapshot().Policy)
+				}
+				for _, v6 := range []bool{false, true} {
+					d, err := e.active.Decide(platform.Owner{AppID: "unassigned"}, 40000, v6, 1)
+					if v6 && !want.IPv6 {
+						if err != policy.ErrIPv6 {
+							t.Fatal("IPv6 permission result", elapsed, err)
+						}
+					} else if err != nil || d.Line != "a1" {
+						t.Fatal("IPv6 native decision", elapsed, d, err)
+					}
+				}
 			}
 			for _, id := range []string{"a1", "b2"} {
 				l := c.lanes[id]
@@ -422,6 +470,12 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				}
 			}
 			order := []string{"platform:network", "native:poll"}
+			if ipv6 && elapsed%60000 == 0 {
+				order = append([]string{"write:usage.json"}, order...)
+			}
+			if ipv6Changed {
+				order = append(order, "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack")
+			}
 			if changed {
 				order = append(order, "log", "event", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "lane-log")
 			}
@@ -446,7 +500,24 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 			if err := cmp.Effects(order...); err != nil {
 				t.Fatal("health effect order", elapsed, err, files.order[effectAt:])
 			}
-			if _, err := fileCursor.CheckRevision(trace.Entries[pos+1:end], nil, cmp, effectAt); err != nil {
+			if ipv6Changed {
+				ruleStart, ruleEnd, retiredStart, retiredEnd, configSeq, pidSeq := 571, 591, 545, 634, 593, 599
+				note := "every line has IPv6 now: routing restarts to carry it too"
+				if elapsed == 62000 {
+					ruleStart, ruleEnd, retiredStart, retiredEnd, configSeq, pidSeq = 1087, 1107, 1061, 1150, 1109, 1115
+					note = "a line lost IPv6: routing restarts to keep apps on IPv4"
+				}
+				proof, err := fileCursor.CheckRevision(trace.Entries[ruleStart:ruleEnd], twoLineRevisionFiles(), cmp, effectAt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for seq, guard := range proof {
+					checked[seq] = guard
+				}
+				part := trace
+				part.Entries = trace.Entries[:retiredEnd]
+				checkNativeLiveEntries(t, part, clock, fileCursor, retiredStart-1, configSeq, pidSeq, want, checked, nativeLiveRestartPlan(t, clock, "ipv6", note))
+			} else if _, err := fileCursor.CheckRevision(trace.Entries[pos+1:end], nil, cmp, effectAt); err != nil {
 				t.Fatal(err)
 			}
 			// Project completed native operations into the historical scheduling
@@ -459,12 +530,32 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 			}
 			projected := []observation{}
 			find := func(key string) int {
+				if ipv6 && (key == "native:probe:a1" || key == "native:probe:b2" || key == "native:probe-result:a1" || key == "native:probe-result:b2") {
+					if source, ok := deferredSources[key]; ok {
+						return source
+					}
+				}
 				for i := effectAt; i < len(files.order); i++ {
 					if files.order[i] == key {
 						return i
 					}
 				}
 				return -1
+			}
+			projectProbe := map[string]bool{}
+			for _, id := range []string{"a1", "b2"} {
+				projectProbe[id] = len(answers[id]) > 0
+				if ipv6 {
+					for i := effectAt; i < len(files.order); i++ {
+						if files.order[i] == "native:probe:"+id || files.order[i] == "native:probe-result:"+id {
+							if _, exists := deferredSources[files.order[i]]; exists {
+								t.Fatal("unconsumed native IPv6 probe")
+							}
+							deferredSources[files.order[i]] = i
+						}
+					}
+					projectProbe[id] = elapsed <= 31000 && elapsed%15000 == 0 || elapsed > 31000 && (elapsed-31000)%15000 == 0
+				}
 			}
 			add := func(kind, id string, value any, source string) {
 				projected = append(projected, observation{kind, value})
@@ -484,7 +575,7 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				for _, a := range c.adapters {
 					item := map[string]any{}
 					for k, v := range a {
-						if k != "status" && k != "gateway" && k != "mediaType" {
+						if k != "status" && k != "gateway" && k != "mediaType" && k != "ipv6" {
 							item[k] = v
 						}
 					}
@@ -492,6 +583,9 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				}
 				projected = append(projected, observation{"adapter-snapshot", legacyAdapters})
 				async("platform.detectAdapters", legacyAdapters, "platform:network")
+				if ipv6 && elapsed%60000 == 0 {
+					async("platform.readMinimizeConnectionsPolicy", c.policy, "platform:network")
+				}
 			}
 			if changed {
 				if len(files.events) != eventsAt+1 {
@@ -532,12 +626,33 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				appendLog(logsAt, "log")
 			}
 			for _, id := range []string{"a1", "b2"} {
-				if c.lanes[id].routeReadAt != beforeRoutes[id] {
+				routeDue := c.lanes[id].routeReadAt != beforeRoutes[id]
+				if ipv6 {
+					if c.lanes[id].routeReadAt == nil || *c.lanes[id].routeReadAt != origin+(elapsed/5000)*5000 {
+						t.Fatal("retained five-second route cadence", elapsed, id)
+					}
+					if routeDue {
+						if _, exists := deferredSources["route:"+id]; exists {
+							t.Fatal("unconsumed native IPv6 route read")
+						}
+						deferredSources["route:"+id] = find("platform:network")
+					}
+					routeDue = elapsed <= 31000 && elapsed%5000 == 0 || elapsed > 31000 && (elapsed-31000)%5000 == 0
+				}
+				if routeDue {
 					async("platform.readDefaultRoutes", routes, "platform:network")
+					if ipv6 {
+						source, ok := deferredSources["route:"+id]
+						if !ok {
+							t.Fatal("missing retained route observation", elapsed, id)
+						}
+						counterparts.want[len(counterparts.want)-1].source = source
+						delete(deferredSources, "route:"+id)
+					}
 				}
 			}
 			for _, id := range []string{"a1", "b2"} {
-				if len(answers[id]) > 0 && !doubt[id] {
+				if projectProbe[id] && !doubt[id] {
 					probeRequest(id)
 				}
 			}
@@ -547,7 +662,7 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 				}
 			}
 			for _, id := range []string{"a1", "b2"} {
-				if len(answers[id]) == 0 || probes[id] == false {
+				if !projectProbe[id] || probes[id] == false {
 					continue
 				}
 				n := 1
@@ -597,6 +712,29 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 					completion = checkHealthCompletion(t, trace, seq, completion, checked)
 					continue
 				}
+				if ipv6 && checked[seq] != "" {
+					continue
+				}
+				if ipv6 && entry.Kind == "file-completion" {
+					matched, err := fileCursor.Observe(entry)
+					if !matched || err != nil {
+						t.Fatal("IPv6 usage completion", seq, err)
+					}
+					checked[seq] = "distinct native minute usage publication"
+					continue
+				}
+				if ipv6 && entry.Kind == "write" {
+					var value struct{ File, Text string }
+					_ = json.Unmarshal(entry.Value, &value)
+					if value.File != "/oracle/data/usage.json" {
+						t.Fatal("unexpected IPv6 publication", seq)
+					}
+					if err := fileCursor.Publication("usage.json", []byte(value.Text)); err != nil {
+						t.Fatal(err)
+					}
+					checked[seq] = "distinct native minute usage publication"
+					continue
+				}
 				if next >= len(projected) || projected[next].kind != entry.Kind {
 					t.Fatalf("health observation order at %d: %s, next %d/%d %+v", seq, entry.Kind, next, len(projected), projected)
 				}
@@ -631,6 +769,14 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 			if err := counterparts.Finish(); err != nil {
 				t.Fatal(err)
 			}
+			if ipv6 {
+				for _, id := range []string{"a1", "b2"} {
+					if projectProbe[id] {
+						delete(deferredSources, "native:probe:"+id)
+						delete(deferredSources, "native:probe-result:"+id)
+					}
+				}
+			}
 			pos = end
 		default:
 			t.Fatal("unsupported health input", x)
@@ -638,6 +784,9 @@ func replayNativeHealthSuffix(t *testing.T, c *Core, e *nativeStartupEngine, clo
 	}
 	if err := fileCursor.skipNative(); err != nil {
 		t.Fatal(err)
+	}
+	if ipv6 && (len(deferredSources) != 0 || polls != 62 || reads != 62 || e.applies != 3 || e.probes.Load() != 10) {
+		t.Fatal("IPv6 interval exhaustion", deferredSources, polls, reads, e.applies, e.probes.Load())
 	}
 	return checked
 }

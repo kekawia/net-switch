@@ -150,6 +150,12 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 		order := []string{"api"}
 		if step.settings >= 0 {
 			order = []string{"write:control-journal.json", "write:control-journal.json.bak", "write:settings.json", "write:settings.json.bak", "write:control-journal.json", "write:control-journal.json.bak", "native:apply", "native:ack", "api"}
+			if trace.Name == "lineOrder" || trace.Name == "lineRemove" {
+				order = append(order[:len(order)-1], "log", "api")
+			}
+			if trace.Name == "lineAdd" {
+				order = append(order[:len(order)-1], "lane-log", "lane-log", "log", "native:probe:a1", "native:probe-result:a1", "native:probe:000001", "native:probe-result:000001", "api")
+			}
 			if e.applies != applies+1 || e.Snapshot().AppliedPoint <= before.AppliedPoint {
 				t.Fatal("missing ack before response")
 			}
@@ -163,14 +169,52 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 		if step.settings >= 0 {
 			ruleFiles = twoLineRevisionFiles()
 		}
-		proof, err := fileCursor.CheckRevision(trace.Entries[step.begin+1:step.end], ruleFiles, cmp, effectStart)
+		ruleEntries := trace.Entries[step.begin+1 : step.end]
+		if (trace.Name == "lineOrder" || trace.Name == "lineRemove") && step.settings >= 0 {
+			// One live revision replaces both the old pre-save rule refresh and
+			// the restart's complete compilation. The restart checker below
+			// checks their positions relative to settings and other effects.
+			last := 212
+			if trace.Name == "lineRemove" {
+				ruleFiles = append(ruleFiles, "apps-a1.json")
+				last = 197
+			} else {
+				ruleFiles = append(ruleFiles, "apps-b2.json", "apps-a1.json", "share-a1.json", "cut-a1.json")
+			}
+			ruleEntries = append([]replayledger.Entry{}, trace.Entries[136:156]...)
+			ruleEntries = append(ruleEntries, trace.Entries[192:last]...)
+		}
+		if trace.Name == "lineAdd" && step.settings >= 0 {
+			ruleFiles = []string{"apps-a1.json", "apps-a1.json", "apps-000001.json", "share-000001.json", "cut-000001.json"}
+			ruleEntries = append([]replayledger.Entry{}, trace.Entries[87:92]...)
+			ruleEntries = append(ruleEntries, trace.Entries[128:148]...)
+		}
+		proof, err := fileCursor.CheckRevision(ruleEntries, ruleFiles, cmp, effectStart)
 		if err != nil {
 			t.Fatal("HTTP rule revision", err)
 		}
 		for seq, guard := range proof {
 			checked[seq] = guard
 		}
-		if clock.Now() != at || clock.afterCalls.Load() != waits || e.probes.Load() != probes || len(files.logs) != logs || len(files.events) != events {
+		wantLogs := logs
+		if (trace.Name == "lineOrder" || trace.Name == "lineRemove") && step.settings >= 0 {
+			wantLogs++
+			note := "line order: Wi-Fi, Ethernet"
+			if trace.Name == "lineRemove" {
+				note = "removed Wi-Fi (Wi-Fi)"
+			}
+			if files.logs[logs] != note || e.Snapshot().Instance != before.Instance || !reflect.DeepEqual(e.calls[len(e.calls)-1:], []string{"apply"}) {
+				t.Fatal("live line order changed session or diagnostic")
+			}
+		}
+		if trace.Name == "lineAdd" && step.settings >= 0 {
+			wantLogs += 3
+			probes += 2
+			if !reflect.DeepEqual(files.logs[logs:], []string{"Ethernet's apps now use Ethernet", "Wi-Fi's apps now use Wi-Fi", "added Wi-Fi (Wi-Fi)"}) {
+				t.Fatal("live add diagnostics", files.logs[logs:])
+			}
+		}
+		if clock.Now() != at || clock.afterCalls.Load() != waits || e.probes.Load() != probes || len(files.logs) != wantLogs || len(files.events) != events {
 			t.Fatal("transaction timing or unexpected effects")
 		}
 		counts := map[string]int{}
@@ -182,6 +226,9 @@ func replayNativePolicySteps(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			counts[d.Line]++
 		}
 		expectedCounts := map[string]int{"a1": 400}
+		if trace.Name == "lineOrder" {
+			expectedCounts = map[string]int{"b2": 400}
+		}
 		if step.want.Combine {
 			expectedCounts = map[string]int{"a1": 100, "b2": 300}
 			if step.want.Shares["a1"] == 500000 {

@@ -184,6 +184,7 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 		return bad("That line isn’t there any more.")
 	}
 	clearWaiting := false
+	addedID := ""
 	note := ""
 	switch action {
 	case "/api/lines/add":
@@ -206,6 +207,7 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 			return bad("Net Switch can use up to 8 lines.")
 		}
 		l := lines.NewLine(adapter, items, c.op.LineID)
+		addedID = l.ID
 		note = fmt.Sprintf("added %s (%s)", l.Label, l.Alias)
 		if len(items) > 0 && len(waiting) > 0 {
 			pins = lines.PlaceWaitingApps(waiting, pins, l.ID)
@@ -297,7 +299,7 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 	if clearWaiting {
 		remove = append(remove, "waitingApps")
 	}
-	if err := c.save(map[string]any{"lines": items, "appLines": pins, "combine": combining}, remove...); err != nil {
+	if err := c.saveWithAddedLine(map[string]any{"lines": items, "appLines": pins, "combine": combining}, addedID, remove...); err != nil {
 		return err
 	}
 	c.mu.Lock()
@@ -308,6 +310,9 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 	}
 	if note != "" {
 		c.log("%s", note)
+	}
+	if c.op.ServiceMode && addedID != "" {
+		c.scheduleProbes(ctx, nil)
 	}
 	if !c.op.ServiceMode && action != "/api/lines/update" && c.op.Engine.Snapshot().Status != "off" {
 		return c.restart(ctx)
