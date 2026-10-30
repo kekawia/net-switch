@@ -90,8 +90,10 @@ SEC("kprobe/udp_sendmsg") int observe_send(struct pt_regs *ctx) {
     value.device = dev;
     value.observed_ns = ktime();
     count(ATTEMPTS);
-    long err = update(&actors, &key, &value, 1); /* immutable BPF_NOEXIST */
-    if (err && err != -17) poison();
+    if (!lookup(&actors, &key)) {
+        long err = update(&actors, &key, &value, 1); /* immutable BPF_NOEXIST */
+        if (err && err != -17) poison();
+    }
     return 0;
 unreadable:
     count(READ_FAILURE);
@@ -113,9 +115,14 @@ SEC("cgroup_skb/egress") int observe_packet(void *ctx) {
     __builtin_memcpy(key.ports, header + 20, 4);
     struct tuple_evidence value = { .first_cookie = cookie };
     count(PACKETS);
+    struct tuple_evidence *old = lookup(&tuples, &key);
+    if (old) {
+        if (old->first_cookie != cookie) __sync_fetch_and_add(&old->conflicts, 1);
+        return 1;
+    }
     long err = update(&tuples, &key, &value, 1);
     if (err == -17) {
-        struct tuple_evidence *old = lookup(&tuples, &key);
+        old = lookup(&tuples, &key);
         if (!old) poison();
         else if (old->first_cookie != cookie) __sync_fetch_and_add(&old->conflicts, 1);
     } else if (err) poison();
