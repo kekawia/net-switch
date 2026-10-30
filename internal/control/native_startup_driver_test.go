@@ -48,16 +48,22 @@ func replayNativeStartup(t *testing.T, name string) {
 		t.Fatal("missing hash-verified startup fixture", name)
 	}
 	firstLine, secondLine := "a1", "b2"
+	reconnectSlice := name == "reconnectPinned" || name == "reconnectShared"
 	liveSlice := name == "lineOrder" || name == "lineRemove" || name == "lineAdd" || name == "adapterRename"
 	healthSlice := name == "failoverFailback" || name == "busyFailedChecks" || name == "probeFailover" || name == "lostDefaultRoute" || name == "ipv6"
 	usageSlice := name == "midnightGap" || name == "capReset" || name == "capMoved" || name == "capBlockedAndMainException" || name == "combiningNoOpenLine"
 	pins := map[string]string{`c:\discord\app-*\discord.exe`: "b2"}
 	owners := []string{`C:\Discord\app-1.0.9\Discord.exe`, `C:\Discord\app-1.0.10\Discord.exe`, `C:\Discord\app-2.0.0\Discord.exe`}
 	ownerLine := secondLine
-	if name == "appLine" || name == "combining" || usageSlice || healthSlice || liveSlice {
+	if name == "appLine" || name == "combining" || usageSlice || healthSlice || liveSlice || reconnectSlice {
 		pins = map[string]string{}
 		owners = []string{`C:\Apps\Firefox.exe`, `C:\Apps\other.exe`}
 		ownerLine = firstLine
+	}
+	if name == "reconnectPinned" {
+		pins = map[string]string{`c:\apps\firefox.exe`: "b2"}
+		owners = []string{`C:\Apps\Firefox.exe`}
+		ownerLine = secondLine
 	}
 	if name == "legacyCaseOrder" || name == "lineAdd" {
 		ids := map[string]string{"060606": "000001"}
@@ -138,6 +144,9 @@ func replayNativeStartup(t *testing.T, name string) {
 				t.Fatal(err)
 			}
 			operatorStateExpectation(response["body"].(map[string]any), false)
+			if reconnectSlice {
+				operatorStateExpectation(response["body"].(map[string]any)["state"].(map[string]any), false)
+			}
 			if name == "lineRemove" {
 				// A live revision does not clear the surviving line's completed
 				// probe when the old restart would reset its health bookkeeping.
@@ -173,7 +182,7 @@ func replayNativeStartup(t *testing.T, name string) {
 		secondLine = ""
 		c.op.LineID = func() string { return "000001" }
 	}
-	if name == "combiningNoOpenLine" {
+	if name == "combiningNoOpenLine" || name == "reconnectShared" {
 		e.want.Combine = true
 	}
 	c.op.Engine = e
@@ -394,7 +403,11 @@ func replayNativeStartup(t *testing.T, name string) {
 	check("no repeated publication effects", cmp.Effects())
 	for _, owner := range owners {
 		d, err := e.active.Decide(platform.Owner{AppID: apppath.Normalize(owner, apppath.Windows)}, 40000, false, 1)
-		if err != nil || d.Line != ownerLine || d.Revision != base.Snapshot().AppliedRevision {
+		validLine := d.Line == ownerLine
+		if name == "reconnectShared" {
+			validLine = d.Line == firstLine || d.Line == secondLine
+		}
+		if err != nil || !validLine || d.Revision != base.Snapshot().AppliedRevision {
 			t.Fatal("complete pin replacement guard", d, err)
 		}
 	}
@@ -405,7 +418,11 @@ func replayNativeStartup(t *testing.T, name string) {
 		if name == "combiningNoOpenLine" {
 			fallback = secondLine
 		}
-		if err != nil || d.Line != fallback {
+		validLine := d.Line == fallback
+		if name == "reconnectShared" {
+			validLine = d.Line == firstLine || d.Line == secondLine
+		}
+		if err != nil || !validLine {
 			t.Fatal("near-neighbour/unpinned fallback guard", owner, d, err)
 		}
 	}
@@ -452,7 +469,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	fileCursor := newStartupFileCursor(files, name == "legacyCaseOrder")
 	counterparts := newStartupCounterparts(files, cmp, firstLine, secondLine, name == "legacyCaseOrder", name == "appLine" || name == "capReset" || name == "lostDefaultRoute" || liveSlice)
 	var pinEvidence map[int]string
-	if liveSlice || name == "ipv6" {
+	if liveSlice || name == "ipv6" || reconnectSlice {
 		start, end, names := 66, 86, twoLineRevisionFiles()
 		if name == "lineAdd" {
 			start, end, names = 62, 67, []string{"apps-a1.json"}
@@ -476,6 +493,17 @@ func replayNativeStartup(t *testing.T, name string) {
 	pendingLogs := []string{}
 	completionID := 0
 	for _, entry := range trace.Entries {
+		if reconnectSlice && entry.Kind == "connections" {
+			check("startup counterpart exhaustion", counterparts.Finish())
+			if logIndex != len(files.logs) || len(pendingLogs) != 0 {
+				t.Fatal("startup observation leftovers")
+			}
+			for seq, guard := range replayNativeReconnect(t, c, e, clock, files, trace, cmp) {
+				checked[seq] = guard
+			}
+			logIndex = len(files.logs)
+			break
+		}
 		if name == "adapterRename" && entry.Kind == "adapters" {
 			check("startup counterpart exhaustion", counterparts.Finish())
 			if logIndex != len(files.logs) || len(pendingLogs) != 0 {
@@ -729,7 +757,7 @@ func replayNativeStartup(t *testing.T, name string) {
 			checked[entry.Seq] = guard
 		}
 	}
-	if logIndex != len(files.logs) || len(pendingLogs) != 0 || (!usageSlice && !healthSlice && len(files.events) != 0) || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || (!usageSlice && !healthSlice && name != "adapterRename" && !clock.Now().Equal(origin)) {
+	if logIndex != len(files.logs) || len(pendingLogs) != 0 || (!usageSlice && !healthSlice && len(files.events) != 0) || len(files.outsideCloses) != 0 || clock.afterCalls.Load() != 0 || (!usageSlice && !healthSlice && !reconnectSlice && name != "adapterRename" && !clock.Now().Equal(origin)) {
 		t.Fatal("startup leftover/timing guard")
 	}
 	check("file exhaustion", fileCursor.Finish())

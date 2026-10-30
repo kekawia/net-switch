@@ -7,6 +7,11 @@ It authorizes no retirement or deletion.
 
 ## Measured result
 
+Completed reconnect slice, 2026-10-30: reconnectPinned and reconnectShared add
+305 entries, bringing the passing local aggregate to **6,433 / 7,894**
+(1,461 uncovered), exits 0/0/0. Hosted race checks and independent review remain.
+See [reconnect evidence](m4-native-reconnect-replay.md).
+
 Completed live line/IPv6 slice, 2026-10-30: adapterRename, ipv6, lineAdd,
 lineOrder and lineRemove add 2,143 entries, bringing the passing local
 aggregate to **6,128 / 7,894** (1,766 uncovered). Gate mutations fail and were

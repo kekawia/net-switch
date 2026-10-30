@@ -112,6 +112,8 @@ func (e *nativeStartupEngine) Probe(ctx context.Context, r engine.ProbeRequest) 
 }
 
 func TestNativeStartupReplay(t *testing.T) {
+	t.Run("reconnectPinned", func(t *testing.T) { replayNativeStartup(t, "reconnectPinned") })
+	t.Run("reconnectShared", func(t *testing.T) { replayNativeStartup(t, "reconnectShared") })
 	t.Run("ipv6", func(t *testing.T) { replayNativeStartup(t, "ipv6") })
 	t.Run("adapterRename", func(t *testing.T) { replayNativeStartup(t, "adapterRename") })
 	t.Run("lineAdd", func(t *testing.T) { replayNativeStartup(t, "lineAdd") })
