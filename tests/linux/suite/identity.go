@@ -15,7 +15,6 @@ import (
 
 	"github.com/AyoubAchour/net-switch/tests/linux/app"
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
-	"github.com/AyoubAchour/net-switch/tests/linux/engine/singbox"
 	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 	"github.com/AyoubAchour/net-switch/tests/linux/topo"
 	"github.com/AyoubAchour/net-switch/tests/linux/wire"
@@ -232,7 +231,7 @@ func Provision(ctx context.Context, self string, logf func(string, ...any)) (*Fi
 		return nil, err
 	}
 	for name, pin := range tools {
-		data, err := singbox.Download(ctx, pin)
+		data, err := harness.Download(ctx, pin)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", name, err)
 		}
@@ -338,7 +337,7 @@ func flatpakIdentity(e *Env) {
 }
 
 // AppImage tooling, pinned (sizes and SHA-256 from the GitHub release assets).
-var appImageTools = map[string]map[string]singbox.Pin{
+var appImageTools = map[string]map[string]harness.Pin{
 	"amd64": {
 		"appimagetool": {URL: "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage", Size: 15092216, SHA256: "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"},
 		"runtime":      {URL: "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64", Size: 944632, SHA256: "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"},

@@ -1,4 +1,4 @@
-# Only e2e-tun.mjs on a disposable GitHub-hosted Windows runner may use this.
+# Only hosted Windows TUN tests on a disposable GitHub-hosted runner may use this.
 param([ValidateSet('inspect', 'state', 'dns-state', 'dns-change', 'dns-restore')] [string] $Action)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
@@ -19,9 +19,9 @@ if ($Action -eq 'inspect') {
     dns = @((Get-DnsClientServerAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4).ServerAddresses)
   } | ConvertTo-Json -Compress
 } elseif ($Action -eq 'state') {
-  $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Name -eq 'NetSwitch' -or $_.Name -like '*sing-tun*' } | Select-Object Name, ifIndex, Status)
-  $routes = @(Get-NetRoute | Where-Object { $_.InterfaceAlias -eq 'NetSwitch' -or $_.InterfaceAlias -like '*sing-tun*' -or $_.DestinationPrefix -like '198.18.0.*' -or $_.DestinationPrefix -like 'fdfe:dcba:9876*' } | Select-Object InterfaceAlias, InterfaceIndex, DestinationPrefix, NextHop)
-  $firewall = @(Get-NetFirewallRule | Where-Object { $_.Name -like '*sing-tun*' -or $_.DisplayName -like '*sing-tun*' } | Select-Object Name, DisplayName)
+  $adapters = @(Get-NetAdapter -IncludeHidden | Where-Object { $_.Name -eq 'NetSwitch' } | Select-Object Name, ifIndex, Status)
+  $routes = @(Get-NetRoute | Where-Object { $_.InterfaceAlias -eq 'NetSwitch' -or $_.DestinationPrefix -like '198.18.0.*' -or $_.DestinationPrefix -like 'fdfe:dcba:9876*' } | Select-Object InterfaceAlias, InterfaceIndex, DestinationPrefix, NextHop)
+  $firewall = @()
   [pscustomobject]@{ adapters = $adapters; routes = $routes; firewall = $firewall } | ConvertTo-Json -Depth 5 -Compress
 } else {
   $index = [int]$env:NETSWITCH_TEST_ADAPTER

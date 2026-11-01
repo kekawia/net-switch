@@ -16,7 +16,7 @@
 //
 // Every case carries one label:
 //
-//   - parity: must pass on the baseline (today's engine, sing-box) and on 1.0.
+//   - parity: must pass on the 0.3.x baseline and on 1.0.
 //     It may not call Expect.
 //   - baseline-defect: a known defect of the baseline, named by the case. It
 //     calls Expect exactly once. On the baseline that assertion must fail

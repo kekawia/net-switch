@@ -199,7 +199,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      # The baseline is configured by the app's own generator (lib/engine.mjs).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ steps.pins.outputs.node_version }}
@@ -274,7 +273,7 @@ jobs:
           "NSACCEPT_PROFILE=$PROFILE"
           "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine"
           --build-mode release
-          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance/release"
+          --out "$RUNNER_TEMP/acceptance/release"
           --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
       - name: Run fault-injection acceptance against the tagged binary
@@ -289,7 +288,7 @@ jobs:
           "NSACCEPT_PROFILE=$PROFILE"
           "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine-faults"
           --build-mode faults
-          --node "$(command -v node)" --repo "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/acceptance/faults"
+          --out "$RUNNER_TEMP/acceptance/faults"
           --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
       - name: Summarize capacity heap and goroutine profiles

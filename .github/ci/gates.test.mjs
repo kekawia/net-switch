@@ -6,10 +6,10 @@ import { jobRuns, readWorkflow } from './workflows.mjs';
 
 const workflow = name => readWorkflow(readFileSync(new URL(`../workflows/${name}.yml`, import.meta.url), 'utf8'));
 
-test('Control matrix retains both native and historical branches on both architectures', () => {
+test('Control matrix runs the native Go control service on both architectures', () => {
   const entries = workflow('control').jobs.get('windows').matrix;
   assert.deepEqual(entries.map(({runner, control}) => `${runner}/${control}`).sort(), [
-    'windows-11-arm/go', 'windows-11-arm/node', 'windows-latest/go', 'windows-latest/node',
+    'windows-11-arm/go', 'windows-latest/go',
   ]);
 });
 
@@ -21,7 +21,7 @@ test('Control matrix retains both native and historical branches on both archite
 // they depend on no changed file and wait for no classifier.
 const expected = {
   ci: {
-    'windows-acceptance': 'legacy_windows', testisp: 'testisp', engine: 'legacy_windows',
+    'windows-acceptance': 'legacy_windows', testisp: 'testisp',
     'go1-windows': 'go_windows', 'go1-linux': 'go_linux', wintun: 'wintun', linux: 'node',
     'linux-helper': 'helper', 'test-node-22': 'node', 'test-node-24': 'node', installer: 'installer', arm64: 'node',
     'control-security': 'investigation', 'testisp-reproduction': 'investigation', 'golist-oracle': 'oracle',

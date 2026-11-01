@@ -1,13 +1,8 @@
-// Hosted-runner fixture only. Like tun-test-udp.mjs, add a non-final destination
-// rewrite, leaving the product's process rules, selectors and outbounds intact.
-import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+// Hosted-runner TLS responder fixture for local TestISP traffic verification.
 import { randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { writeFile } from 'node:fs/promises';
 import { createServer } from 'node:https';
 import path from 'node:path';
-import { buildEngineConfig, freePort } from '../lib/engine.mjs';
 import { hostedOnly, run } from '../tests/windows/testisp/harness.mjs';
 
 // The harness default of 60 s expired in job 120165918557 on windows-11-arm.
@@ -73,42 +68,4 @@ export async function localHttps(address) {
     address, port: server.address().port, seen, events,
     async close() { closing = true; server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); },
   };
-}
-
-export async function startTrafficEngine(engine, lines, responder) {
-  hostedOnly();
-  assert.equal(engine.child, null);
-  engine.setStatus('starting');
-  await engine.verifyEngineFiles();
-  await engine.setLines(lines);
-  engine.apiPort = await freePort();
-  engine.apiSecret = randomBytes(24).toString('hex');
-  const config = buildEngineConfig({ mode: 'tun', lines, ruleDir: engine.ruleDir,
-    apiPort: engine.apiPort, apiSecret: engine.apiSecret });
-  config.route.rules.unshift(httpsRoute(responder));
-  config.log.level = 'info';
-  await writeFile(engine.configPath, JSON.stringify(config, null, 2));
-  await engine.log.rotate();
-  const child = spawn(engine.singBoxPath, ['run', '-c', engine.configPath, '--disable-color'], {
-    cwd: engine.dataDir, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  engine.child = child;
-  const collect = (chunk) => {
-    const lines = chunk.toString().split(/\r?\n/).filter(Boolean);
-    engine.output.push(...lines);
-    engine.output = engine.output.slice(-40);
-    for (const line of lines) engine.log.append(line);
-  };
-  child.stdout.on('data', collect);
-  child.stderr.on('data', collect);
-  child.on('error', (error) => collect(Buffer.from(error.stack)));
-  child.on('exit', (code) => engine.handleExit(child, code));
-  await writeFile(engine.pidPath, String(child.pid));
-  await engine.waitUntilReady(child);
-  engine.setStatus('on');
-}
-
-export function httpsRoute(responder) {
-  return { ip_cidr: [`${responder.target.host}/32`], network: 'tcp', port: 443,
-    action: 'route-options', override_address: responder.address, override_port: responder.port };
 }

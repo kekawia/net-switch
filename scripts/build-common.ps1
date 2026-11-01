@@ -1,5 +1,5 @@
-# Windows PowerShell 5.1. Shared by build-release.ps1 and build-helper.ps1, which
-# dot-source it, so both download, cache and check pinned files the same way.
+# Windows PowerShell 5.1. Shared by build-helper.ps1 and test scripts, which
+# dot-source it, so they download, cache and check pinned files the same way.
 # Downloads are cached, but their hashes are always checked.
 
 function Get-BuildCache([string] $Dist) {
@@ -8,7 +8,7 @@ function Get-BuildCache([string] $Dist) {
 }
 
 function Get-NativeArchitecture {
-  # This system key is shared with emulated processes. Keep the source-engine
+  # This system key is shared with emulated processes. Keep the native
   # downloader in agreement with lib/architecture.mjs, even in an x64 shell.
   $native = Get-ItemPropertyValue -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' -Name PROCESSOR_ARCHITECTURE
   switch ($native) {
@@ -22,11 +22,8 @@ function Get-ArchitecturePins($Pins, [string] $Arch) {
   switch ($Arch) {
     'x64' { return $Pins }
     'arm64' {
-      # Licenses and source revisions are shared, so both payloads must use the
-      # same upstream versions even though their binary hashes differ.
-      if ($Pins.arm64.node.version -ne $Pins.node.version -or
-          $Pins.arm64.singBox.version -ne $Pins.singBox.version) {
-        throw 'ARM64 and x64 runtime/engine versions disagree; review the shared licenses and source pins.'
+      if ($Pins.arm64.node.version -ne $Pins.node.version) {
+        throw 'ARM64 and x64 runtime versions disagree; review the shared licenses and source pins.'
       }
       return $Pins.arm64
     }
@@ -34,36 +31,10 @@ function Get-ArchitecturePins($Pins, [string] $Arch) {
   }
 }
 
-function Get-EngineChecksumFile([string] $RepoRoot, [string] $Arch) {
-  $name = if ($Arch -eq 'arm64') { 'SHA256SUMS-arm64.txt' } else { 'SHA256SUMS.txt' }
-  return Join-Path $RepoRoot "engine/$name"
-}
-
 function Get-HelperBinaryPath([string] $RepoRoot, [string] $Arch) {
   # A cross-build must not replace the helper used to run this checkout.
   if ($Arch -eq (Get-NativeArchitecture)) { return Join-Path $RepoRoot 'helper/bin/netswitch-helper.exe' }
   return Join-Path $RepoRoot "helper/bin/$Arch/netswitch-helper.exe"
-}
-
-function Assert-EnginePins($Pin, [string] $ChecksumFile, [string] $Arch) {
-  Assert-NoLink $ChecksumFile
-  $sums = @{}
-  foreach ($line in Get-Content -LiteralPath $ChecksumFile) {
-    if ($line -match '^\s*(?:#.*)?$') { continue }
-    if ($line -notmatch '^([a-fA-F0-9]{64})\s+\*?([^\s]+)\s*$') { throw "Invalid engine checksum line: $line" }
-    if ($sums.ContainsKey($Matches[2])) { throw "Duplicate engine checksum: $($Matches[2])" }
-    $sums[$Matches[2]] = $Matches[1]
-  }
-  $files = @($Pin.files.PSObject.Properties)
-  if (-not $sums.ContainsKey('sing-box.exe') -or
-      ($Arch -eq 'x64' -and -not $sums.ContainsKey('libcronet.dll')) -or
-      @($sums.Keys | Where-Object { $_ -notin @('sing-box.exe', 'libcronet.dll') }).Count -or
-      $sums.Count -ne $files.Count) {
-    throw "Invalid $Arch engine file list in versions.json or $ChecksumFile"
-  }
-  foreach ($file in $files) {
-    if ($sums[$file.Name] -ne $file.Value) { throw "Engine pin disagrees with ${ChecksumFile}: $($file.Name)" }
-  }
 }
 
 function Assert-PeArchitecture([string] $Path, [string] $Arch) {

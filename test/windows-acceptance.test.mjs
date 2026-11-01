@@ -9,8 +9,9 @@ test('default launch paths are stable when the routing script is called outside 
   const moduleURL = new URL('../tests/windows/launch.mjs', import.meta.url).href;
   const source = `import { launchOptions } from ${JSON.stringify(moduleURL)}; console.log(JSON.stringify(launchOptions()));`;
   const options = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source], { cwd: tmpdir(), encoding: 'utf8', windowsHide: true }));
-  assert.equal(options.entry, fileURLToPath(new URL('../server.mjs', import.meta.url)));
-  assert.equal(options.engine, fileURLToPath(new URL('../engine/sing-box.exe', import.meta.url)));
+  assert.equal(options.profile, 'v1');
+  assert.equal(options.entry, fileURLToPath(new URL('../tests/windows/engine-driver.mjs', import.meta.url)));
+  assert.equal(options.engine, fileURLToPath(new URL('../dist/windows-test/netswitch-engine.exe', import.meta.url)));
 });
 
 test('both launcher flag spellings select Go and its exact engine without falling back to Node', () => {
@@ -33,14 +34,12 @@ test('both launcher flag spellings select Go and its exact engine without fallin
   }
 });
 
-test('the Node e2e shim and an explicit production entry keep their distinct engine arguments', () => {
+test('retired baseline profile and legacy engine flags are rejected', () => {
   const moduleURL = new URL('../scripts/server-under-test.mjs', import.meta.url).href;
   const sharedURL = new URL('../tests/windows/launch.mjs', import.meta.url).href;
-  for (const entry of [null, fileURLToPath(new URL('../server.mjs', import.meta.url))]) {
-    const source = `${entry ? `process.argv.push('--server-entry', ${JSON.stringify(entry)});` : ''} const { launchSpec } = await import(${JSON.stringify(moduleURL)}); const { serverCommand } = await import(${JSON.stringify(sharedURL)}); console.log(JSON.stringify({options:launchSpec, command:serverCommand(launchSpec,'data')}));`;
-    const { options, command } = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e', source], { cwd: tmpdir(), encoding: 'utf8', windowsHide: true }));
-    assert.equal(command[1][0], options.entry);
-    assert.equal(command[1].at(-2), entry ? '--engine-dir' : '--engine-executable');
+  for (const args of [['--profile', 'baseline'], ['--engine-dir', 'engine']]) {
+    const source = `process.argv.push(...${JSON.stringify(args)}); await import(${JSON.stringify(moduleURL)}); await import(${JSON.stringify(sharedURL)});`;
+    assert.throws(() => execFileSync(process.execPath, ['--input-type=module', '-e', source], { cwd: tmpdir(), encoding: 'utf8', stdio: 'pipe', windowsHide: true }));
   }
 });
 

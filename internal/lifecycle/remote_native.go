@@ -70,7 +70,7 @@ func engineAppIdentityWith(path string, rules apppath.Rules) string {
 }
 
 // nativeRevision compiles Control's policy into the engine's config. The line
-// binds by alias, the same identity the sing-box adapter used, so the config
+// binds by alias, the same identity the earlier adapter used, so the config
 // is a pure function of Control's durable revision alone: the same revision
 // compiles to the same hash after any restart. Alias changes are live policy
 // revisions: platform Prepare resolves the new alias without replacing the

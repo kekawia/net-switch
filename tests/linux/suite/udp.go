@@ -30,7 +30,7 @@ func addUDP(r *registry) {
 		func(e *Env) { udpPortReuse(e, true) })
 	r.add("caps.blocked-udp-rejected-fast", "A capped app sending UDP non-stop keeps getting refused, and nothing gets out", harness.Parity, "4.6, 5.3, 5.9", 0, cappedUDP)
 	r.defect("caps.blocked-tcp-fails-fast", "A capped app's new connections are refused at once, every time, and none reaches the internet",
-		"the cap's reject rule has no no_drop: after 50 refusals in 30 s sing-box drops instead, and connections hang (the cap hang)", "4.6, 5.4", 0, cappedTCP)
+		"the cap's reject rule has no no_drop: after 50 refusals in 30 s the 0.3.x baseline drops instead, and connections hang (the cap hang)", "4.6, 5.4", 0, cappedTCP)
 	r.defect("tcp.port-reuse-freeze", "Reusing a TCP source port right after a connection closes never stalls, with exactly one dial each time",
 		"gVisor keeps the closed connection in TIME_WAIT for 60 s and drops a new SYN on its 4-tuple (the 60 s freeze)", "5.1", 3*time.Minute, tcpPortReuse)
 }

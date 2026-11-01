@@ -17,7 +17,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/replayledger"
 )
 
-// Native goldens for the exact inputs of the frozen sing-box rule-file
+// Native goldens for the exact inputs of the frozen 0.3.x rule-file
 // fixtures (test/fixtures/windows-golden.json, which stays untouched). Every
 // expected configuration, identity and decision below is written out by hand;
 // nothing is derived from the compiler or selector under test. The mapping

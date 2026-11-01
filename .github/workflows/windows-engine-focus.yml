@@ -214,15 +214,8 @@ jobs:
         run: |
           node tests/windows/capacity-profile.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Prepare the unchanged 0.3.x comparison
+      - name: Compare current and adapter-first cleanup
         if: ${{ !cancelled() && endsWith(github.ref, '-lifecycle') && steps.build.outcome == 'success' }}
-        run: |
-          go -C helper build -mod=readonly -o bin/netswitch-helper.exe .
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./scripts/fetch-engine.ps1
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Compare current and adapter-first cleanup with the same-run baseline
-        if: ${{ success() && endsWith(github.ref, '-lifecycle') }}
         env:
           NETSWITCH_ENGINE_TEST_TRACE: '1'
         run: |

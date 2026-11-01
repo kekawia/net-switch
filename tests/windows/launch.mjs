@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { identity, run, until } from './testisp/harness.mjs';
+import { startEngineDriver } from './launch-engine.mjs';
+import { identity, run } from './testisp/harness.mjs';
 
 function argument(name, fallback) {
   let value;
@@ -21,14 +21,16 @@ function argument(name, fallback) {
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 export function launchOptions() {
-  const profile = argument('--profile', 'baseline');
+  const profile = argument('--profile', 'v1');
+  assert.equal(profile, 'v1', 'Only --profile v1 is supported');
+  assert(!process.argv.includes('--engine-dir'), '--engine-dir is retired');
   const server = path.resolve(argument(['--server-exe', '--server-executable'], process.execPath));
   const nodeServer = server.toLowerCase() === process.execPath.toLowerCase() || /^(node|nodejs)(\.exe)?$/i.test(path.basename(server));
-  const entry = argument('--server-entry', nodeServer ? path.join(repoRoot, profile === 'v1' ? 'tests/windows/engine-driver.mjs' : 'server.mjs') : null);
-  const engineDir = argument('--engine-dir', path.join(repoRoot, 'engine'));
+  const entry = argument('--server-entry', nodeServer ? path.join(repoRoot, 'tests/windows/engine-driver.mjs') : null);
+  const engine = path.resolve(argument(['--engine-exe', '--engine-executable'], path.join(repoRoot, 'dist/windows-test/netswitch-engine.exe')));
   return {
     server, entry: entry ? path.resolve(entry) : null,
-    engine: path.resolve(argument(['--engine-exe', '--engine-executable'], profile === 'v1' ? path.join(repoRoot, 'dist/windows-test/netswitch-engine.exe') : path.join(engineDir, 'sing-box.exe'))),
+    engine,
     profile,
     serverVersionArgs: JSON.parse(argument('--server-version-args', '["--version"]')),
     engineVersionArgs: JSON.parse(argument('--engine-version-args', '["version"]')),
@@ -48,58 +50,16 @@ export async function recordLaunch(options, file) {
 }
 
 export function serverCommand(options, dataDir, { proxy = false } = {}) {
-  const shim = options.entry === path.join(repoRoot, 'scripts', 'server-under-test-node.mjs');
   return [options.server, [
     ...(options.entry ? [options.entry] : ['--root', repoRoot]), ...(proxy ? ['--dev-proxy'] : []),
     '--user-data', dataDir, '--machine-data', dataDir,
-    ...(!options.entry || shim ? ['--engine-executable', options.engine] : ['--engine-dir', path.dirname(options.engine)]),
+    '--engine-executable', options.engine,
   ]];
 }
 
 export async function startServer(options, dataDir, output) {
-  if (options.profile === 'v1') {
-    const { startEngineDriver } = await import('./launch-engine.mjs');
-    return startEngineDriver(options, dataDir, output);
-  }
-  const [exe, args] = serverCommand(options, dataDir);
-  const child = spawn(exe, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
-  child.stdout.on('data', output); child.stderr.on('data', output);
-  let spawnError;
-  child.on('error', (error) => { spawnError = error; });
-  let session;
-  try {
-    session = await until(async () => {
-      if (spawnError) throw spawnError;
-      if (child.exitCode !== null || child.signalCode !== null) throw new Error(`Server exited ${child.exitCode ?? child.signalCode}`);
-      const candidate = JSON.parse(await readFile(path.join(dataDir, 'server.json'), 'utf8'));
-      // A crash may leave a stale session file from the preceding run.
-      if (candidate.pid !== child.pid) return null;
-      return candidate;
-    }, 'server session', 90_000);
-  } catch (error) { child.kill(); throw error; }
-  const api = async (route, body) => {
-    const response = await fetch(`http://127.0.0.1:${session.port}/api/${route}`, {
-      method: body === undefined ? 'GET' : 'POST',
-      headers: { 'X-Token': session.token, 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(60_000),
-    });
-    const answer = await response.json();
-    assert(response.ok, `${route}: ${JSON.stringify(answer)}`);
-    return answer;
-  };
-  const on = () => until(async () => {
-    assert(child.exitCode === null && child.signalCode === null, 'Server died');
-    const state = await api('state');
-    if (state.routing.status === 'error') throw new Error(JSON.stringify(state.routing));
-    return state.routing.status === 'on' && state;
-  }, 'routing on', 120_000);
-  const quit = async () => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    await api('quit', {});
-    await until(() => child.exitCode !== null || child.signalCode !== null, 'server exit', 30_000);
-    assert.equal(child.exitCode, 0, 'Server quit failed');
-  };
-  return { child, api, on, quit };
+  assert.equal(options.profile, 'v1', 'Only --profile v1 is supported');
+  return startEngineDriver(options, dataDir, output);
 }
 
 export async function verifyEngineProcess(options, dataDir) {

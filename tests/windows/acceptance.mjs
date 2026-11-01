@@ -13,12 +13,10 @@ import { startInspection } from './inspection.mjs';
 import { engineFirewall, plantUnrelatedFirewallRule } from './firewall.mjs';
 import { hostedOnly, identity, run, startHarness, until } from './testisp/harness.mjs';
 import { localTraffic, proveDefaultRoute } from './local-traffic.mjs';
-import { httpsRoute } from '../../scripts/tun-test-https.mjs';
-import { httpsMarker } from '../../scripts/control-test-https.mjs';
 
 hostedOnly();
 const options = launchSpec;
-assert(['baseline', 'v1'].includes(options.profile), 'Use --profile baseline or v1');
+assert.equal(options.profile, 'v1', 'Use --profile v1');
 const dir = path.resolve('dist/windows-acceptance');
 const dataDir = path.join(dir, 'app');
 await mkdir(dataDir, { recursive: true });
@@ -34,13 +32,8 @@ const udpRejectExe = path.resolve('dist/windows-test/udpreject.exe');
 const rejections = new Set(['ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH', 'ENETUNREACH', 'EACCES']);
 const publicDestination = '1.0.0.1:443';
 const publicTarget = { host: '1.0.0.1', port: 443, path: '/cdn-cgi/trace', tls: true, publicTrace: true, servername: 'one.one.one.one' };
-// The local TLS responder is reached through a test-only destination rewrite
-// in today's sing-box config. The 1.0 engine (v1) has no such rewrite and no
-// sing-box config, so v1 keeps its earlier public selection target for these
-// checks; the baseline profile uses the local responder.
-const localSelection = options.profile !== 'v1';
-const selectionTarget = () => localSelection ? tlsResponder.target : publicTarget;
-const selectionDestination = () => localSelection ? tlsResponder.destination : publicDestination;
+const selectionTarget = () => publicTarget;
+const selectionDestination = () => publicDestination;
 const appDeviceIDs = new Set();
 const destinationCount = (stats, destination) => stats.destinations?.[destination] ?? 0;
 
@@ -103,10 +96,8 @@ async function pinApp(program, line) {
 }
 
 async function combine(on) {
-  const state = await applied('combine', { on, mode: 'manual', weights: { [main.id]: 1, [second.id]: 1 } },
+  return applied('combine', { on, mode: 'manual', weights: { [main.id]: 1, [second.id]: 1 } },
     (state) => state.combine.on === on && (!on || state.combine.active));
-  await verifyTrafficConfig(`combining ${on ? 'on' : 'off'}`);
-  return state;
 }
 
 function exactTraffic(before, after, expected, destination = publicDestination) {
@@ -267,18 +258,6 @@ async function counts(total) {
   }, `${total} real test-app flows in app state`, 25_000);
 }
 
-async function engineConnections() {
-  const config = JSON.parse(await readFile(path.join(dataDir, 'engine-config.json'), 'utf8'));
-  const { external_controller: controller, secret } = config.experimental.clash_api;
-  assert(/^127\.0\.0\.1:\d+$/.test(controller), 'Expected the owned engine loopback API');
-  const response = await fetch(`http://${controller}/connections`, {
-    headers: { Authorization: `Bearer ${secret}` }, signal: AbortSignal.timeout(5000),
-  });
-  assert(response.ok, `Engine connections: HTTP ${response.status}`);
-  return { pid: (await readFile(path.join(dataDir, 'engine.pid'), 'utf8')).trim(),
-    connections: (await response.json()).connections };
-}
-
 async function newTrafficOn(line, target = selectionTarget(), count = 3) {
   await pin(line.id);
   const before = await harness.control('stats');
@@ -288,16 +267,7 @@ async function newTrafficOn(line, target = selectionTarget(), count = 3) {
   assert.equal(Object.values(byLine).reduce((sum, n) => sum+n, 0), count, 'Old sockets still counted');
   const after = await harness.control('stats');
   exactTraffic(before, after, line.id === second.id ? count : 0, target.publicTrace ? publicDestination : selectionDestination());
-  const engine = target.publicTrace ? undefined : await selectedSockets(opened, line.id);
-  return { opened, byLine, before, after, engine };
-}
-
-async function selectedSockets(opened, line) {
-  const snapshot = await engineConnections();
-  for (const item of opened) assert(snapshot.connections.some((c) =>
-    Number(c.metadata.sourcePort) === item.port && c.metadata.processPath?.toLowerCase() === clientExe.toLowerCase()
-    && c.metadata.type === 'tun/tun-in' && c.chains.includes(`line-${line}`)), `Missing engine socket on ${line}: ${JSON.stringify({ item, snapshot })}`);
-  return snapshot;
+  return { opened, byLine, before, after };
 }
 
 // fault names the TestISP fault injected while waiting, or null once it is
@@ -356,23 +326,9 @@ async function quicProbe(host, source, index) {
   return JSON.parse(result.stdout);
 }
 
-async function verifyTrafficConfig(phase, marker) {
-  if (!localSelection) return; // v1 writes no sing-box config to compare
-  const rule = JSON.parse(marker ?? await readFile(path.join(dataDir, httpsMarker), 'utf8'));
-  const product = JSON.parse(await readFile(path.join(dataDir, 'traffic-product-config.json'), 'utf8'));
-  const actual = JSON.parse(await readFile(path.join(dataDir, 'engine-config.json'), 'utf8'));
-  assert.deepEqual(rule, httpsRoute(tlsResponder), 'The marker must name this TLS responder');
-  assert.deepEqual(actual.route.rules.shift(), rule);
-  assert.equal(actual.log.level, 'info'); actual.log.level = product.log.level;
-  assert.deepEqual(actual, product, 'Only the local TLS rewrite and diagnostic log level may change');
-  console.log(`Traffic config verified: ${phase}; only TLS destination rewrite and diagnostic log level differ`);
-}
-
 async function start() {
   server = await startServer(options, dataDir, serverOutput);
   const state = await server.on();
-  const marker = await readFile(path.join(dataDir, httpsMarker), 'utf8').catch((error) => { if (error.code === 'ENOENT') return null; throw error; });
-  if (marker) await verifyTrafficConfig('startup', marker);
   await verifyEngineProcess(options, dataDir);
   rememberAppDevices(await pnpDevices());
   if (options.profile === 'v1') await engineFirewall(options.engine, true);
@@ -528,7 +484,6 @@ try {
     });
   }
   await writeFile(path.join(dataDir, 'settings.json'), JSON.stringify({ checkForUpdates: false }));
-  if (localSelection) await writeFile(path.join(dataDir, httpsMarker), JSON.stringify(httpsRoute(tlsResponder)));
   await targetFirewall('capture');
   await report.test('IPv6 probes cannot bypass the stopped engine', 'harness-baseline', async () => {
     await assert.rejects(client('udp', { target: ipv6Target }));
@@ -544,7 +499,6 @@ try {
   const state = await server.on();
   second = state.lines.find((line) => line.alias === 'TestISP');
   assert(second && state.lines.length === 2, JSON.stringify(state.lines));
-  await verifyTrafficConfig('two lines');
   await report.test('pins select both interfaces; secondary traffic crosses TestISP', 'parity', async () => ({ direct: await newTrafficOn(main), virtual: await newTrafficOn(second) }));
   await report.test('new pin leaves old connections alive', 'parity', async () => {
     const original = await client('open', { count: 3, target: selectionTarget() });
@@ -553,7 +507,6 @@ try {
     await client('refresh', { ids: original.map((item) => item.id) });
     const byLine = await counts(9);
     assert(byLine[second.id] >= 6 && byLine[main.id] === 3, JSON.stringify(byLine));
-    if (localSelection) { await selectedSockets(original, second.id); await selectedSockets(next, main.id); }
     return { original, next, byLine };
   });
   await pin(null);
@@ -561,18 +514,11 @@ try {
     await pin(null);
     await combine(true);
     const before = await harness.control('stats');
-    const opened = await client('open', { count: 40, target: selectionTarget() });
+    await client('open', { count: 40, target: selectionTarget() });
     const byLine = await counts(40);
     assert(byLine[main.id] >= 10 && byLine[second.id] >= 10, JSON.stringify(byLine));
     const after = await harness.control('stats');
     exactTraffic(before, after, byLine[second.id], selectionDestination());
-    if (localSelection) {
-      const snapshot = await engineConnections();
-      for (const line of [main, second]) {
-        const items = opened.filter(({ port }) => snapshot.connections.some((c) => Number(c.metadata.sourcePort) === port && c.chains.includes(`line-${line.id}`)));
-        assert.equal(items.length, byLine[line.id]); await selectedSockets(items, line.id);
-      }
-    }
     await client('close');
     await combine(false);
     return { byLine, before, after };
@@ -607,13 +553,6 @@ try {
       else await harness.network('restore');
     }
   });
-  // Later restarts and all lifecycle cycles use the ordinary product config.
-  // The running engine keeps the config it started with, so the rewrite rule
-  // and info logging stay until the next engine start, when the ICMP case
-  // reorders the lines. The controlled HTTP, reset, UDP, STUN, QUIC, IPv6 and
-  // DF cases run on it before then. The rule is inert for them: it matches
-  // only TCP to 203.0.113.44:443, and they address the controlled responder.
-  if (localSelection) await unlink(path.join(dataDir, httpsMarker));
   await pin(second.id);
   await report.test('controlled HTTP crosses the app TUN and TestISP', 'parity', async () => {
     const before = await harness.control('stats');
@@ -859,18 +798,6 @@ try {
       const tcpLimitMs = Math.max(...rejectBaseline.tcp.map((sample) => sample.ms)) + 500;
       const udpLimitMs = Math.max(...rejectBaseline.udp.map((sample) => sample.ms)) + 500;
       const readiness = [];
-      if (options.profile === 'baseline') {
-        // 0.3.x reports a written rule file, not sing-box's asynchronous reload.
-        // Observe an actual refusal before starting the measured burst. The
-        // v1 state contract acknowledges an applied revision, so it gets no grace.
-        await until(async () => {
-          const [sample] = await client('reject', { target: responder.virtual, count: 1, timeout: tcpLimitMs });
-          readiness.push(sample);
-          assert(rejections.has(sample.outcome) && sample.ms <= tcpLimitMs,
-            `Cap not applied yet: ${JSON.stringify({ tcpLimitMs, blocked, recent: readiness.slice(-5) })}`);
-          return true;
-        }, 'sing-box has applied the cap rejection rule', 30_000);
-      }
       const beforeBurst = await harness.control('stats');
       const samples = await client('reject', { target: responder.virtual, timeout: tcpLimitMs });
       const udp = await udpReject(responder.virtual, 100, udpLimitMs);

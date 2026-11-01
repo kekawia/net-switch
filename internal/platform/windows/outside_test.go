@@ -206,11 +206,11 @@ func TestTheWatcherFollowsThePowerShellSteps(t *testing.T) {
 			established(1004, 30, [4]byte{192, 168, 1, 1}), // a device at home
 			{state: 2, local: [4]byte{192, 168, 1, 20}, localPort: 1005, remote: public, remotePort: 443, pid: 10},
 		},
-		paths:      map[uint32]string{10: `C:\Apps\browser.exe`, 20: `C:\Program Files\Net Switch\engine\SING-BOX.exe`},
+		paths:      map[uint32]string{10: `C:\Apps\browser.exe`, 20: `C:\Program Files\Net Switch\NETSWITCH-ENGINE.exe`},
 		bytes:      map[uint16][2]uint64{1001: {5000, 300}, 1002: {7, 8}},
 		unreadable: map[uint16]bool{1002: true},
 	}
-	watcher := newOutsideWatcher(`c:\program files\net switch\engine\sing-box.exe`, fake.system())
+	watcher := newOutsideWatcher(`c:\program files\net switch\netswitch-engine.exe`, fake.system())
 
 	line := watcher.sample()
 	if fake.listCalls != 1 || fake.pathCalls != 2 {

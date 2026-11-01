@@ -20,19 +20,16 @@ test('the reader graph reaches the known cross-area reads', () => {
   const { groupsAt } = current;
   assert.ok(current.reach.size > 300, `only ${current.reach.size} files reached`);
   assert.ok(groupsAt('test/traces.test.mjs').includes('node'));
-  assert.ok(groupsAt('test/traces.test.mjs').includes('legacy_windows'), 'engine job runs npm test');
   assert.ok(groupsAt('internal/control/http.go').includes('node'), 'test/traces.test.mjs reads http.go');
   assert.ok(groupsAt('tests/windows/launch.mjs').includes('node'));
   assert.ok(groupsAt('tests/windows/launch.mjs').includes('control'));
   assert.ok(groupsAt('tests/windows/testisp/harness.mjs').includes('testisp'));
-  assert.ok(groupsAt('lib/engine.mjs').includes('testisp'), 'the TestISP proof reaches lib/engine.mjs through local-traffic.mjs');
-  assert.ok(groupsAt('tests/linux/engine/singbox/config.mjs').includes('acceptance'), 'driver_linux.go runs config.mjs');
-  assert.ok(groupsAt('lib/engine.mjs').includes('acceptance'), 'config.mjs imports lib/engine.mjs');
+  assert.deepEqual(groupsAt('lib/engine.mjs'), ['node'], 'only frozen node tests reach lib/engine.mjs');
+  assert.deepEqual(groupsAt('lib/server-factory.mjs'), ['node'], 'only frozen node tests reach lib/server-factory.mjs');
+  assert.deepEqual(groupsAt('server.mjs'), ['node'], 'only frozen node tests reach server.mjs');
   assert.ok(groupsAt('tests/linux/suite/snap-inputs.json').includes('acceptance'), 'go:embed and the workflow');
   assert.ok(groupsAt('lib/lines.mjs').includes('go_linux'), 'the differential oracle runs on Linux');
   assert.ok(!groupsAt('lib/lines.mjs').includes('go_windows'), 'its step is Linux-only');
-  assert.ok(groupsAt('internal/platform/worker/supervisor.go').includes('control'));
-  assert.ok(!groupsAt('internal/platform/worker/supervisor.go').includes('node'), 'narrowed to Control');
   // Computed paths the evaluator places: a template under internal/, a
   // URL joined onto a folder URL, and a computed name under the reader.
   assert.ok(groupsAt('internal/apps/node-tests.json').includes('node'), 'pure-port-fixtures.test.mjs reads internal/${name}/node-tests.json');
@@ -102,12 +99,9 @@ test('a map that misses a reader fails the drift check', () => {
   // The exception this guard replaced: Node reads this Go source.
   fails({ areaOf: mapped('internal/control/http.go', 'go_shared') }, /^internal\/control\/http\.go .* node job/);
   fails({ areaOf: mapped('tests/windows/launch.mjs', 'tests_linux') }, /^tests\/windows\/launch\.mjs .* (node|control) job/);
-  fails({ areaOf: mapped('tests/linux/engine/singbox/config.mjs', 'go_windows') }, /config\.mjs .* acceptance job/);
-  fails({ groupsOf: without('frozen', 'acceptance') }, /^lib\/engine\.mjs .* acceptance job/);
-  fails({ groupsOf: without('frozen', 'testisp') }, /^lib\/engine\.mjs .* testisp job/);
   fails({ groupsOf: without('tests_linux', 'acceptance') }, /^tests\/linux\/suite\/snap-inputs\.json .* acceptance job/);
-  // docs/ looks like documentation, but the installer ships all of it.
-  fails({ areaOf: (file, tracked) => file.startsWith('docs/') ? 'docs' : areaFor(file, tracked) }, /^docs\/user-guide\.md \(area docs\) is read by scripts\/build-release\.ps1, which a installer job/);
+  // docs/ looks like documentation, but the installer check verifies it.
+  fails({ areaOf: (file, tracked) => file.startsWith('docs/') ? 'docs' : areaFor(file, tracked) }, /^docs\/user-guide\.md \(area docs\) is read by ci\.yml installer, which a installer job/);
   // Fixtures beside Go code that a Node test reads.
   fails({ areaOf: mapped('internal/apps/node-tests.json', 'go_shared') }, /^internal\/apps\/node-tests\.json \(area go_shared\) is read by test\/pure-port-fixtures\.test\.mjs, which a node job/);
 });
@@ -221,7 +215,7 @@ test('other computed reader forms fail unless declared', () => {
 test('declarations need a reason, a call site and what they read, and match per call site', () => {
   const repo = repoView();
   assert.deepEqual(declarationProblems(repo), []);
-  const entry = declared.find(item => item.from === 'scripts/smoke-test-installer.ps1');
+  const entry = declared.find(item => item.from === 'test/windows-acceptance.test.mjs' && item.call === 'import(${JSON.stringify(sharedURL)})');
   const change = (patch, pattern) => {
     const saved = { ...entry };
     Object.assign(entry, patch);
@@ -233,7 +227,7 @@ test('declarations need a reason, a call site and what they read, and match per 
       Object.assign(entry, saved);
     }
   };
-  change({ why: '' }, /declared reader scripts\/smoke-test-installer\.ps1 import\(process\.argv\[1\]\): no reason given/);
+  change({ why: '' }, /declared reader test\/windows-acceptance\.test\.mjs import\(\$\{JSON\.stringify\(sharedURL\)\}\): no reason given/);
   change({ why: '   ' }, /no reason given/);
   change({ reads: [] }, /needs either the repository paths it reads or where outside the repository it points, not neither/);
   change({ outside: 'somewhere' }, /not both/);
@@ -241,13 +235,13 @@ test('declarations need a reason, a call site and what they read, and match per 
   change({ from: 'scripts/missing.ps1' }, /scripts\/missing\.ps1 is not a tracked file/);
   // A declaration that no longer matches its call site is stale, and the
   // site it used to cover fails again.
-  fails({ overrides: edit('scripts/smoke-test-installer.ps1', text => text.replace('import(process.argv[1])', 'import(process.argv[2])')) }, /stale declared reader in scripts\/smoke-test-installer\.ps1: import\(process\.argv\[1\]\) matches 0 call sites/);
-  fails({ overrides: edit('scripts/smoke-test-installer.ps1', text => text.replace('import(process.argv[1])', 'import(process.argv[2])')) }, /computed import import\(process\.argv\[2\]\)/);
-  // A second site with the same call is not covered by the first's entry.
-  fails({ overrides: edit('scripts/smoke-test-installer.ps1', text => text.replace('$check = "const { Engine } = await import(process.argv[1]);', '$check = "const { Engine } = await import(process.argv[1]); await import(process.argv[1]);')) },
-    /miscounted declared reader in scripts\/smoke-test-installer\.ps1: import\(process\.argv\[1\]\) matches 2 call sites, declared 1/);
+  fails({ overrides: edit('test/windows-acceptance.test.mjs', text => text.replaceAll('import(${JSON.stringify(sharedURL)})', 'import(${JSON.stringify(otherURL)})')) }, /stale declared reader in test\/windows-acceptance\.test\.mjs: import\(\$\{JSON\.stringify\(sharedURL\)\}\) matches 0 call sites/);
+  fails({ overrides: edit('test/windows-acceptance.test.mjs', text => text.replaceAll('import(${JSON.stringify(sharedURL)})', 'import(${JSON.stringify(otherURL)})')) }, /computed import import\(\$\{JSON\.stringify\(otherURL\)\}\)/);
+  // A third site with the same call is not covered by the two-site entry.
+  fails({ overrides: edit('test/windows-acceptance.test.mjs', text => `${text}\nconst extra = () => import(\${JSON.stringify(sharedURL)});\n`) },
+    /miscounted declared reader in test\/windows-acceptance\.test\.mjs: import\(\$\{JSON\.stringify\(sharedURL\)\}\) matches 3 call sites, declared 2/);
   // Another computed import on the declared line is its own call site.
-  fails({ overrides: edit('scripts/smoke-test-installer.ps1', text => text.replace('await import(process.argv[1]);', 'await import(process.argv[1]); await import(process.env.OTHER);')) }, /computed import import\(process\.env\.OTHER\)/);
+  fails({ overrides: edit('test/windows-acceptance.test.mjs', text => `${text}\nconst extra = () => import(process.env.OTHER);\n`) }, /computed import import\(process\.env\.OTHER\)/);
 });
 
 test('the evaluator places the path forms it accepts', () => {
@@ -286,9 +280,8 @@ test('folder, working-directory and -C forms are followed', () => {
   };
   // node --test on a folder runs the scripts in it (and what they import),
   // not the Go files beside them.
-  const folder = driftProblems({ overrides: edit(ci, text => text.replace('node tests/windows/testisp/proof.mjs', 'node --test tests/linux/engine/singbox')) }).problems;
-  assert.ok(folder.some(problem => /^tests\/linux\/engine\/singbox\/config\.mjs \(area tests_linux\) is read by ci\.yml testisp,/.test(problem)), folder.join('\n'));
-  assert.ok(!folder.some(problem => /^tests\/linux\/engine\/singbox\/\S+\.go /.test(problem)), folder.join('\n'));
+  const folder = driftProblems({ overrides: edit(ci, text => text.replace('node tests/windows/testisp/proof.mjs', 'node --test tests/oracle')) }).problems;
+  assert.ok(folder.some(problem => /^lib\/engine\.mjs \(area frozen\) is read by tests\/oracle\/harness\.mjs,/.test(problem)), folder.join('\n'));
   fails({ overrides: edit(ci, text => text.replace('node tests/windows/testisp/proof.mjs', 'node --test tests/linux/wire')) }, /node test argument tests\/linux\/wire has no scripts under it/);
   // The helper job's "go vet ./..." runs in its working directory. Moved to a
   // shared Go package, it reaches that package's tree and nothing else.

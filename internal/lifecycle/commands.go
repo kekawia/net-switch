@@ -52,7 +52,7 @@ func Ctl(args []string) error {
 	flags := flag.NewFlagSet("netswitchctl "+command, flag.ContinueOnError)
 	data := flags.String("data", DefaultData(), "protected machine store")
 	dir := flags.String("directory", "", "directory containing the service executables")
-	adapter := flags.String("adapter", "", "verified sing-box executable (until the engine swap)")
+	adapter := flags.String("adapter", "", "retired stand-in flag (rejected by install)")
 	mode := flags.String("mode", "tun", "tun or proxy")
 	ownerName := flags.String("owner", "", "interactive owner to enroll; omit to leave pending")
 	engine := flags.Bool("engine", false, "engine recovery")
