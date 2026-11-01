@@ -146,9 +146,17 @@ func newNativeFixture(t *testing.T, prober platform.Prober) *nativeFixture {
 		return &localipc.Conn{ReadWriteCloser: right}, nil
 	}
 	remote.startService = func(context.Context, string) error { return nil }
-	remote.queryService = func(string) (service.Status, error) { return f.status, nil }
+	remote.queryService = func(string) (service.Status, error) {
+		f.dialMu.Lock()
+		defer f.dialMu.Unlock()
+		return f.status, nil
+	}
 	remote.waitStopped = func(context.Context, string) error { return nil }
-	remote.outcome = func(string) (host.Outcome, error) { return f.outcome, nil }
+	remote.outcome = func(string) (host.Outcome, error) {
+		f.dialMu.Lock()
+		defer f.dialMu.Unlock()
+		return f.outcome, nil
+	}
 	remote.forceStop = func(context.Context, string) error { return errors.New("unexpected forced stop") }
 	t.Cleanup(func() {
 		f.dialMu.Lock()
@@ -173,6 +181,12 @@ func newNativeFixture(t *testing.T, prober platform.Prober) *nativeFixture {
 	f.remote = remote
 	f.status = service.Status{Running: true, PID: 4242}
 	return f
+}
+
+func (f *nativeFixture) setService(status service.Status, outcome host.Outcome) {
+	f.dialMu.Lock()
+	f.status, f.outcome = status, outcome
+	f.dialMu.Unlock()
 }
 
 func (f *nativeFixture) hasLog(fragment string) bool {
@@ -710,8 +724,10 @@ func TestNativeAdapterLossReachesTheSnapshotAfterTheServiceStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	instance := f.server.Instance
-	f.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 3}
-	f.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "adapter lost"}
+	f.setService(
+		service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 3},
+		host.Outcome{Instance: instance, State: "complete", Reason: "adapter lost"},
+	)
 	f.remote.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
 		return nil, errors.New("service stopped")
 	}
@@ -841,8 +857,10 @@ func TestDeathAfterRefusalIsClassifiedBeforeAnyRestart(t *testing.T) {
 	}
 	instance := f.server.Instance
 	// The instance dies; its service result is not published yet.
-	f.status = service.Status{Stopped: true, Cleanup: "pending"}
-	f.outcome = host.Outcome{Instance: instance, State: "pending"}
+	f.setService(
+		service.Status{Stopped: true, Cleanup: "pending"},
+		host.Outcome{Instance: instance, State: "pending"},
+	)
 	f.remote.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
 		return nil, errors.New("service stopped")
 	}
@@ -857,8 +875,10 @@ func TestDeathAfterRefusalIsClassifiedBeforeAnyRestart(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	f.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 1}
-	f.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "failure"}
+	f.setService(
+		service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 1},
+		host.Outcome{Instance: instance, State: "complete", Reason: "failure"},
+	)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if s := f.remote.Snapshot(); s.Status == "error" {
