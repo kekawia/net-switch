@@ -102,15 +102,6 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $elapsed = ((Get-Date) - $started).TotalSeconds
           "Windows PowerShell 5.1 started in $([math]::Round($elapsed, 1)) s"
-      # Compile-only until retirement step 2(b) deletes these tagged sources.
-      # No installed native test executes either compatibility binary.
-      - name: Compile historical launcher pending physical deletion
-        if: matrix.control == 'node'
-        run: |
-          go build -tags control_compat -o bin/historical-control.exe ./cmd/netswitch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -tags control_compat,control_test_https -o bin/historical-https.exe ./cmd/netswitch
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build installed native candidates
         if: matrix.control == 'go'
         run: |

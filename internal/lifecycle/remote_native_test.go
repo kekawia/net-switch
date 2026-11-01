@@ -215,15 +215,11 @@ func TestRemoteAttachesToTheNativeEngine(t *testing.T) {
 	if s.Status != "off" || s.Instance != f.server.Instance || s.PID == 0 {
 		t.Fatalf("hello status not mapped: %+v", s)
 	}
-	if !f.remote.native {
-		t.Fatal("dialect not detected as native")
-	}
 }
 
 // The M2 dialer writes a one-byte impersonation primer before the JSON. The
 // native host's pipe carries plain newline JSON and rejects that byte on the
-// first exchange, which is what the installed proof hit on Windows. Control
-// must therefore choose the dialer from the installation, not try both.
+// first exchange, which is what the installed proof hit on Windows.
 func TestNativeInstallDialsWithoutThePrimer(t *testing.T) {
 	ctx := context.Background()
 	primed := func(inner func(context.Context, localipc.Endpoint) (*localipc.Conn, error)) func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
@@ -249,29 +245,6 @@ func TestNativeInstallDialsWithoutThePrimer(t *testing.T) {
 	f.remote.dial = native
 	if err := f.remote.Attach(ctx, false); err != nil {
 		t.Fatal("native dial without primer refused", err)
-	}
-	// The installation decides which dialer Control uses.
-	for _, installed := range []bool{true, false} {
-		r := NewRemote(ctx, func(string) {})
-		chosen := ""
-		r.dialNative = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
-			chosen = "native"
-			return nil, errors.New("stop here")
-		}
-		r.dialAdapter = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
-			chosen = "adapter"
-			return nil, errors.New("stop here")
-		}
-		r.nativeInstalled = func() (bool, error) { return installed, nil }
-		_ = r.Attach(ctx, false)
-		if (installed && chosen != "native") || (!installed && chosen != "adapter") {
-			t.Fatalf("installed native=%t chose dialer %q", installed, chosen)
-		}
-	}
-	r := NewRemote(ctx, func(string) {})
-	r.nativeInstalled = func() (bool, error) { return false, errors.New("registry unreadable") }
-	if err := r.Attach(ctx, false); err == nil || !strings.Contains(err.Error(), "which engine is installed") {
-		t.Fatal("an unknown installation must not guess a dialer", err)
 	}
 }
 
@@ -562,10 +535,6 @@ func TestNativeTotalsAndAcknowledgementOverTheWire(t *testing.T) {
 	}
 	if _, kept := after.Apps["game"]; kept {
 		t.Fatal("acknowledged idle identity was not retired", after)
-	}
-	plain := NewRemote(ctx, func(string) {})
-	if _, err := plain.Totals(ctx, ""); !errors.Is(err, ce.ErrNoAccounting) {
-		t.Fatal("the adapter dialect must report that it has no accounting", err)
 	}
 }
 

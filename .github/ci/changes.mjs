@@ -79,9 +79,8 @@ export function areaFor(path, tracked = new Set()) {
   if (!path.includes('/') && /\.md$/i.test(path) && path !== 'THIRD_PARTY_NOTICES.md') return 'docs';
   if (isCode(path)) return codeArea(path);
   // Fixtures that the 0.3.x Node tests and the Go ports beside them both read:
-  // test/pure-port-fixtures.test.mjs reads internal/*/node-*.json, and
-  // internal/engine/singbox/config_test.go reads the Windows golden configs.
-  if (/^internal\/[^/]+\/node-[\w-]+\.json$/.test(path) || path === 'test/fixtures/windows-golden.json') return 'frozen+go_shared';
+  // test/pure-port-fixtures.test.mjs reads internal/*/node-*.json.
+  if (/^internal\/[^/]+\/node-[\w-]+\.json$/.test(path)) return 'frozen+go_shared';
   // The snap pins and the sing-box config at the top of tests/linux, which
   // holds no code itself; the Linux acceptance job reads both.
   if (/^tests\/linux\/[^/]+\.(?:json|sh)$/.test(path)) return 'tests_linux';

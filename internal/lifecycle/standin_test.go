@@ -107,7 +107,7 @@ func TestStandInConfigurationAndBackupOnlyStateAreRefused(t *testing.T) {
 	}
 	// Written like the stand-in's installer did (primary and .bak), without
 	// the store ACLs the real Save sets, which need an administrator.
-	configure := func(c Config) {
+	configure := func(c map[string]string) {
 		t.Helper()
 		b, err := json.Marshal(c)
 		if err != nil {
@@ -119,11 +119,11 @@ func TestStandInConfigurationAndBackupOnlyStateAreRefused(t *testing.T) {
 			}
 		}
 	}
-	configure(Config{Directory: dir, Data: dir, Adapter: filepath.Join(dir, "sing-box.exe"), Mode: "tun"})
+	configure(map[string]string{"directory": dir, "data": dir, "adapter": filepath.Join(dir, "sing-box.exe"), "mode": "tun"})
 	refused("service-config.json")
-	configure(Config{Directory: dir, Data: dir, Mode: "proxy"})
+	configure(map[string]string{"directory": dir, "data": dir, "mode": "proxy"})
 	refused("service-config.json")
-	configure(Config{Directory: dir, Data: dir, Mode: "tun"})
+	configure(map[string]string{"directory": dir, "data": dir, "mode": "tun"})
 	if err := refuseStandInStore(dir); err != nil {
 		t.Fatal("native configuration refused", err)
 	}

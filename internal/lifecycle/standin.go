@@ -27,7 +27,10 @@ const standInRefusal = "this data folder belonged to a pre-release stand-in buil
 // may do; journal.ReadOnly decodes the same frames and leaves the tail alone.
 func refuseStandInStore(data string) error {
 	for _, name := range []string{"service-config.json", "service-config.json.bak"} {
-		var c Config
+		var c struct {
+			Adapter string `json:"adapter"`
+			Mode    string `json:"mode"`
+		}
 		err := Read(filepath.Join(data, name), &c)
 		if os.IsNotExist(err) {
 			continue

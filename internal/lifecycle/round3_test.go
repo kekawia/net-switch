@@ -7,9 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/buildinfo"
 	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
 
@@ -185,68 +183,5 @@ func TestSessionQueryFailurePreservesRouting(t *testing.T) {
 	}
 	if stops.Load() != 1 || queries.Load() < 3 {
 		t.Fatal("session state was not retried", stops.Load(), queries.Load())
-	}
-}
-
-func TestAcknowledgedStopHasDeadlineAndForcesFailOpen(t *testing.T) {
-	r, _ := fakeRemote(t, buildinfo.String())
-	if err := r.Attach(r.ctx, false); err != nil {
-		t.Fatal(err)
-	}
-	r.waitStopped = func(ctx context.Context, _ string) error {
-		if _, ok := ctx.Deadline(); !ok {
-			t.Fatal("stop wait has no deadline")
-		}
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	killed := false
-	r.forceStop = func(ctx context.Context, name string) error {
-		if name != service.Engine {
-			t.Fatal(name)
-		}
-		if _, ok := ctx.Deadline(); !ok {
-			t.Fatal("forced stop is unbounded")
-		}
-		killed = true
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(r.ctx, 20*time.Millisecond)
-	defer cancel()
-	if err := r.Stop(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if !killed || r.Snapshot().Status != "off" {
-		t.Fatal("stop did not force cleanup")
-	}
-}
-
-func TestLeaseExitAfterRepeatedStandbyNeverBecomesCrash(t *testing.T) {
-	for cycle := range 7 {
-		r, _ := fakeRemote(t, buildinfo.String())
-		if err := r.Attach(r.ctx, false); err != nil {
-			t.Fatal(err)
-		}
-		r.mu.Lock()
-		rpc := r.rpc
-		r.mu.Unlock()
-		r.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
-			return nil, errors.New("lease expired during standby")
-		}
-		r.queryService = func(string) (service.Status, error) { return service.Status{Stopped: true}, nil }
-		r.exitReason = func(instance string) (string, error) {
-			if instance != "same-instance" {
-				t.Fatal(instance)
-			}
-			return "lease-expired", nil
-		}
-		r.disconnect(rpc, errors.New("standby"))
-		deadline := time.Now().Add(time.Second)
-		for r.Snapshot().Status != "off" && time.Now().Before(deadline) {
-			time.Sleep(time.Millisecond)
-		}
-		if s := r.Snapshot(); s.Status != "off" || s.FailureID != "" {
-			t.Fatalf("cycle %d consumed crash budget: %+v", cycle, s)
-		}
 	}
 }

@@ -20,7 +20,6 @@ import (
 type Config struct {
 	Directory string `json:"directory"`
 	Data      string `json:"data"`
-	Adapter   string `json:"adapter"`
 	Mode      string `json:"mode"`
 }
 type Owner struct {
@@ -87,16 +86,21 @@ func LoadConfig(data string) (Config, error) {
 	if err := CheckDirectory(data); err != nil {
 		return c, err
 	}
-	if err := Read(filepath.Join(data, "service-config.json"), &c); err != nil {
+	var raw struct {
+		Config
+		Adapter string `json:"adapter"`
+	}
+	if err := Read(filepath.Join(data, "service-config.json"), &raw); err != nil {
 		return c, err
 	}
-	if c.Data != data || !filepath.IsAbs(c.Directory) || (!nativeEngineBuild && !filepath.IsAbs(c.Adapter)) || (c.Mode != "proxy" && c.Mode != "tun") {
+	c = raw.Config
+	if c.Data != data || !filepath.IsAbs(c.Directory) || (c.Mode != "proxy" && c.Mode != "tun") {
 		return c, errors.New("invalid service configuration")
 	}
-	if nativeEngineBuild && (c.Adapter != "" || c.Mode != "tun") {
+	if raw.Adapter != "" || c.Mode != "tun" {
 		return c, errors.New("native service qualification requires tun mode and no adapter")
 	}
-	if err := service.CheckInstallation(c.Directory, c.Adapter); err != nil {
+	if err := service.CheckInstallation(c.Directory); err != nil {
 		return c, err
 	}
 	return c, nil
