@@ -1,7 +1,4 @@
 // Command netswitch hosts the 1.0 Control service and its platform workers.
-// The 0.3.x compatibility launcher (an elevated desktop Control over sing-box)
-// exists only in the control_compat build the parity workflow drives; see
-// launcher_compat.go. The product build cannot start sing-box.
 package main
 
 import (

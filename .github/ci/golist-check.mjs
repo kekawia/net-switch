@@ -92,7 +92,6 @@ for (const command of driftProblems().go) {
   group.jobs.add(command.label);
 }
 assert.ok(groups.size >= 20, `only ${groups.size} go settings parsed from the workflows`);
-assert.ok([...groups.values()].some(group => group.tags.includes('control_test_https') && group.goos === 'windows'), "Control's control_test_https build");
 let total = 0;
 for (const group of groups.values()) {
   const patterns = [...group.patterns].sort();

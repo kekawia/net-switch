@@ -33,16 +33,8 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	}
 	remote := NewRemote(ctx, log)
 	// Native exits are classified through the service manager's status and the
-	// shared outcome reader; the stand-in's exit reason file stays for its dialect.
+	// shared outcome reader.
 	remote.outcome = nativeOutcomeReader(c.Data)
-	remote.exitReason = func(instance string) (string, error) {
-		var state engineState
-		err := readEngineState(c.Data, &state, log)
-		if err != nil || state.Instance != instance {
-			return "", err
-		}
-		return state.ExitReason, nil
-	}
 	// Attach before considering any cleanup or new start. A Control restart
 	// must preserve the engine's existing flows and fixed closure cutoffs.
 	attachCtx, stopAttach := context.WithTimeout(ctx, 10*time.Second)
@@ -76,14 +68,6 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		stopRetain()
 		if retainErr != nil {
 			log("retained engine outcome not classified: " + retainErr.Error())
-		}
-		var previous engineState
-		if readErr := readEngineState(c.Data, &previous, log); readErr != nil {
-			return readErr
-		}
-		if previous.ExitReason == "adapter-failed" {
-			remote.instance = previous.Instance
-			remote.Fail(errors.New("previous engine instance failed while Control was unavailable"))
 		}
 	}
 	ioOptions := settings.Options{Files: durableFiles{}, SyncFile: syncFile, SyncParent: SyncDirectory, OnBackupError: func(err error) { log("backup: " + err.Error()) }}

@@ -29,10 +29,6 @@ type Runtime interface {
 	Apply(context.Context, policy.Revision) (policy.Applied, error)
 	Stop(context.Context) error
 }
-type AdapterRuntime interface {
-	AdapterSnapshot() any
-	AdapterRequest(context.Context, Request) (any, error)
-}
 type operation struct {
 	hash   [32]byte
 	result any
@@ -161,9 +157,9 @@ func (s *Server) explicitStop(ctx context.Context) error {
 }
 func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
-	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "adapterForgetLane", "testProxy", "testFault":
+	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "testProxy", "testFault":
 		// A new controller cannot overtake an accepted mutation. Renewals
-		// remain independent of adapter file/HTTP work and disk flushes.
+		// remain independent of disk flushes.
 		s.mutation.Lock()
 		defer s.mutation.Unlock()
 	}
@@ -182,10 +178,6 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 			v["capabilities"] = append(v["capabilities"].([]string), "test-proxy")
 		}
 		s.mu.Unlock()
-		if adapter, ok := s.runtime.(AdapterRuntime); ok {
-			v["capabilities"] = []string{"singbox-adapter-v1", "revisions", "lease"}
-			v["adapterSnapshot"] = adapter.AdapterSnapshot()
-		}
 		return v, nil
 	}
 	if r.Method == "attach" {
@@ -253,12 +245,6 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 	if r.Method == "probe" {
 		s.mu.Unlock()
 		return s.effect(ctx, r, func() (any, error) {
-			if r.Adapter != nil {
-				if adapter, ok := s.runtime.(AdapterRuntime); ok {
-					return adapter.AdapterRequest(ctx, r)
-				}
-				return nil, errors.New("adapter payload is not supported")
-			}
 			if s.prober == nil {
 				return nil, platform.ErrNotYet
 			}
@@ -274,14 +260,6 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		})
 	}
 	defer s.mu.Unlock()
-	if r.Adapter != nil && r.Method != "stop" && r.Method != "renew" {
-		if adapter, ok := s.runtime.(AdapterRuntime); ok {
-			s.mu.Unlock()
-			defer s.mu.Lock()
-			return adapter.AdapterRequest(ctx, r)
-		}
-		return nil, errors.New("adapter payload is not supported")
-	}
 	switch r.Method {
 	case "testFault":
 		if s.TestFault == nil {

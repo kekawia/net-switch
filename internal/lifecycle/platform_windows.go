@@ -11,7 +11,8 @@ import (
 )
 
 func nativePlatform(c Config, log func(string)) platform.System {
-	return &win.System{Workers: worker.Supervisor{Executable: filepath.Join(c.Directory, "netswitch-engine.exe"), Log: func(err error) { log(err.Error()) }}, EnginePath: c.Adapter, Root: c.Directory, UserDir: c.Data, MachineDir: c.Data}
+	exe := filepath.Join(c.Directory, "netswitch-engine.exe")
+	return &win.System{Workers: worker.Supervisor{Executable: exe, Log: func(err error) { log(err.Error()) }}, EnginePath: exe, Root: c.Directory, UserDir: c.Data, MachineDir: c.Data}
 }
 func Worker(args []string) int { return win.Run(args) }
 func DesktopCall(ctx context.Context, operation string, args map[string]any) (any, error) {

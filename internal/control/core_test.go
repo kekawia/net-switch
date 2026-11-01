@@ -197,7 +197,6 @@ type fakeEngine struct {
 	failure         error
 	beforeApply     func(engine.Revision)
 	probe           func(engine.ProbeRequest) engine.ProbeResult
-	real            engine.Engine
 	wireConnections json.RawMessage
 	requests        []map[string]any
 	readConnections func(context.Context) ([]engine.Connection, error)
@@ -224,18 +223,11 @@ type recordedReply struct {
 }
 
 func (f *fakeEngine) Snapshot() engine.Snapshot {
-	if f.real != nil {
-		return f.real.Snapshot()
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.s
 }
 func (f *fakeEngine) Fail(err error) {
-	if f.real != nil {
-		f.real.Fail(err)
-		return
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.s.Status = "error"
@@ -243,10 +235,6 @@ func (f *fakeEngine) Fail(err error) {
 	f.s.Error = &text
 }
 func (f *fakeEngine) ForgetLane(id string) {
-	if e, ok := f.real.(interface{ ForgetLane(string) }); ok {
-		e.ForgetLane(id)
-		return
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.s.Policy.Lanes, id)
@@ -254,9 +242,6 @@ func (f *fakeEngine) ForgetLane(id string) {
 func (f *fakeEngine) Start(ctx context.Context, p engine.Policy) error {
 	if f.beforeStart != nil {
 		f.beforeStart()
-	}
-	if f.real != nil {
-		return f.real.Start(ctx, p)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -276,9 +261,6 @@ func (f *fakeEngine) Start(ctx context.Context, p engine.Policy) error {
 	return f.failure
 }
 func (f *fakeEngine) Stop(ctx context.Context) error {
-	if f.real != nil {
-		return f.real.Stop(ctx)
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, "stop")
@@ -288,9 +270,6 @@ func (f *fakeEngine) Stop(ctx context.Context) error {
 	return f.failure
 }
 func (f *fakeEngine) Apply(ctx context.Context, r engine.Revision) (engine.Acknowledgement, error) {
-	if f.real != nil {
-		return f.real.Apply(ctx, r)
-	}
 	if f.beforeApply != nil {
 		f.beforeApply(r)
 	}
@@ -325,9 +304,6 @@ func (f *fakeEngine) CloseFlows(ctx context.Context, r engine.CloseRequest) (eng
 			return engine.CloseResult{}, err
 		}
 	}
-	if f.real != nil {
-		return f.real.CloseFlows(ctx, r)
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, id := range r.ConnectionIDs {
@@ -340,17 +316,11 @@ func (f *fakeEngine) Connections(ctx context.Context) ([]engine.Connection, erro
 	if f.readConnections != nil {
 		return f.readConnections(ctx)
 	}
-	if f.real != nil {
-		return f.real.Connections(ctx)
-	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]engine.Connection{}, f.connections...), nil
 }
 func (f *fakeEngine) Probe(ctx context.Context, r engine.ProbeRequest) engine.ProbeResult {
-	if f.real != nil {
-		return f.real.Probe(ctx, r)
-	}
 	result := engine.ProbeResult{Outcome: engine.OK, Delay: ptr(float64(18))}
 	if f.probe != nil {
 		result = f.probe(r)

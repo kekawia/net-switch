@@ -274,11 +274,8 @@ func (r *Remote) nativeProbe(ctx context.Context, request ce.ProbeRequest) ce.Pr
 // Totals and AckTotals are spec §5.10's paged, acknowledged accounting.
 func (r *Remote) Totals(ctx context.Context, cursor string) (ce.TotalsPage, error) {
 	r.mu.Lock()
-	native, instance := r.native, r.instance
+	instance := r.instance
 	r.mu.Unlock()
-	if !native {
-		return ce.TotalsPage{}, ce.ErrNoAccounting
-	}
 	fields := map[string]any{}
 	if cursor != "" {
 		fields["cursor"] = cursor
@@ -300,12 +297,6 @@ func (r *Remote) Totals(ctx context.Context, cursor string) (ce.TotalsPage, erro
 	return out, nil
 }
 func (r *Remote) AckTotals(ctx context.Context, opID, receipt string) error {
-	r.mu.Lock()
-	native := r.native
-	r.mu.Unlock()
-	if !native {
-		return ce.ErrNoAccounting
-	}
 	var ack flows.TotalsAck
 	return r.call(ctx, "ackTotals", map[string]any{"receipt": receipt}, opID, &ack)
 }
@@ -324,20 +315,7 @@ type exitClass struct {
 // adapter loss; a lease expiry or a verified clean stop is routing off;
 // anything else is a failure.
 func (r *Remote) classifyExit(instance string, status service.Status) (exitClass, error) {
-	r.mu.Lock()
-	native := r.native
-	r.mu.Unlock()
-	// The service manager reports Cleanup only for a native installation, so
-	// a retained native exit is classified natively even before any hello.
-	native = native || status.Cleanup != ""
-	if !native || r.outcome == nil {
-		if r.exitReason == nil {
-			return exitClass{}, nil
-		}
-		reason, err := r.exitReason(instance)
-		return exitClass{reason: reason}, err
-	}
-	if instance == "" {
+	if r.outcome == nil || instance == "" {
 		return exitClass{}, nil
 	}
 	switch status.Cleanup {

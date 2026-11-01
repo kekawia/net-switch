@@ -59,7 +59,7 @@ type nativeProcess struct {
 // NativeChildCommand is only a private bootstrap of the native service build.
 // It never accepts policy or a target executable through command-line options.
 func NativeChildCommand(args []string) error {
-	if !nativeEngineBuild || len(args) != 3 {
+	if len(args) != 3 {
 		return errors.New("invalid native child bootstrap")
 	}
 	pid, err := strconv.ParseUint(args[2], 10, 32)

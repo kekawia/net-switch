@@ -14,30 +14,30 @@ func installationTrust(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(root)
-	for _, name := range []string{"netswitch", "netswitch-engine", "netswitch-desktop", "netswitchctl", "adapter"} {
+	for _, name := range []string{"netswitch", "netswitch-engine", "netswitch-desktop", "netswitchctl"} {
 		if err := os.WriteFile(filepath.Join(candidate, binary(name)), []byte("non-executed trust fixture"), 0644); err != nil {
 			t.Fatal(err)
 		}
 	}
-	adapter := filepath.Join(candidate, binary("adapter"))
-	if err := service.CheckInstallation(candidate, adapter); err != nil {
+	engine := filepath.Join(candidate, binary("netswitch-engine"))
+	if err := service.CheckInstallation(candidate); err != nil {
 		t.Fatal("trusted installation precondition", err)
 	}
-	if err := os.Link(adapter, filepath.Join(candidate, "adapter-hardlink")); err != nil {
+	if err := os.Link(engine, filepath.Join(candidate, "engine-hardlink")); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.CheckInstallation(candidate, adapter); err != nil {
+	if err := service.CheckInstallation(candidate); err != nil {
 		t.Fatal("protected hardlinked installation refused", err)
 	}
-	for _, path := range []string{filepath.Join(candidate, binary("netswitch")), adapter, root} {
+	for _, path := range []string{filepath.Join(candidate, binary("netswitch")), engine, root} {
 		restore := writableInstallPath(t, path)
-		err := service.CheckInstallation(candidate, adapter)
+		err := service.CheckInstallation(candidate)
 		restore()
 		if err == nil {
 			t.Fatal("non-admin writable executable or ancestor was accepted", path)
 		}
 	}
-	if err := service.CheckInstallation(candidate, adapter); err != nil {
+	if err := service.CheckInstallation(candidate); err != nil {
 		t.Fatal("legitimate installation rejected after controls", err)
 	}
 }

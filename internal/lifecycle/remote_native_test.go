@@ -146,9 +146,17 @@ func newNativeFixture(t *testing.T, prober platform.Prober) *nativeFixture {
 		return &localipc.Conn{ReadWriteCloser: right}, nil
 	}
 	remote.startService = func(context.Context, string) error { return nil }
-	remote.queryService = func(string) (service.Status, error) { return f.status, nil }
+	remote.queryService = func(string) (service.Status, error) {
+		f.dialMu.Lock()
+		defer f.dialMu.Unlock()
+		return f.status, nil
+	}
 	remote.waitStopped = func(context.Context, string) error { return nil }
-	remote.outcome = func(string) (host.Outcome, error) { return f.outcome, nil }
+	remote.outcome = func(string) (host.Outcome, error) {
+		f.dialMu.Lock()
+		defer f.dialMu.Unlock()
+		return f.outcome, nil
+	}
 	remote.forceStop = func(context.Context, string) error { return errors.New("unexpected forced stop") }
 	t.Cleanup(func() {
 		f.dialMu.Lock()
@@ -173,6 +181,12 @@ func newNativeFixture(t *testing.T, prober platform.Prober) *nativeFixture {
 	f.remote = remote
 	f.status = service.Status{Running: true, PID: 4242}
 	return f
+}
+
+func (f *nativeFixture) setService(status service.Status, outcome host.Outcome) {
+	f.dialMu.Lock()
+	f.status, f.outcome = status, outcome
+	f.dialMu.Unlock()
 }
 
 func (f *nativeFixture) hasLog(fragment string) bool {
@@ -215,15 +229,11 @@ func TestRemoteAttachesToTheNativeEngine(t *testing.T) {
 	if s.Status != "off" || s.Instance != f.server.Instance || s.PID == 0 {
 		t.Fatalf("hello status not mapped: %+v", s)
 	}
-	if !f.remote.native {
-		t.Fatal("dialect not detected as native")
-	}
 }
 
 // The M2 dialer writes a one-byte impersonation primer before the JSON. The
 // native host's pipe carries plain newline JSON and rejects that byte on the
-// first exchange, which is what the installed proof hit on Windows. Control
-// must therefore choose the dialer from the installation, not try both.
+// first exchange, which is what the installed proof hit on Windows.
 func TestNativeInstallDialsWithoutThePrimer(t *testing.T) {
 	ctx := context.Background()
 	primed := func(inner func(context.Context, localipc.Endpoint) (*localipc.Conn, error)) func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
@@ -249,29 +259,6 @@ func TestNativeInstallDialsWithoutThePrimer(t *testing.T) {
 	f.remote.dial = native
 	if err := f.remote.Attach(ctx, false); err != nil {
 		t.Fatal("native dial without primer refused", err)
-	}
-	// The installation decides which dialer Control uses.
-	for _, installed := range []bool{true, false} {
-		r := NewRemote(ctx, func(string) {})
-		chosen := ""
-		r.dialNative = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
-			chosen = "native"
-			return nil, errors.New("stop here")
-		}
-		r.dialAdapter = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
-			chosen = "adapter"
-			return nil, errors.New("stop here")
-		}
-		r.nativeInstalled = func() (bool, error) { return installed, nil }
-		_ = r.Attach(ctx, false)
-		if (installed && chosen != "native") || (!installed && chosen != "adapter") {
-			t.Fatalf("installed native=%t chose dialer %q", installed, chosen)
-		}
-	}
-	r := NewRemote(ctx, func(string) {})
-	r.nativeInstalled = func() (bool, error) { return false, errors.New("registry unreadable") }
-	if err := r.Attach(ctx, false); err == nil || !strings.Contains(err.Error(), "which engine is installed") {
-		t.Fatal("an unknown installation must not guess a dialer", err)
 	}
 }
 
@@ -563,10 +550,6 @@ func TestNativeTotalsAndAcknowledgementOverTheWire(t *testing.T) {
 	if _, kept := after.Apps["game"]; kept {
 		t.Fatal("acknowledged idle identity was not retired", after)
 	}
-	plain := NewRemote(ctx, func(string) {})
-	if _, err := plain.Totals(ctx, ""); !errors.Is(err, ce.ErrNoAccounting) {
-		t.Fatal("the adapter dialect must report that it has no accounting", err)
-	}
 }
 
 // A closure Core checked against one instance must never reach a replacement:
@@ -741,8 +724,10 @@ func TestNativeAdapterLossReachesTheSnapshotAfterTheServiceStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	instance := f.server.Instance
-	f.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 3}
-	f.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "adapter lost"}
+	f.setService(
+		service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 3},
+		host.Outcome{Instance: instance, State: "complete", Reason: "adapter lost"},
+	)
 	f.remote.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
 		return nil, errors.New("service stopped")
 	}
@@ -872,8 +857,10 @@ func TestDeathAfterRefusalIsClassifiedBeforeAnyRestart(t *testing.T) {
 	}
 	instance := f.server.Instance
 	// The instance dies; its service result is not published yet.
-	f.status = service.Status{Stopped: true, Cleanup: "pending"}
-	f.outcome = host.Outcome{Instance: instance, State: "pending"}
+	f.setService(
+		service.Status{Stopped: true, Cleanup: "pending"},
+		host.Outcome{Instance: instance, State: "pending"},
+	)
 	f.remote.dial = func(context.Context, localipc.Endpoint) (*localipc.Conn, error) {
 		return nil, errors.New("service stopped")
 	}
@@ -888,8 +875,10 @@ func TestDeathAfterRefusalIsClassifiedBeforeAnyRestart(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	f.status = service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 1}
-	f.outcome = host.Outcome{Instance: instance, State: "complete", Reason: "failure"}
+	f.setService(
+		service.Status{Stopped: true, Cleanup: "complete", ExitKnown: true, ExitCode: 1},
+		host.Outcome{Instance: instance, State: "complete", Reason: "failure"},
+	)
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if s := f.remote.Snapshot(); s.Status == "error" {

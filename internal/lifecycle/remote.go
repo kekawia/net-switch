@@ -25,8 +25,8 @@ func isRPCRejection(err error) bool {
 	return errors.As(err, &rejection)
 }
 
-// Remote implements Control's existing engine boundary. Only this object
-// knows about the temporary adapter payload; service ownership is independent.
+// Remote implements Control's existing engine boundary over the native engine
+// control protocol.
 type Remote struct {
 	mu                   sync.Mutex
 	connect              sync.Mutex
@@ -47,51 +47,19 @@ type Remote struct {
 	attempt              uint64
 	// beforeLoad runs between fixing the attempt's session and sending the
 	// start; nil in production, a test hook for the reattach race.
-	beforeLoad     func()
-	forgotten      map[string]uint64
-	forgetSequence uint64
-	dial           func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
-	// dialAdapter writes the M2 primer; dialNative does not. nativeInstalled
-	// reads the installation to choose between them (see dialInstalled).
-	dialAdapter, dialNative func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
-	nativeInstalled         func() (bool, error)
-	startService            func(context.Context, string) error
-	queryService            func(string) (service.Status, error)
-	waitStopped             func(context.Context, string) error
-	forceStop               func(context.Context, string) error
-	wakeGrace               time.Time
-	exitReason              func(string) (string, error)
-	// native is set by a validated native hello. Only historical fixtures
-	// select the adapter payload after attachment through testDialect below.
-	native bool
-	// Historical adapter fixtures inject their dialect explicitly. Production
-	// leaves this nil and rejects adapter-only capabilities before attach.
-	testDialect func([]string) (bool, error)
+	beforeLoad   func()
+	dial         func(context.Context, localipc.Endpoint) (*localipc.Conn, error)
+	startService func(context.Context, string) error
+	queryService func(string) (service.Status, error)
+	waitStopped  func(context.Context, string) error
+	forceStop    func(context.Context, string) error
+	wakeGrace    time.Time
 	// outcome reads a stopped native instance's cleanup result (host.ReadOutcome).
 	outcome func(string) (host.Outcome, error)
 }
 
 func NewRemote(ctx context.Context, log func(string)) *Remote {
-	r := &Remote{ctx: ctx, log: log, endpoint: localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}, snapshot: ce.Snapshot{Status: "off"}, forgotten: map[string]uint64{}, startService: service.Start, queryService: service.Query, waitStopped: service.WaitStopped}
-	r.dialAdapter, r.dialNative, r.nativeInstalled = localipc.Dial, localipc.DialNativeEngine, service.NativeEngineInstalled
-	r.dial = r.dialInstalled
-	return r
-}
-
-// dialInstalled picks the engine's transport dialect from the installation.
-// The M2 stand-in's pipe expects a one-byte impersonation primer before the
-// JSON; the native host's pipe carries plain newline JSON and rejects that
-// byte, so the wrong choice fails the very first exchange. On Linux both
-// dialers are the same socket connection.
-func (r *Remote) dialInstalled(ctx context.Context, e localipc.Endpoint) (*localipc.Conn, error) {
-	native, err := r.nativeInstalled()
-	if err != nil {
-		return nil, fmt.Errorf("cannot tell which engine is installed: %w", err)
-	}
-	if native {
-		return r.dialNative(ctx, e)
-	}
-	return r.dialAdapter(ctx, e)
+	return &Remote{ctx: ctx, log: log, endpoint: localipc.Endpoint{Path: localipc.DefaultPath("engine"), Kind: "engine", Service: service.Engine}, snapshot: ce.Snapshot{Status: "off"}, dial: localipc.DialNativeEngine, startService: service.Start, queryService: service.Query, waitStopped: service.WaitStopped}
 }
 func (r *Remote) Snapshot() ce.Snapshot {
 	r.mu.Lock()
@@ -341,7 +309,6 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	var hello struct {
 		Version      string          `json:"version"`
 		Instance     string          `json:"engineInstanceId"`
-		Snapshot     ce.Snapshot     `json:"adapterSnapshot"`
 		Status       protocol.Status `json:"status"`
 		Capabilities []string        `json:"capabilities"`
 	}
@@ -351,12 +318,7 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	if hello.Version != buildinfo.String() {
 		return fmt.Errorf("engine version %q is incompatible with Control %q", hello.Version, buildinfo.String())
 	}
-	classify := nativeDialect
-	if r.testDialect != nil {
-		classify = r.testDialect
-	}
-	adapter, err := classify(hello.Capabilities)
-	if err != nil {
+	if _, err := nativeDialect(hello.Capabilities); err != nil {
 		return err
 	}
 	var attach struct {
@@ -376,12 +338,7 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	r.rpc = rpc
 	r.instance = hello.Instance
 	r.epoch = attach.Epoch
-	r.native = !adapter
-	if adapter {
-		r.snapshot = hello.Snapshot
-	} else {
-		r.snapshot = r.nativeSnapshotLocked(hello.Status)
-	}
+	r.snapshot = r.nativeSnapshotLocked(hello.Status)
 	r.snapshot.Instance = hello.Instance
 	// An error status of a running instance (a start it refused) is shown,
 	// not counted: it carries no FailureID. Only instance-ending outcomes do.
@@ -437,8 +394,7 @@ func (r *Remote) pollStats(rpc *RPC) {
 	}
 }
 
-// call sends one fenced request. An adapterPayload goes under the temporary
-// "adapter" key; a map[string]any is merged into the native request itself.
+// call sends one fenced request.
 func (r *Remote) call(ctx context.Context, method string, payload any, opID string, out any) error {
 	return r.request(ctx, method, payload, opID, "", out)
 }
@@ -471,14 +427,10 @@ func (r *Remote) sendOn(ctx context.Context, rpc *RPC, instance string, epoch ui
 		return errors.New("engine service is not attached")
 	}
 	request := map[string]any{"method": method, "engineInstanceId": instance, "epoch": epoch}
-	switch fields := payload.(type) {
-	case nil:
-	case map[string]any:
+	if fields, ok := payload.(map[string]any); ok {
 		for k, v := range fields {
 			request[k] = v
 		}
-	default:
-		request["adapter"] = payload
 	}
 	if opID != "" {
 		request["opId"] = opID
@@ -489,29 +441,7 @@ func (r *Remote) sendOn(ctx context.Context, rpc *RPC, instance string, epoch ui
 	return rpc.Call(ctx, request, out)
 }
 func (r *Remote) refresh(ctx context.Context) error {
-	r.mu.Lock()
-	rpc, instance, native := r.rpc, r.instance, r.native
-	r.mu.Unlock()
-	if native {
-		return r.nativeRefresh(ctx)
-	}
-	var s ce.Snapshot
-	if err := r.call(ctx, "stats", adapterPayload{}, "", &s); err != nil {
-		return err
-	}
-	r.mu.Lock()
-	if r.rpc == rpc && r.instance == instance && !r.stopping {
-		s.Instance = instance
-		if s.Status == "error" {
-			s.FailureID = instance
-		}
-		r.snapshot = s
-		for line := range r.forgotten {
-			delete(r.snapshot.Policy.Lanes, line)
-		}
-	}
-	r.mu.Unlock()
-	return nil
+	return r.nativeRefresh(ctx)
 }
 func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
@@ -546,7 +476,7 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	// before it is sent, the request goes out on that very session, and its
 	// outcome is published only if that session is still the attached one.
 	r.mu.Lock()
-	revision, native, running := r.desired, r.native, r.snapshot.Status == "on"
+	revision, running := r.desired, r.snapshot.Status == "on"
 	rpc, instance, epoch := r.rpc, r.instance, r.epoch
 	r.mu.Unlock()
 	if revision == nil || !reflect.DeepEqual(revision.Policy, p) {
@@ -555,50 +485,32 @@ func (r *Remote) Start(ctx context.Context, p ce.Policy) error {
 	if r.beforeLoad != nil {
 		r.beforeLoad()
 	}
-	if native {
-		if _, err := r.nativeLoad(ctx, rpc, instance, epoch, *revision, running); err != nil {
-			if isRPCRejection(err) {
-				// The engine answered and stays attached, so this attempt
-				// failed while the instance lives on. That is a failed start
-				// (spec §2), and it is counted exactly once by Control from
-				// this call's own result; the status shown meanwhile carries no
-				// FailureID, so no poll, reattach or retry can count it again.
-				// A transport error takes the other branch; its outcome is
-				// published once by connection recovery, never here as well.
-				// A refused apply on an engine that was already on is not a
-				// failed start: forwarding continues on the loaded revision and
-				// Control resolves the conflict by raising its number (§3.3).
-				if running {
-					return err
-				}
-				r.mu.Lock()
-				if r.rpc == rpc && rpc != nil && r.instance == instance && !r.stopping {
-					message := err.Error()
-					r.snapshot.Status, r.snapshot.Error, r.snapshot.Reason, r.snapshot.FailureID = "error", &message, "", ""
-				}
-				r.mu.Unlock()
-				return &ce.StartRefused{Instance: instance, Attempt: attempt, Err: err}
-			} else if rpc != nil {
-				r.disconnect(rpc, err)
+	if _, err := r.nativeLoad(ctx, rpc, instance, epoch, *revision, running); err != nil {
+		if isRPCRejection(err) {
+			// The engine answered and stays attached, so this attempt
+			// failed while the instance lives on. That is a failed start
+			// (spec §2), and it is counted exactly once by Control from
+			// this call's own result; the status shown meanwhile carries no
+			// FailureID, so no poll, reattach or retry can count it again.
+			// A transport error takes the other branch; its outcome is
+			// published once by connection recovery, never here as well.
+			// A refused apply on an engine that was already on is not a
+			// failed start: forwarding continues on the loaded revision and
+			// Control resolves the conflict by raising its number (§3.3).
+			if running {
+				return err
 			}
-			return err
-		}
-		return r.refresh(ctx)
-	}
-	var ack ce.Acknowledgement
-	if err := r.call(ctx, "start", adapterPayload{Revision: revision}, "", &ack); err != nil {
-		// A lost response may mean the start succeeded. Reattach before
-		// deciding; the next snapshot or a stopped service proves failure.
-		r.mu.Lock()
-		rpc := r.rpc
-		r.mu.Unlock()
-		if rpc != nil {
+			r.mu.Lock()
+			if r.rpc == rpc && rpc != nil && r.instance == instance && !r.stopping {
+				message := err.Error()
+				r.snapshot.Status, r.snapshot.Error, r.snapshot.Reason, r.snapshot.FailureID = "error", &message, "", ""
+			}
+			r.mu.Unlock()
+			return &ce.StartRefused{Instance: instance, Attempt: attempt, Err: err}
+		} else if rpc != nil {
 			r.disconnect(rpc, err)
 		}
 		return err
-	}
-	if ack.Number != revision.Number || ack.Hash != revision.Hash {
-		return errors.New("engine start acknowledgement differs from desired policy")
 	}
 	return r.refresh(ctx)
 }
@@ -606,7 +518,7 @@ func (r *Remote) Restore(revision *ce.Revision) { r.mu.Lock(); r.desired = revis
 func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledgement, error) {
 	r.Restore(&revision)
 	r.mu.Lock()
-	rpc, native, instance, epoch := r.rpc, r.native, r.instance, r.epoch
+	rpc, instance, epoch := r.rpc, r.instance, r.epoch
 	s := r.snapshot
 	r.mu.Unlock()
 	if rpc == nil || s.Status != "on" {
@@ -614,18 +526,7 @@ func (r *Remote) Apply(ctx context.Context, revision ce.Revision) (ce.Acknowledg
 		// as loaded in the remote snapshot; start will send the complete record.
 		return ce.Acknowledgement{Number: revision.Number, Hash: revision.Hash, Instance: s.Instance}, nil
 	}
-	if native {
-		ack, err := r.nativeLoad(ctx, rpc, instance, epoch, revision, true)
-		if err == nil {
-			err = r.refresh(ctx)
-		}
-		return ack, err
-	}
-	var ack ce.Acknowledgement
-	if err := r.flushForgotten(ctx); err != nil {
-		return ack, err
-	}
-	err := r.call(ctx, "apply", adapterPayload{Revision: &revision}, "", &ack)
+	ack, err := r.nativeLoad(ctx, rpc, instance, epoch, revision, true)
 	if err == nil {
 		err = r.refresh(ctx)
 	}
@@ -791,91 +692,12 @@ func (r *Remote) stopGracefullyObserved(ctx context.Context, observedRunning *bo
 func (r *Remote) Connections(ctx context.Context) ([]ce.Connection, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	r.mu.Lock()
-	native := r.native
-	r.mu.Unlock()
-	if native {
-		return r.nativeConnections(ctx)
-	}
-	out := []ce.Connection{}
-	cursor := ""
-	seen := map[string]bool{}
-	for {
-		var page connectionPage
-		if err := r.request(ctx, "flows", adapterPayload{}, "", cursor, &page); err != nil {
-			return nil, err
-		}
-		out = append(out, page.Connections...)
-		if len(out) > 65536 {
-			return nil, errors.New("engine flow snapshot exceeds its entry limit")
-		}
-		if page.Cursor == "" {
-			return out, nil
-		}
-		if seen[page.Cursor] || len(page.Connections) == 0 {
-			return nil, errors.New("engine flow cursor made no progress")
-		}
-		seen[page.Cursor] = true
-		cursor = page.Cursor
-	}
+	return r.nativeConnections(ctx)
 }
 func (r *Remote) CloseFlows(ctx context.Context, request ce.CloseRequest) (ce.CloseResult, error) {
-	r.mu.Lock()
-	native := r.native
-	r.mu.Unlock()
-	if native {
-		return r.nativeClose(ctx, request)
-	}
-	var out ce.CloseResult
-	err := r.fencedRequest(ctx, request.Instance, "closeFlows", adapterPayload{Close: &request}, request.OperationID, "", &out)
-	return out, err
+	return r.nativeClose(ctx, request)
 }
 func (r *Remote) Probe(ctx context.Context, request ce.ProbeRequest) ce.ProbeResult {
-	r.mu.Lock()
-	native, instance := r.native, r.instance
-	r.mu.Unlock()
-	if native {
-		return r.nativeProbe(ctx, request)
-	}
-	// The adapter answers the kind it was asked for; Control's kind and
-	// instance checks apply to both dialects.
-	out := ce.ProbeResult{Outcome: ce.Unavailable}
-	_ = r.call(ctx, "probe", adapterPayload{Probe: &request}, request.OperationID, &out)
-	out.Kind, out.Instance = "full", instance
-	if request.Quick {
-		out.Kind = "quick"
-	}
-	return out
+	return r.nativeProbe(ctx, request)
 }
-func (r *Remote) ForgetLane(line string) {
-	// Core calls this while holding its state lock. Queue the invalidation
-	// locally; Apply flushes it after Core releases that lock. The native
-	// engine has no lane cache: lanes are part of every revision.
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.native {
-		return
-	}
-	r.forgetSequence++
-	r.forgotten[line] = r.forgetSequence
-	delete(r.snapshot.Policy.Lanes, line)
-}
-func (r *Remote) flushForgotten(ctx context.Context) error {
-	r.mu.Lock()
-	work := map[string]uint64{}
-	for line, seq := range r.forgotten {
-		work[line] = seq
-	}
-	r.mu.Unlock()
-	for line, seq := range work {
-		if err := r.call(ctx, "adapterForgetLane", adapterPayload{Line: line}, "", nil); err != nil {
-			return err
-		}
-		r.mu.Lock()
-		if r.forgotten[line] == seq {
-			delete(r.forgotten, line)
-		}
-		r.mu.Unlock()
-	}
-	return nil
-}
+func (r *Remote) ForgetLane(string) {}

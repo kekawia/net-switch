@@ -7,7 +7,6 @@ package singbox
 import (
 	"encoding/json"
 	"fmt"
-	controladapter "github.com/AyoubAchour/net-switch/internal/engine/singbox"
 	"net/netip"
 	"regexp"
 	"strconv"
@@ -90,7 +89,15 @@ func addrPort(ip, port string) netip.AddrPort {
 // path: the owner, as in "/opt/x/curl (runner)", then " (deleted)" for a
 // program whose file was replaced while it ran.
 func CleanProcessPath(p string) string {
-	return controladapter.LinuxProcessPath(p)
+	if !strings.HasPrefix(p, "/") {
+		return ""
+	}
+	if strings.HasSuffix(p, ")") && !strings.HasSuffix(p, " (deleted)") {
+		if delimiter := strings.LastIndex(p, " ("); delimiter >= 0 {
+			p = p[:delimiter]
+		}
+	}
+	return strings.TrimSuffix(p, " (deleted)")
 }
 
 var ruleFlag = regexp.MustCompile(`\[[^\]]*\]`)

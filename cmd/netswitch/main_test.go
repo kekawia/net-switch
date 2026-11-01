@@ -25,12 +25,8 @@ func TestDefaultRootIsExecutableFolderEvenFromAnotherDirectory(t *testing.T) {
 }
 
 // The product netswitch started by hand explains itself and starts nothing:
-// Control runs only as the installed service. The sing-box launcher lives in
-// the control_compat build alone, so this build has no path to an engine.
+// Control runs only as the installed service.
 func TestProductBuildHasNoDesktopLauncher(t *testing.T) {
-	if compatibilityLauncher {
-		t.Skip("control_compat build carries the parity launcher")
-	}
 	defer func(args []string) { os.Args = args }(os.Args)
 	os.Args = []string{"netswitch"}
 	err := run()
