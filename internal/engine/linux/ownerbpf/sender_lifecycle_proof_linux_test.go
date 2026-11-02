@@ -1192,7 +1192,17 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 		clf.RecordUserspaceSocket(k.Cookie)
 	}
 
-	// Inject inbound ICMP Echo Request and inbound TCP SYN to closed port 44999 into nsbridge0.
+	// Inject inbound ICMP Echo Request and inbound TCP SYN to closed port 44999 into nsbridge0
+	// as external wire traffic (outside the monitored application cgroup scope so synchronous
+	// tun_get_user -> netif_rx -> icmp_push_reply -> ip_append_data softirq execution on arm64
+	// does not attribute the TUN wire injector process as a userspace sender).
+	var savedScope uint64
+	if err := f.ap.Collection.Maps["scope"].Lookup(uint32(0), &savedScope); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ap.Collection.Maps["scope"].Update(uint32(0), ^uint64(0), ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
 	icmpReq := buildInboundICMPEchoRequest()
 	if _, err := unix.Write(f.bf.fd, icmpReq); err != nil {
 		t.Fatalf("inject inbound ICMP echo request: %v", err)
@@ -1200,6 +1210,9 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 	tcpSyn := buildInboundTCPSynToClosedPort(44999)
 	if _, err := unix.Write(f.bf.fd, tcpSyn); err != nil {
 		t.Fatalf("inject inbound TCP SYN: %v", err)
+	}
+	if err := f.ap.Collection.Maps["scope"].Update(uint32(0), savedScope, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
 	}
 
 	ctrlFrames := f.readFramesMatching(t, 2, 4*time.Second, func(raw []byte, _ ReadDecision) bool {
