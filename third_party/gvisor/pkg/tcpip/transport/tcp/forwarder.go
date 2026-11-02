@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-11-02: expose SYN segment provenance before request completion.
+
 package tcp
 
 import (
@@ -117,6 +119,17 @@ type ForwarderRequest struct {
 // represents the connection request.
 func (r *ForwarderRequest) ID() stack.TransportEndpointID {
 	return r.segment.id
+}
+
+// NetSwitchProvenance returns the connection request segment packet's
+// provenance envelope, or nil once the request has been completed.
+func (r *ForwarderRequest) NetSwitchProvenance() any {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.segment == nil || r.segment.pkt == nil {
+		return nil
+	}
+	return r.segment.pkt.NetSwitchProvenance
 }
 
 // Complete completes the request, and optionally sends a RST segment back to the

@@ -70,6 +70,28 @@ func (r *stalledReader) RXChecksumVerified(p []byte) bool {
 	device, ok := r.TunDevice.(platform.ChecksumVerifier)
 	return ok && device.RXChecksumVerified(p)
 }
+func (r *stalledReader) UnwrapTun() platform.TunDevice { return r.TunDevice }
+func (r *stalledReader) BindPumpThread() (func(), error) {
+	if device, ok := r.TunDevice.(platform.TunProvenanceReader); ok {
+		return device.BindPumpThread()
+	}
+	return nil, errors.New("underlying TUN device lacks TunProvenanceReader")
+}
+func (r *stalledReader) ReadPacketWithProvenance(ctx context.Context, b []byte) (int, any, error) {
+	device, ok := r.TunDevice.(platform.TunProvenanceReader)
+	if !ok {
+		return 0, nil, errors.New("underlying TUN device lacks TunProvenanceReader")
+	}
+	n, prov, err := device.ReadPacketWithProvenance(ctx, b)
+	if err != nil {
+		return n, nil, err
+	}
+	n, err = r.afterRead(ctx, n)
+	if err != nil {
+		return 0, nil, err
+	}
+	return n, prov, nil
+}
 func (r *stalledReader) WriteBatch(packets [][]byte) (int, error) {
 	if device, ok := r.TunDevice.(platform.BatchWriter); ok {
 		n, err := device.WriteBatch(packets)
@@ -116,6 +138,10 @@ func (r *stalledReader) ReadPacket(ctx context.Context, b []byte) (int, error) {
 	if err != nil {
 		return n, err
 	}
+	return r.afterRead(ctx, n)
+}
+
+func (r *stalledReader) afterRead(ctx context.Context, n int) (int, error) {
 	// The hosted Control cutover proof makes the real read pump report the
 	// platform's adapter-loss error (Windows: the Wintun removal error, so the
 	// genuine exit-3 path runs; Linux: an ordinary pump failure, exit 1).
@@ -209,6 +235,9 @@ func configureNativeProof(data string, options *host.Options) error {
 			}
 			if request.Kind == "kernel-sandbox" {
 				return nativeKernelSandboxEvidence(server.Instance)
+			}
+			if request.Kind == "ebpf-capability" {
+				return nativeEBPFCapabilityEvidence(server.Instance)
 			}
 			if request.Kind != "totals-capacity" {
 				return nil, errors.New("unknown hosted native fault")

@@ -36,6 +36,7 @@ type datagram struct {
 	payload, original []byte
 	df                bool
 	bytes             int
+	provenance        any
 }
 type session struct {
 	workers         sync.WaitGroup
@@ -137,7 +138,7 @@ func (n *NAT) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) bool {
 	network := p.NetworkHeader().Slice()
 	headerBytes := len(network) + len(h)
 	originalSize := headerBytes + p.Data().Size()
-	n.receive(source, destination, dataSize+originalSize, func() ([]byte, []byte, bool) {
+	n.receiveWithProvenance(source, destination, dataSize+originalSize, p.NetSwitchProvenance, func() ([]byte, []byte, bool) {
 		payload := p.Data().AsRange().Capped(dataSize).ToSlice()
 		// ICMP must quote the triggering headers, including the IPv4 ID,
 		// options/flags and the original UDP checksum (which may be zero on
@@ -194,6 +195,10 @@ func ipv6Fragmented(ip []byte) bool {
 }
 
 func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPacket func() ([]byte, []byte, bool)) {
+	n.receiveWithProvenance(source, destination, ownedBytes, nil, copyPacket)
+}
+
+func (n *NAT) receiveWithProvenance(source, destination netip.AddrPort, ownedBytes int, provenance any, copyPacket func() ([]byte, []byte, bool)) {
 	b := n.bucket(source)
 	b.Lock()
 	if n.closed.Load() {
@@ -261,7 +266,7 @@ func (n *NAT) receive(source, destination netip.AddrPort, ownedBytes int, copyPa
 		return
 	}
 	payload, raw, df := copyPacket()
-	s.queue = append(s.queue, datagram{destination: destination, payload: payload, original: raw, df: df, bytes: bytes})
+	s.queue = append(s.queue, datagram{destination: destination, payload: payload, original: raw, df: df, bytes: bytes, provenance: provenance})
 	s.bytes += bytes
 	for old := n.PeakQueuePackets.Load(); uint64(len(s.queue)) > old && !n.PeakQueuePackets.CompareAndSwap(old, uint64(len(s.queue))); old = n.PeakQueuePackets.Load() {
 	}
@@ -346,7 +351,22 @@ func (s *session) run() {
 	lookupStart := time.Now()
 	var owner platform.Owner
 	var err error
-	if owners, ok := n.owners.(platform.DatagramOwnerLookup); ok {
+	if provOwners, ok := n.owners.(platform.ProvenanceOwnerLookup); ok {
+		s.mu.Lock()
+		var destination netip.AddrPort
+		var firstProv any
+		if len(s.queue) > 0 {
+			destination = s.queue[0].destination
+			firstProv = s.queue[0].provenance
+		}
+		s.mu.Unlock()
+		if !destination.IsValid() {
+			cl()
+			return
+		}
+		owner, err = provOwners.UDPWithProvenance(lookup, platform.Tuple{Source: s.source, Destination: destination}, firstProv)
+		firstProv = nil
+	} else if owners, ok := n.owners.(platform.DatagramOwnerLookup); ok {
 		s.mu.Lock()
 		var destination netip.AddrPort
 		if len(s.queue) > 0 {
@@ -370,7 +390,7 @@ func (s *session) run() {
 	if err != nil {
 		// Attribution may be unknown while the kernel socket cookie is known.
 		// Keep that cookie so unknown-owner sessions can still be validated.
-		owner = platform.Owner{Generation: owner.Generation}
+		owner = platform.Owner{Generation: owner.Generation, Ambiguous: errors.Is(err, platform.ErrAmbiguous)}
 	}
 	s.mu.Lock()
 	s.owner = owner
@@ -492,7 +512,24 @@ func (s *session) run() {
 			s.queue = s.queue[1:]
 			s.bytes -= d.bytes
 			fresh := n.now().Sub(s.validated) < IdentityMaxAge
+			sessionOwner := s.owner
 			s.mu.Unlock()
+			if validator, ok := n.owners.(platform.ProvenanceDatagramValidator); ok {
+				switch validator.ValidateUDPDatagram(sessionOwner, d.provenance) {
+				case platform.DatagramDrop:
+					d.provenance = nil
+					n.Dropped.Add(1)
+					n.control.ReleasePending(d.bytes)
+					continue
+				case platform.DatagramInvalidateOwner:
+					d.provenance = nil
+					n.Dropped.Add(1)
+					n.control.ReleasePending(d.bytes)
+					s.close()
+					return
+				}
+			}
+			d.provenance = nil
 			if fresh {
 				written, err := socket.WriteTo(d.payload, d.destination, d.df)
 				if err == nil {

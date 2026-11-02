@@ -3,6 +3,7 @@ package tcp
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"sync"
@@ -250,6 +251,7 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	defer f.wg.Done()
 	id := r.ID()
+	prov := r.NetSwitchProvenance()
 	// Setup only reads the admission record. Serializing every new callback
 	// on an exclusive lock creates a mutex-handoff convoy during SYN bursts,
 	// starving the owner lookups that those callbacks are about to start.
@@ -303,14 +305,19 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	lookup, cancelLookup := context.WithTimeout(ctx, lookupBound)
 	lookupStart := time.Now()
 	var lookupErr error
-	owner, lookupErr = f.owners.TCP(lookup, t)
+	if provLookup, ok := f.owners.(platform.ProvenanceOwnerLookup); ok {
+		owner, lookupErr = provLookup.TCPWithProvenance(lookup, t, prov)
+	} else {
+		owner, lookupErr = f.owners.TCP(lookup, t)
+	}
+	prov = nil
 	if observer, ok := f.control.(interface {
 		Lookup(time.Duration, error, platform.Owner)
 	}); ok {
 		observer.Lookup(time.Since(lookupStart), lookupErr, owner)
 	}
 	if lookupErr != nil {
-		owner = platform.Owner{}
+		owner = platform.Owner{Ambiguous: errors.Is(lookupErr, platform.ErrAmbiguous)}
 	}
 	cancelLookup()
 	decision, err := ticket.Resolve(owner)

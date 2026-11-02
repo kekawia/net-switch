@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"github.com/AyoubAchour/net-switch/internal/apppath"
 )
 
 type SandboxKind string
@@ -263,7 +265,7 @@ func ParseFlatpakInfo(text string) (string, error) {
 			continue
 		}
 		if section == "Application" && strings.HasPrefix(line, "name=") {
-			name := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "name=")))
+			name := strings.TrimSpace(strings.TrimPrefix(line, "name="))
 			if name == "" || strings.ContainsAny(name, "/ \t") {
 				return "", errors.New("invalid flatpak Application name")
 			}
@@ -353,7 +355,7 @@ func ValidateProcessIdentity(key ActorKey, ev ActorEvidence, mat RawProcessMater
 		return ValidatedIdentity{}, ReasonIdentityUnretained
 	}
 	cleanExe := path.Clean(rawExe)
-	canonPath := strings.ToLower(cleanExe)
+	canonPath := cleanExe
 
 	if mat.FlatpakInfoErr != nil {
 		return ValidatedIdentity{}, ReasonSandboxUnverified
@@ -364,18 +366,17 @@ func ValidateProcessIdentity(key ActorKey, ev ActorEvidence, mat RawProcessMater
 	}
 
 	sandbox := SandboxNone
-	appID := canonPath
+	appID := apppath.Normalize(cleanExe, apppath.Linux)
 
 	if mat.FlatpakAppID != "" {
 		sandbox = SandboxFlatpak
-		appID = "flatpak:" + strings.ToLower(strings.TrimSpace(mat.FlatpakAppID))
+		appID = "flatpak:" + strings.TrimSpace(mat.FlatpakAppID)
 	} else if snapName, snapRoot, ok := parseSnapExePath(cleanExe); ok {
 		if !verifySnapMount(mat.Mounts, snapRoot, ev.Device) {
 			return ValidatedIdentity{}, ReasonSandboxUnverified
 		}
 		sandbox = SandboxSnap
 		appID = "snap:" + snapName
-		canonPath = snapName
 	}
 
 	// Registered AppImage verification: an APPIMAGE environment variable alone is
@@ -404,12 +405,11 @@ func ValidateProcessIdentity(key ActorKey, ev ActorEvidence, mat RawProcessMater
 			return ValidatedIdentity{}, ReasonSandboxUnverified
 		}
 		base := path.Base(appImgPath)
-		name := strings.ToLower(strings.TrimSuffix(base, path.Ext(base)))
+		name := base[:len(base)-len(".appimage")]
 		if name == "" {
 			return ValidatedIdentity{}, ReasonSandboxUnverified
 		}
 		sandbox = SandboxAppImage
-		canonPath = strings.ToLower(appImgPath)
 		appID = "appimage:" + name
 	}
 
@@ -428,10 +428,10 @@ func ValidateProcessIdentity(key ActorKey, ev ActorEvidence, mat RawProcessMater
 func parseSnapExePath(cleanExe string) (name, snapRoot string, ok bool) {
 	parts := strings.Split(strings.TrimPrefix(cleanExe, "/"), "/")
 	if len(parts) >= 4 && parts[0] == "snap" && parts[1] != "" && parts[2] != "" {
-		return strings.ToLower(parts[1]), "/" + path.Join(parts[0], parts[1], parts[2]), true
+		return parts[1], "/" + path.Join(parts[0], parts[1], parts[2]), true
 	}
 	if len(parts) >= 7 && parts[0] == "var" && parts[1] == "lib" && parts[2] == "snapd" && parts[3] == "snap" && parts[4] != "" && parts[5] != "" {
-		return strings.ToLower(parts[4]), "/" + path.Join(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]), true
+		return parts[4], "/" + path.Join(parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]), true
 	}
 	return "", "", false
 }

@@ -649,7 +649,7 @@ func TestSenderP3(t *testing.T) {
 		return matchTCPDstPort(raw, 4, 43001)
 	})
 	f.syncLedger(t, ledger, processed)
-	wantTCP4App := strings.ToLower(tcp4Bin)
+	wantTCP4App := tcp4Bin
 	for i, sf := range synFrames {
 		env := ledger.ResolvePacketEnvelope(sf.Decision)
 		dec := ledger.ValidateForwardingEnvelope(env)
@@ -682,8 +682,8 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envTCP6 := ledger.ResolvePacketEnvelope(syn6Frames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envTCP6); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(tcp6Bin) {
-		t.Fatalf("TCPv6 SYN decision = %+v, want %q", dec, strings.ToLower(tcp6Bin))
+	if dec := ledger.ValidateForwardingEnvelope(envTCP6); dec.Status != IdentityKnown || dec.Snapshot.AppID != tcp6Bin {
+		t.Fatalf("TCPv6 SYN decision = %+v, want %q", dec, tcp6Bin)
 	}
 	ledger.ReleaseEnvelope(&envTCP6)
 	_ = tcp6In.Close()
@@ -704,8 +704,8 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envTFO := ledger.ResolvePacketEnvelope(tfoFrames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envTFO); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(tfoBin) {
-		t.Fatalf("TCP Fast Open SYN decision = %+v, want %q", dec, strings.ToLower(tfoBin))
+	if dec := ledger.ValidateForwardingEnvelope(envTFO); dec.Status != IdentityKnown || dec.Snapshot.AppID != tfoBin {
+		t.Fatalf("TCP Fast Open SYN decision = %+v, want %q", dec, tfoBin)
 	}
 	ledger.ReleaseEnvelope(&envTFO)
 	_ = tfoIn.Close()
@@ -727,7 +727,7 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envU6 := ledger.ResolvePacketEnvelope(u6Frames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envU6); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(udp6Bin) {
+	if dec := ledger.ValidateForwardingEnvelope(envU6); dec.Status != IdentityKnown || dec.Snapshot.AppID != udp6Bin {
 		t.Fatalf("UDPv6 sendto decision = %+v", dec)
 	}
 	ledger.ReleaseEnvelope(&envU6)
@@ -750,7 +750,7 @@ func TestSenderP3(t *testing.T) {
 	f.syncLedger(t, ledger, processed)
 	for _, mf := range mmFrames {
 		env := ledger.ResolvePacketEnvelope(mf.Decision)
-		if dec := ledger.ValidateForwardingEnvelope(env); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(mmsgBin) {
+		if dec := ledger.ValidateForwardingEnvelope(env); dec.Status != IdentityKnown || dec.Snapshot.AppID != mmsgBin {
 			t.Fatalf("sendmmsg decision = %+v", dec)
 		}
 		ledger.ReleaseEnvelope(&env)
@@ -773,7 +773,7 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envSp := ledger.ResolvePacketEnvelope(spFrames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envSp); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(spliceBin) {
+	if dec := ledger.ValidateForwardingEnvelope(envSp); dec.Status != IdentityKnown || dec.Snapshot.AppID != spliceBin {
 		t.Fatalf("splice decision = %+v", dec)
 	}
 	ledger.ReleaseEnvelope(&envSp)
@@ -849,15 +849,15 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envValid := ledger.ResolvePacketEnvelope(validFrames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envValid); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(validBin) || dec.Conflicts != 0 {
-		t.Fatalf("valid send after failed sends decision = %+v, want known %q conflicts=0", dec, strings.ToLower(validBin))
+	if dec := ledger.ValidateForwardingEnvelope(envValid); dec.Status != IdentityKnown || dec.Snapshot.AppID != validBin || dec.Conflicts != 0 {
+		t.Fatalf("valid send after failed sends decision = %+v, want known %q conflicts=0", dec, validBin)
 	}
 	ledger.ReleaseEnvelope(&envValid)
 	_ = vIn.Close()
 	_ = cmdValid.Wait()
 	_ = f2In.Close()
 	_ = cmdFail2.Wait()
-	t.Logf("P3_FAILED_SENDS_IGNORED valid_owner=%s cookie=%d", strings.ToLower(validBin), validFrames[0].Decision.Packet.Cookie)
+	t.Logf("P3_FAILED_SENDS_IGNORED valid_owner=%s cookie=%d", validBin, validFrames[0].Decision.Packet.Cookie)
 
 	// 5. Multi-app UDP_CORK into a single flushed datagram -> conflicting_identity.
 	corkAppA := makeAppBin("p3-cork-app-a")
@@ -1050,7 +1050,7 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 			t.Fatalf("IPv4 fragment %d Ingest error: %v", idx, err)
 		}
 		if idx == 0 {
-			if !done || len(pkt) != 20+8+3200 || mergedEnv.Identity.Status != IdentityKnown || mergedEnv.Identity.Snapshot.AppID != strings.ToLower(fragV4Bin) {
+			if !done || len(pkt) != 20+8+3200 || mergedEnv.Identity.Status != IdentityKnown || mergedEnv.Identity.Snapshot.AppID != fragV4Bin {
 				t.Fatalf("IPv4 reassembled done=%t len=%d id=%+v", done, len(pkt), mergedEnv.Identity)
 			}
 			ledger.ReleaseEnvelope(&mergedEnv)
@@ -1081,7 +1081,7 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 			t.Fatalf("IPv6 fragment %d Ingest error: %v", idx, err)
 		}
 		if idx == 0 {
-			if !done || len(pkt) != 40+8+3200 || mergedEnv.Identity.Status != IdentityKnown || mergedEnv.Identity.Snapshot.AppID != strings.ToLower(fragV6Bin) {
+			if !done || len(pkt) != 40+8+3200 || mergedEnv.Identity.Status != IdentityKnown || mergedEnv.Identity.Snapshot.AppID != fragV6Bin {
 				t.Fatalf("IPv6 reassembled done=%t len=%d id=%+v", done, len(pkt), mergedEnv.Identity)
 			}
 			ledger.ReleaseEnvelope(&mergedEnv)
@@ -1108,7 +1108,7 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envExt := ledger.ResolvePacketEnvelope(extFrames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envExt); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(extV6Bin) {
+	if dec := ledger.ValidateForwardingEnvelope(envExt); dec.Status != IdentityKnown || dec.Snapshot.AppID != extV6Bin {
 		t.Fatalf("IPv6 Destination Options packet decision = %+v", dec)
 	}
 	ledger.ReleaseEnvelope(&envExt)
@@ -1148,7 +1148,7 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 		dec := ledger.ValidateForwardingEnvelope(env)
 		hasSK := uf.Decision.Packet.Cookie != 0
 		if hasSK {
-			if dec.Status != IdentityKnown || dec.Snapshot == nil || dec.Snapshot.AppID != strings.ToLower(usoBin) {
+			if dec.Status != IdentityKnown || dec.Snapshot == nil || dec.Snapshot.AppID != usoBin {
 				t.Fatalf("UDP_SEGMENT segment %d with sk (cookie=%d) decision = %+v", segIdx, uf.Decision.Packet.Cookie, dec)
 			}
 		} else {

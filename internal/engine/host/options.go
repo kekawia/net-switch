@@ -23,6 +23,9 @@ type State interface {
 }
 
 type Options struct {
+	// OwnerBackend selects the Linux attribution backend ("proc-fallback" by
+	// default, "ebpf" when explicitly opted in). Ignored on other platforms.
+	OwnerBackend string
 	// Listen replaces only the transport. The child retains all protocol state.
 	Listen func() (Listener, error)
 	// HealthKey enables the private, TUN-bound forwarding endpoint for a child.

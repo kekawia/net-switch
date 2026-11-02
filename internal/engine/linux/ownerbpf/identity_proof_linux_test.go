@@ -823,7 +823,7 @@ func TestIdentityI1(t *testing.T) {
 	if idec1.Status != IdentityKnown || idec1.Reason != ReasonValidated || idec1.Snapshot == nil {
 		t.Fatalf("cold native live decision = %+v", idec1)
 	}
-	wantNativePath := strings.ToLower(nativeBin)
+	wantNativePath := nativeBin
 	if idec1.Snapshot.Path != wantNativePath || idec1.Snapshot.AppID != wantNativePath || idec1.Snapshot.Sandbox != SandboxNone {
 		t.Fatalf("cold native identity mismatch: path=%q app=%q sandbox=%q want=%q", idec1.Snapshot.Path, idec1.Snapshot.AppID, idec1.Snapshot.Sandbox, wantNativePath)
 	}
@@ -914,7 +914,7 @@ func TestIdentityI1(t *testing.T) {
 	snapVerified := runSandboxCase("snap_setup", 41002, "i1-snap-ok")
 	if snapVerified.Status != IdentityKnown || snapVerified.Snapshot == nil ||
 		snapVerified.Snapshot.Sandbox != SandboxSnap ||
-		snapVerified.Snapshot.Path != "i1snap" ||
+		snapVerified.Snapshot.Path != "/snap/i1snap/42/bin/snap-sender" ||
 		snapVerified.Snapshot.AppID != "snap:i1snap" {
 		t.Fatalf("verified snap decision = %+v, snap=%+v", snapVerified, snapVerified.Snapshot)
 	}
@@ -928,11 +928,11 @@ func TestIdentityI1(t *testing.T) {
 		"NS_IDENTITY_APPIMAGE_FILE="+appImgFile,
 		"NS_IDENTITY_APPDIR="+appDir,
 	)
-	wantAppImgPath := strings.ToLower(appImgFile)
+	wantAppImgPath := filepath.Join(appDir, "usr", "bin", "appimage-sender")
 	if appImgVerified.Status != IdentityKnown || appImgVerified.Snapshot == nil ||
 		appImgVerified.Snapshot.Sandbox != SandboxAppImage ||
 		appImgVerified.Snapshot.Path != wantAppImgPath ||
-		appImgVerified.Snapshot.AppID != "appimage:i1registered" {
+		appImgVerified.Snapshot.AppID != "appimage:I1Registered" {
 		t.Fatalf("verified appimage decision = %+v, snap=%+v", appImgVerified, appImgVerified.Snapshot)
 	}
 
@@ -1041,7 +1041,7 @@ func TestIdentityI1(t *testing.T) {
 	}
 	idecChild := ledger.ResolvePacket(rdecChild)
 	if idecChild.Status != IdentityKnown || idecChild.Conflicts != 0 || idecChild.Snapshot == nil ||
-		idecChild.Snapshot.AppID != strings.ToLower(forkBin) {
+		idecChild.Snapshot.AppID != forkBin {
 		t.Fatalf("fork child packet decision = %+v", idecChild)
 	}
 	ledger.ReleasePacket(idecChild.Snapshot)
@@ -1090,7 +1090,7 @@ func TestIdentityI1(t *testing.T) {
 	}
 	rdecGen2 := f.readUDPByPayload(t, "i1-exec-gen2", 41006)
 	idecGen2 := ledger.ResolvePacket(rdecGen2)
-	wantGen2 := strings.ToLower(gen2Bin)
+	wantGen2 := gen2Bin
 	if idecGen2.Status != IdentityKnown || idecGen2.Snapshot == nil ||
 		idecGen2.Snapshot.Path != wantGen2 || idecGen2.Snapshot.AppID != wantGen2 {
 		t.Fatalf("current exec gen2 decision = %+v, want %q", idecGen2, wantGen2)
@@ -1278,7 +1278,7 @@ func TestIdentityI1(t *testing.T) {
 	f.syncLedger(t, ledger, processed)
 	rdecSCM1 := f.readUDPByPayload(t, "i1-scm-uid1002", 41009)
 	idecSCM1 := ledger.ResolvePacket(rdecSCM1)
-	wantSenderPath := strings.ToLower(senderBin)
+	wantSenderPath := senderBin
 	if idecSCM1.Status != IdentityKnown || idecSCM1.Snapshot == nil ||
 		idecSCM1.Snapshot.Context.UID != 1002 ||
 		idecSCM1.Snapshot.Path != wantSenderPath || idecSCM1.Snapshot.AppID != wantSenderPath {
@@ -1398,8 +1398,8 @@ func TestIdentityI2(t *testing.T) {
 			f.syncLedger(t, ledger, processed)
 			rdecPre := f.readUDPByPayload(t, prePayload, port)
 			idecPre := ledger.ResolvePacket(rdecPre)
-			if idecPre.Status != IdentityKnown || idecPre.Snapshot == nil || idecPre.Snapshot.AppID != strings.ToLower(appABin) {
-				t.Fatalf("expected prior clean sendto owner %q, got %+v", strings.ToLower(appABin), idecPre)
+			if idecPre.Status != IdentityKnown || idecPre.Snapshot == nil || idecPre.Snapshot.AppID != appABin {
+				t.Fatalf("expected prior clean sendto owner %q, got %+v", appABin, idecPre)
 			}
 			ledger.ReleasePacket(idecPre.Snapshot)
 			_, _ = io.WriteString(inA, "C")

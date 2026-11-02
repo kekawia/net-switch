@@ -81,7 +81,7 @@ type Retirement struct {
 // timestamped event next to its own.
 func RecoverReported(ctx context.Context, dir string, begin func() (func(error) error, error), retired func(Retirement)) error {
 	return host.Recover(ctx, fileLock{filepath.Join(dir, "engine.lock")}, func(lock journal.Locker) error {
-		p, err := newPlatform(ctx, dir, lock)
+		p, err := newPlatform(ctx, dir, lock, OwnerBackendProcFallback)
 		if err != nil {
 			return err
 		}
@@ -100,7 +100,7 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	start, cancelStart := context.WithTimeout(ctx, 3*time.Second)
-	p, err := New(start, dir)
+	p, err := NewWithBackend(start, dir, options.OwnerBackend)
 	cancelStart()
 	if err != nil {
 		return err

@@ -64,6 +64,9 @@ func parseDiag(b []byte) (socketRow, error) {
 		if n < 4 || off+n > len(b) {
 			return r, errors.New("invalid inet_diag attribute")
 		}
+		if kind == 10 && n >= 5 {
+			r.protocol = int(b[off+4])
+		}
 		if kind == 21 && n >= 12 {
 			r.cgroup = binary.NativeEndian.Uint64(b[off+4:])
 		}

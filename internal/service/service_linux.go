@@ -196,13 +196,14 @@ func unitFiles(c Config) map[string]string {
 	// /proc/<pid>/exe and fd links for other UIDs require the ptrace read
 	// permission. Routing is machine-wide, including other users' apps.
 	readCapabilities := "CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_SYS_PTRACE"
+	engineCapabilities := readCapabilities + " CAP_BPF CAP_PERFMON"
 	units := map[string]string{
 		"netswitch.socket":         "[Unit]\nDescription=Net Switch local desktop socket\n[Socket]\nListenStream=/run/netswitch/desktop.sock\nSocketMode=0666\nDirectoryMode=0755\nRemoveOnStop=yes\n[Install]\nWantedBy=sockets.target\n",
 		"netswitch.service":        "[Unit]\nDescription=Net Switch Control\nRequires=netswitch.socket\nAfter=netswitch.socket\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch") + " service --data " + quoted(c.Data) + "\nRestart=on-failure\nRestartSec=1s\nRestartSteps=4\nRestartMaxDelaySec=60s\nKillMode=control-group\nTimeoutStopSec=40s\nCapabilityBoundingSet=" + readCapabilities + "\n" + common,
-		"netswitch-engine.service": "[Unit]\nDescription=Net Switch Engine\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch-engine") + " service --data " + quoted(c.Data) + "\nExecStopPost=" + run("netswitchctl") + " cleanup --engine --data " + quoted(c.Data) + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=30s\nCapabilityBoundingSet=" + readCapabilities + "\nDeviceAllow=/dev/net/tun rw\n" + common,
+		"netswitch-engine.service": "[Unit]\nDescription=Net Switch Engine\nStartLimitIntervalSec=0\n[Service]\nType=notify\nExecStart=" + run("netswitch-engine") + " service --data " + quoted(c.Data) + "\nExecStopPost=" + run("netswitchctl") + " cleanup --engine --data " + quoted(c.Data) + "\nRestart=no\nKillMode=mixed\nTimeoutStopSec=30s\nCapabilityBoundingSet=" + engineCapabilities + "\nDeviceAllow=/dev/net/tun rw\n" + common,
 	}
 	if c.Native {
-		units["netswitch-engine.service"] += "WatchdogSec=8s\nWatchdogSignal=SIGKILL\nNotifyAccess=main\n"
+		units["netswitch-engine.service"] += "LimitMEMLOCK=infinity\nWatchdogSec=8s\nWatchdogSignal=SIGKILL\nNotifyAccess=main\n"
 		units["netswitch-engine.service"] += nativeStateMetadata(c.Data)
 		// The journal-owned TUN is created after this mount namespace, with a
 		// fresh name per instance. A missing per-device ReadWritePaths entry

@@ -49,6 +49,50 @@ type ChecksumVerifier interface {
 	RXChecksumVerified([]byte) bool
 }
 
+// TunProvenanceReader optionally binds the single ordered TUN read pump to its
+// OS thread and returns packet-bound provenance alongside each packet.
+type TunProvenanceReader interface {
+	BindPumpThread() (func(), error)
+	ReadPacketWithProvenance(context.Context, []byte) (int, any, error)
+}
+
+// TunUnwrapper exposes an underlying TunDevice through diagnostic or fault
+// wrappers so platform provenance controllers can bind directly to the native TUN.
+type TunUnwrapper interface {
+	UnwrapTun() TunDevice
+}
+
+// ProvenanceController optionally coordinates packet-provenance attachment and
+// quiesced teardown around TUN pump registration and route capture. Returning
+// active=false selects the existing non-provenance TUN pump path.
+type ProvenanceController interface {
+	AttachProvenance(context.Context, TunDevice) (bool, error)
+	EnableProvenance() error
+	StopProvenance() error
+	CloseProvenance() error
+}
+
+// ProvenanceOwnerLookup resolves TCP and UDP flow attribution from packet-bound
+// provenance without repairing incomplete eBPF envelopes via live tuple scans.
+type ProvenanceOwnerLookup interface {
+	TCPWithProvenance(context.Context, Tuple, any) (Owner, error)
+	UDPWithProvenance(context.Context, Tuple, any) (Owner, error)
+}
+
+type DatagramValidation uint8
+
+const (
+	DatagramValid DatagramValidation = iota
+	DatagramDrop
+	DatagramInvalidateOwner
+)
+
+// ProvenanceDatagramValidator checks queued UDP datagram provenance at the send
+// linearization point before transmitting under an established session owner.
+type ProvenanceDatagramValidator interface {
+	ValidateUDPDatagram(sessionOwner Owner, provenance any) DatagramValidation
+}
+
 type Tuple struct {
 	Source      netip.AddrPort `json:"source"`
 	Destination netip.AddrPort `json:"destination"`
@@ -65,6 +109,9 @@ type Owner struct {
 	// A complete Windows snapshot proved PID:created, but process identity
 	// could not be read. This is validation evidence, never an admission ID.
 	IdentityUnavailable bool `json:"-"`
+	// Ambiguous marks a conflicting multi-app socket so policy routes it to the
+	// main line's lane even while combining, rather than taking a share pick.
+	Ambiguous bool `json:"-"`
 }
 
 type OwnerLookup interface {

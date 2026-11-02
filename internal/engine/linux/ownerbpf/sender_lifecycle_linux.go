@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -79,11 +81,21 @@ func NewMmapSocketSlotTable(maxSlots int) (*SocketSlotTable, error) {
 	return newSocketSlotTableFromBacking(slots, closeFn), nil
 }
 
+var (
+	_ [bpfMapFlagMmapable - unix.BPF_F_MMAPABLE]byte
+	_ [unix.BPF_F_MMAPABLE - bpfMapFlagMmapable]byte
+)
+
 // AcceptedSenderProbe extends Probe with cgroup BPF_F_ALLOW_MULTI links across
 // connect4/connect6/sendmsg4/sendmsg6/sock_ops and accepted-send PMU kprobes.
 type AcceptedSenderProbe struct {
 	*Probe
-	auxPrograms []*ebpf.Program
+	auxPrograms         []*ebpf.Program
+	countersMem         []byte
+	countersView        *[7]uint64
+	syncedNewActors     atomic.Uint64
+	syncedQueueOverflow atomic.Uint64
+	drainMu             sync.Mutex
 }
 
 func (ap *AcceptedSenderProbe) Close() error {
@@ -91,6 +103,11 @@ func (ap *AcceptedSenderProbe) Close() error {
 		return nil
 	}
 	var errs []error
+	if ap.countersMem != nil {
+		errs = append(errs, unix.Munmap(ap.countersMem))
+		ap.countersMem = nil
+		ap.countersView = nil
+	}
 	if ap.Probe != nil {
 		errs = append(errs, ap.Probe.Close())
 	}
@@ -226,6 +243,221 @@ func loadAcceptedSenderProbe(object, cgroup string, afterAttach func(string, *Ac
 		}
 	}
 	return ap, nil
+}
+
+// LoadEngineSenderProbe loads the embedded production sender probe onto
+// cgroupRoot (typically "/sys/fs/cgroup") with scope[0] == 0 initially so zero
+// events are recorded until Enable() is called. It rejects confidentiality
+// lockdown upfront, maps counters PROT_READ for zero-syscall pending checks,
+// and attaches all root-cgroup links with BPF_F_ALLOW_MULTI.
+func LoadEngineSenderProbe(cgroupRoot string, maxActors, queueEntries uint32) (_ *AcceptedSenderProbe, err error) {
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+		return nil, fmt.Errorf("owner provenance: unsupported architecture %s", runtime.GOARCH)
+	}
+	if lockdownBytes, rErr := os.ReadFile("/sys/kernel/security/lockdown"); rErr == nil {
+		if ParseLockdownMode(string(lockdownBytes)) == LockdownConfidentiality {
+			return nil, fmt.Errorf("%s: kernel lockdown confidentiality blocks kprobe/BPF probe reads", FallbackLockdownConfidentiality)
+		}
+	}
+	spec, err := PrepareEngineSenderSpec(runtime.GOARCH, maxActors, queueEntries)
+	if err != nil {
+		return nil, err
+	}
+	collection, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{LogSizeStart: 64 << 10},
+	})
+	if err != nil {
+		return nil, loadError("load engine sender probe programs/maps", err)
+	}
+	ap := &AcceptedSenderProbe{
+		Probe: &Probe{Collection: collection},
+	}
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, ap.Close())
+		}
+	}()
+
+	mem, err := unix.Mmap(collection.Maps["counters"].FD(), 0, os.Getpagesize(), unix.PROT_READ, unix.MAP_SHARED)
+	if err != nil {
+		return nil, fmt.Errorf("mmap sender counters map: %w", err)
+	}
+	ap.countersMem = mem
+	ap.countersView = (*[7]uint64)(unsafe.Pointer(&mem[0]))
+
+	if err = collection.Maps["scope"].Update(uint32(0), uint64(0), ebpf.UpdateAny); err != nil {
+		return nil, fmt.Errorf("initialize disabled sender scope: %w", err)
+	}
+
+	dir, err := os.Open(cgroupRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open cgroup root %s: %w", cgroupRoot, err)
+	}
+	defer dir.Close()
+	var fs unix.Statfs_t
+	if err = unix.Fstatfs(int(dir.Fd()), &fs); err != nil || fs.Type != unix.CGROUP2_SUPER_MAGIC {
+		return nil, fmt.Errorf("engine sender probe requires cgroup v2: type=%x: %w", fs.Type, errors.Join(err, unix.EINVAL))
+	}
+
+	lInit, err := link.AttachRawLink(link.RawLinkOptions{
+		Target:  int(dir.Fd()),
+		Program: collection.Programs["initialize_cookie"],
+		Attach:  ebpf.AttachCGroupInetSockCreate,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("BPF_LINK_CREATE initialize_cookie: %w", err)
+	}
+	ap.links = append(ap.links, lInit)
+
+	for _, cgHook := range []struct {
+		name     string
+		progType ebpf.ProgramType
+		attach   ebpf.AttachType
+	}{
+		{"cg_connect4", ebpf.CGroupSockAddr, ebpf.AttachCGroupInet4Connect},
+		{"cg_connect6", ebpf.CGroupSockAddr, ebpf.AttachCGroupInet6Connect},
+		{"cg_sendmsg4", ebpf.CGroupSockAddr, ebpf.AttachCGroupUDP4Sendmsg},
+		{"cg_sendmsg6", ebpf.CGroupSockAddr, ebpf.AttachCGroupUDP6Sendmsg},
+		{"cg_sock_ops", ebpf.SockOps, ebpf.AttachCGroupSockOps},
+	} {
+		prog, e := ebpf.NewProgram(&ebpf.ProgramSpec{
+			Name:       cgHook.name,
+			Type:       cgHook.progType,
+			AttachType: cgHook.attach,
+			License:    "Dual MIT/GPL",
+			Instructions: asm.Instructions{
+				asm.Mov.Imm(asm.R0, 1),
+				asm.Return(),
+			},
+		})
+		if e != nil {
+			return nil, fmt.Errorf("load %s: %w", cgHook.name, e)
+		}
+		ap.auxPrograms = append(ap.auxPrograms, prog)
+		l, e := link.AttachRawLink(link.RawLinkOptions{
+			Target:  int(dir.Fd()),
+			Program: prog,
+			Attach:  cgHook.attach,
+		})
+		if e != nil {
+			return nil, fmt.Errorf("BPF_LINK_CREATE %s: %w", cgHook.name, e)
+		}
+		ap.links = append(ap.links, l)
+	}
+
+	for _, sym := range AcceptedSenderSymbols {
+		if err = ap.attachPMU(collection.Programs["observe_send"], sym); err != nil {
+			return nil, err
+		}
+	}
+	return ap, nil
+}
+
+func (ap *AcceptedSenderProbe) Enable() error {
+	if ap == nil || ap.Collection == nil {
+		return errors.New("nil sender probe")
+	}
+	return ap.Collection.Maps["scope"].Update(uint32(0), uint64(1), ebpf.UpdateAny)
+}
+
+func (ap *AcceptedSenderProbe) Disable() error {
+	if ap == nil || ap.Collection == nil {
+		return nil
+	}
+	return ap.Collection.Maps["scope"].Update(uint32(0), uint64(0), ebpf.UpdateAny)
+}
+
+func (ap *AcceptedSenderProbe) IsPoisoned() bool {
+	if ap == nil || ap.countersView == nil {
+		return false
+	}
+	return atomic.LoadUint64(&ap.countersView[4]) != 0 || atomic.LoadUint64(&ap.countersView[5]) != 0
+}
+
+func (ap *AcceptedSenderProbe) HasPendingNewActors() bool {
+	if ap == nil || ap.countersView == nil {
+		return false
+	}
+	return atomic.LoadUint64(&ap.countersView[1]) != ap.syncedNewActors.Load() ||
+		atomic.LoadUint64(&ap.countersView[6]) != ap.syncedQueueOverflow.Load()
+}
+
+// DrainNewActors pops newly inserted {ActorEvidence, ActorKey} entries in O(1)
+// per new actor from Maps["actor_events"], falling back to a full Maps["actors"]
+// scan only if counters[6] indicates the event queue overflowed.
+func (ap *AcceptedSenderProbe) DrainNewActors(known map[ActorKey]bool) ([]QueuedActorEvent, error) {
+	if ap == nil || ap.Collection == nil || ap.countersView == nil {
+		return nil, nil
+	}
+	ap.drainMu.Lock()
+	defer ap.drainMu.Unlock()
+
+	targetNew := atomic.LoadUint64(&ap.countersView[1])
+	targetOverflow := atomic.LoadUint64(&ap.countersView[6])
+	prevOverflow := ap.syncedQueueOverflow.Load()
+	if targetNew == ap.syncedNewActors.Load() && targetOverflow == prevOverflow {
+		return nil, nil
+	}
+
+	var out []QueuedActorEvent
+	var seenInBatch map[ActorKey]bool
+	qMap := ap.Collection.Maps["actor_events"]
+	if qMap != nil {
+		for {
+			var ev QueuedActorEvent
+			err := qMap.LookupAndDelete(nil, &ev)
+			if errors.Is(err, ebpf.ErrKeyNotExist) {
+				break
+			}
+			if err != nil {
+				return out, err
+			}
+			if known != nil && known[ev.Key] {
+				continue
+			}
+			if targetOverflow != prevOverflow {
+				if seenInBatch == nil {
+					seenInBatch = make(map[ActorKey]bool)
+				}
+				seenInBatch[ev.Key] = true
+			}
+			out = append(out, ev)
+		}
+	}
+
+	if targetOverflow != prevOverflow {
+		actorsMap := ap.Collection.Maps["actors"]
+		if actorsMap != nil {
+			var k ActorKey
+			var v ActorEvidence
+			it := actorsMap.Iterate()
+			for it.Next(&k, &v) {
+				if (known != nil && known[k]) || (seenInBatch != nil && seenInBatch[k]) {
+					continue
+				}
+				out = append(out, QueuedActorEvent{Evidence: v, Key: k})
+			}
+			if err := it.Err(); err != nil {
+				return out, err
+			}
+		}
+		ap.syncedQueueOverflow.Store(targetOverflow)
+	}
+	ap.syncedNewActors.Store(targetNew)
+	return out, nil
+}
+
+func (ap *AcceptedSenderProbe) DeleteActorKeys(keys []ActorKey) {
+	if ap == nil || ap.Collection == nil || len(keys) == 0 {
+		return
+	}
+	actorsMap := ap.Collection.Maps["actors"]
+	if actorsMap == nil {
+		return
+	}
+	for _, k := range keys {
+		_ = actorsMap.Delete(k)
+	}
 }
 
 // PeerCgroupFilter represents an independent cgroup_skb/egress filter program

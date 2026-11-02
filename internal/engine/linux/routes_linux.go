@@ -111,10 +111,18 @@ type ownedObject struct {
 }
 
 func New(ctx context.Context, dir string) (*Platform, error) {
-	return newPlatform(ctx, dir, nil)
+	return newPlatform(ctx, dir, nil, OwnerBackendProcFallback)
 }
 
-func newPlatform(ctx context.Context, dir string, ownership journal.Locker) (*Platform, error) {
+func NewWithBackend(ctx context.Context, dir, ownerBackend string) (*Platform, error) {
+	return newPlatform(ctx, dir, nil, ownerBackend)
+}
+
+func newPlatform(ctx context.Context, dir string, ownership journal.Locker, ownerBackend string) (*Platform, error) {
+	owners, err := NewOwnersWithBackend(ownerBackend)
+	if err != nil {
+		return nil, err
+	}
 	// Route operations must not hold lifecycle cleanup indefinitely if netlink
 	// stops answering. The lookup socket has its own tighter per-flow deadline.
 	netlinkTimeoutOnce.Do(func() { _ = netlink.SetSocketTimeout(time.Second) })
@@ -167,7 +175,7 @@ func newPlatform(ctx context.Context, dir string, ownership journal.Locker) (*Pl
 		s.Close()
 		return nil, fmt.Errorf("recover engine journal: %w", err)
 	}
-	p.Owners = NewOwners()
+	p.Owners = owners
 	return p, nil
 }
 
@@ -240,6 +248,9 @@ func (p *Platform) enableIPv6(ctx context.Context) error {
 		return fmt.Errorf("invalid engine TUN disable_ipv6 value %q", before)
 	}
 	if before == "1" {
+		if err := suppressTunIPv6Autoconf(p.tunSpec.Name); err != nil {
+			return err
+		}
 		if err := os.WriteFile(path, []byte("0\n"), 0600); err != nil {
 			return fmt.Errorf("enable IPv6 on owned engine TUN %s (inherited disable_ipv6=1): %w", p.tunSpec.Name, err)
 		}

@@ -276,20 +276,26 @@ func (t *SocketSlotTable) publishContributor(ledger *IdentityLedger, cookie uint
 	curConflicts := atomic.LoadUint64(&s.Conflicts)
 
 	if snap == nil {
-		if m.owner != nil {
+		hadPriorOwner := m.owner != nil
+		if hadPriorOwner {
 			if ledger != nil {
 				ledger.decrementSocketRef(m.owner)
 			}
 			m.owner = nil
 		}
-		newFlags := (flags &^ SocketSlotValid) | SocketSlotIncomplete | SocketSlotConflicting
+		newFlags := (flags &^ SocketSlotValid) | SocketSlotIncomplete
+		if hadPriorOwner {
+			newFlags |= SocketSlotConflicting
+		}
 		atomic.StoreUint32(&s.Flags, uint32(newFlags))
 		atomic.StoreUint64(&s.EvidenceRevision, 0)
 		// 5.8 XADD order: conflicts += 1 first, then version += 1.
 		atomic.AddUint64(&s.Conflicts, 1)
 		atomic.AddUint64(&s.Version, 1)
 		t.metrics.ConflictUpdates++
-		if m.lastReason == "" || m.lastReason == ReasonValidated || m.lastReason == ReasonInheritedValidated {
+		if hadPriorOwner {
+			m.lastReason = ReasonConflictingApp
+		} else if m.lastReason == "" || m.lastReason == ReasonValidated || m.lastReason == ReasonInheritedValidated {
 			m.lastReason = reason
 		}
 		return true

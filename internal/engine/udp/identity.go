@@ -21,7 +21,7 @@ func same(a, b platform.Owner) bool {
 	// policy until it closes. Generations include the native socket identity
 	// (Linux cookie; Windows PID and endpoint creation time).
 	if a.PID == 0 && a.StartTime == 0 && a.AppID == "" {
-		return true
+		return a.Ambiguous || !b.Ambiguous
 	}
 	return a.PID == b.PID && a.StartTime == b.StartTime && a.AppID == b.AppID
 }

@@ -106,9 +106,30 @@ func prepareNativeTunables(t *testing.T) func(*testing.T, *nativeClient) {
 		if err != nil || !strings.Contains(string(log), proof) {
 			t.Fatal("installed service did not prove the inherited 1-to-0 write", err, string(log))
 		}
-		b, err := exec.Command("systemctl", "show", "netswitch-engine.service", "--property=ProtectKernelTunables,ProtectControlGroups,ReadWritePaths,ReadOnlyPaths").Output()
+		b, err := exec.Command("systemctl", "show", "netswitch-engine.service", "--property=ProtectKernelTunables,ProtectControlGroups,ReadWritePaths,ReadOnlyPaths,LimitMEMLOCK").Output()
 		if err != nil || !strings.Contains(string(b), "ProtectKernelTunables=yes") || !strings.Contains(string(b), "ProtectControlGroups=yes") {
 			t.Fatal("installed unit lost kernel hardening", string(b), err)
+		}
+		engineUnit, err := os.ReadFile("/etc/systemd/system/netswitch-engine.service")
+		if err != nil {
+			t.Fatal("read installed engine unit", err)
+		}
+		for _, want := range []string{"CAP_BPF", "CAP_PERFMON", "LimitMEMLOCK=infinity"} {
+			if !strings.Contains(string(engineUnit), want) {
+				t.Fatalf("installed engine unit missing %q:\n%s", want, engineUnit)
+			}
+		}
+		if strings.Contains(string(engineUnit), "CAP_SYS_ADMIN") {
+			t.Fatalf("installed engine unit must not grant CAP_SYS_ADMIN:\n%s", engineUnit)
+		}
+		controlUnit, err := os.ReadFile("/etc/systemd/system/netswitch.service")
+		if err != nil {
+			t.Fatal("read installed control unit", err)
+		}
+		for _, forbidden := range []string{"CAP_BPF", "CAP_PERFMON", "CAP_SYS_ADMIN", "LimitMEMLOCK=infinity"} {
+			if strings.Contains(string(controlUnit), forbidden) {
+				t.Fatalf("installed Control unit gained engine BPF privilege %q:\n%s", forbidden, controlUnit)
+			}
 		}
 		t.Logf("NATIVE_SANDBOX tun=%s inherited_disabled=1 enabled=0 unchanged_global_and_line_settings=%d unit=%q", name, len(after), b)
 		if os.Getenv("NETSWITCH_NATIVE_FAULTS") == "1" {
@@ -124,6 +145,54 @@ func prepareNativeTunables(t *testing.T) func(*testing.T, *nativeClient) {
 				}
 			}
 			t.Logf("NATIVE_SANDBOX engine_write_opens=%v bytes_written_by_probe=0", result)
+
+			var ebpfCap struct {
+				CapEff              string `json:"capEff"`
+				CapBnd              string `json:"capBnd"`
+				HasCapBPF           bool   `json:"hasCapBPF"`
+				HasCapPerfmon       bool   `json:"hasCapPerfmon"`
+				HasCapSysAdmin      bool   `json:"hasCapSysAdmin"`
+				MemlockInfinity     bool   `json:"memlockInfinity"`
+				LockdownMode        string `json:"lockdownMode"`
+				PerfEventParanoid   string `json:"perfEventParanoid"`
+				TunName             string `json:"tunName"`
+				TunIfindex          int    `json:"tunIfindex"`
+				TunTxQLen           int    `json:"tunTxQLen"`
+				NetNSInode          uint32 `json:"netNSInode"`
+				PacketSlots         uint64 `json:"packetSlots"`
+				SocketSlots         int    `json:"socketSlots"`
+				CapturedActorEvents int    `json:"capturedActorEvents"`
+				CapturedCookie      uint64 `json:"capturedCookie"`
+				CapturedTGID        uint32 `json:"capturedTGID"`
+				PeerHitsBefore      uint64 `json:"peerHitsBefore"`
+				PeerHitsDuring      uint64 `json:"peerHitsDuring"`
+				PeerHitsAfter       uint64 `json:"peerHitsAfter"`
+				BPFPerfFDsBefore    int    `json:"bpfPerfFDsBefore"`
+				BPFPerfFDsDuring    int    `json:"bpfPerfFDsDuring"`
+				BPFPerfFDsAfter     int    `json:"bpfPerfFDsAfter"`
+				TotalFDsBefore      int    `json:"totalFDsBefore"`
+				TotalFDsAfter       int    `json:"totalFDsAfter"`
+			}
+			nativeMust(t, c, "testFault", map[string]any{"fault": map[string]any{"kind": "ebpf-capability"}}, &ebpfCap)
+			if !ebpfCap.HasCapBPF || !ebpfCap.HasCapPerfmon || ebpfCap.HasCapSysAdmin || !ebpfCap.MemlockInfinity {
+				t.Fatalf("unexpected installed engine eBPF capability state: %+v", ebpfCap)
+			}
+			if ebpfCap.TunName != name || ebpfCap.TunTxQLen != 16384 || ebpfCap.NetNSInode == 0 {
+				t.Fatalf("unexpected installed engine TUN/netns metadata: %+v", ebpfCap)
+			}
+			if ebpfCap.PacketSlots < 32768 || ebpfCap.SocketSlots != 131072 {
+				t.Fatalf("unexpected production eBPF map sizing: %+v", ebpfCap)
+			}
+			if ebpfCap.CapturedActorEvents < 1 || ebpfCap.CapturedCookie == 0 || ebpfCap.CapturedTGID == 0 {
+				t.Fatalf("installed engine sender probe did not capture live actor event: %+v", ebpfCap)
+			}
+			if ebpfCap.PeerHitsBefore < 1 || ebpfCap.PeerHitsDuring <= ebpfCap.PeerHitsBefore || ebpfCap.PeerHitsAfter <= ebpfCap.PeerHitsDuring {
+				t.Fatalf("peer root-cgroup BPF_F_ALLOW_MULTI coexistence failed: %+v", ebpfCap)
+			}
+			if ebpfCap.BPFPerfFDsBefore != 0 || ebpfCap.BPFPerfFDsDuring < 20 || ebpfCap.BPFPerfFDsAfter != 0 {
+				t.Fatalf("BPF/perf FD lifecycle leak or missing attachment: %+v", ebpfCap)
+			}
+			t.Logf("NATIVE_EBPF_CAPABILITY %+v", ebpfCap)
 		}
 	}
 }

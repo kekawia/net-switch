@@ -12,16 +12,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/linux"
 )
 
 func run(args []string) error {
 	if len(args) == 0 || (args[0] != "run" && args[0] != "cleanup") {
-		return errors.New("usage: netswitch-engine version|service|worker|run|cleanup [--socket path] [--state-dir directory]")
+		return errors.New("usage: netswitch-engine version|service|worker|run|cleanup [--socket path] [--state-dir directory] [--owner-backend proc-fallback|ebpf]")
 	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	socket := f.String("socket", "/run/netswitch/engine.sock", "root-only control socket")
 	state := f.String("state-dir", "/var/lib/netswitch", "private ownership/state directory")
+	ownerBackend := f.String("owner-backend", linux.OwnerBackendProcFallback, "Linux attribution backend (proc-fallback or ebpf)")
 	profiles := f.String("profile-dir", "", "private diagnostics directory; SIGUSR1 captures heap and goroutine profiles")
 	cpuProfile := f.Bool("cpu-profile", false, "record CPU and sampled contention profiles in the diagnostics directory")
 	traceProfile := f.Bool("trace-profile", false, "record the first five seconds of runtime scheduling in the diagnostics directory")
@@ -30,6 +32,9 @@ func run(args []string) error {
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected arguments")
+	}
+	if *ownerBackend != "" && *ownerBackend != linux.OwnerBackendProcFallback && *ownerBackend != linux.OwnerBackendEBPF {
+		return errors.New("owner-backend must be proc-fallback or ebpf")
 	}
 	if os.Geteuid() != 0 {
 		return errors.New("engine must run as root")
@@ -53,5 +58,5 @@ func run(args []string) error {
 		return err
 	}
 	defer stopProfiles()
-	return linux.Serve(ctx, *socket, *state, installTestHooks)
+	return linux.ServeHosted(ctx, *socket, *state, host.Options{OwnerBackend: *ownerBackend}, installTestHooks)
 }
