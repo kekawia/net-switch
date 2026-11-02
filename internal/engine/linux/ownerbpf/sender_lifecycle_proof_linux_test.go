@@ -1539,7 +1539,6 @@ func TestLifecycleL2(t *testing.T) {
 		Target:  int(cgBFile.Fd()),
 		Program: f.ap.Collection.Programs["initialize_cookie"],
 		Attach:  ebpf.AttachCGroupInetSockCreate,
-		Flags:   unix.BPF_F_ALLOW_MULTI,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1549,7 +1548,6 @@ func TestLifecycleL2(t *testing.T) {
 		Target:  int(cgBFile.Fd()),
 		Program: f.ap.Collection.Programs["observe_packet"],
 		Attach:  ebpf.AttachCGroupInetEgress,
-		Flags:   unix.BPF_F_ALLOW_MULTI,
 	})
 	if err != nil {
 		t.Fatal(err)

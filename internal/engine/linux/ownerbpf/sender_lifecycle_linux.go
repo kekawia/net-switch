@@ -160,10 +160,9 @@ func loadAcceptedSenderProbe(object, cgroup string, afterAttach func(string, *Ac
 			Target:  int(dir.Fd()),
 			Program: collection.Programs[a.name],
 			Attach:  a.kind,
-			Flags:   unix.BPF_F_ALLOW_MULTI,
 		})
 		if e != nil {
-			return nil, fmt.Errorf("BPF_LINK_CREATE %s (BPF_F_ALLOW_MULTI): %w", a.name, e)
+			return nil, fmt.Errorf("BPF_LINK_CREATE %s: %w", a.name, e)
 		}
 		ap.links = append(ap.links, l)
 		if afterAttach != nil {
@@ -204,7 +203,6 @@ func loadAcceptedSenderProbe(object, cgroup string, afterAttach func(string, *Ac
 			Target:  int(dir.Fd()),
 			Program: prog,
 			Attach:  cgHook.attach,
-			Flags:   unix.BPF_F_ALLOW_MULTI,
 		})
 		if e != nil {
 			return nil, fmt.Errorf("BPF_LINK_CREATE %s: %w", cgHook.name, e)
@@ -313,7 +311,6 @@ func AttachPeerCgroupEgressFilter(cgroup string) (*PeerCgroupFilter, error) {
 		Target:  int(dir.Fd()),
 		Program: prog,
 		Attach:  ebpf.AttachCGroupInetEgress,
-		Flags:   unix.BPF_F_ALLOW_MULTI,
 	})
 	if err != nil {
 		_ = prog.Close()
