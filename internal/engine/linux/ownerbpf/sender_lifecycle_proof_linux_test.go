@@ -440,7 +440,7 @@ func runSenderLifecycleChild() {
 		probeObj := os.Getenv("NS_OWNERBPF_OBJECT")
 		_, err := LoadAcceptedSenderProbe(probeObj, cgDir)
 		reason := ClassifyLoadFailure(err, "[integrity]", true, true)
-		fmt.Printf("CAP_DROP_RESULT reason=%s\n", reason)
+		fmt.Printf("CAP_DROP_RESULT reason=%s err=%v\n", reason, err)
 		os.Exit(0)
 	}
 }

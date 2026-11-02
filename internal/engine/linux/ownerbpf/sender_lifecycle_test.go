@@ -453,7 +453,7 @@ func TestKernelControlAndLockdownClassification(t *testing.T) {
 	if r := ClassifyLoadFailure(syscall.EPERM, "[integrity]", true, true); r != FallbackCapabilityDenied {
 		t.Fatalf("ClassifyLoadFailure(EPERM) = %v", r)
 	}
-	if r := ClassifyLoadFailure(errors.New("load owner proof programs/maps (BTF/helpers/verifier): program initialize_cookie: load BTF: BTF: not supported"), "[integrity]", true, true); r != FallbackCapabilityDenied {
+	if r := ClassifyLoadFailure(errors.New("load owner proof programs/maps (BTF/helpers/verifier): program initialize_cookie: load BTF: BTF not supported (requires >= 4.18)"), "[integrity]", true, true); r != FallbackCapabilityDenied {
 		t.Fatalf("ClassifyLoadFailure(5.8 unprivileged BTF EPERM->ErrNotSupported) = %v", r)
 	}
 }

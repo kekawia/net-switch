@@ -1388,11 +1388,12 @@ func ClassifyLoadFailure(err error, lockdownRaw string, hasBTF, isCgroupV2 bool)
 	// upstream Linux 5.8), unprivileged BPF_MAP_CREATE succeeds, and
 	// cilium/ebpf's haveBTF probe then runs BPF_BTF_LOAD, receives EPERM
 	// (because BPF_BTF_LOAD requires CAP_SYS_ADMIN), and maps EPERM to
-	// ErrNotSupported ("BTF: not supported") even though hasBTF is true.
+	// UnsupportedFeatureError ("BTF not supported (requires >= 4.18)") even
+	// though hasBTF is true.
 	msg := err.Error()
 	if strings.Contains(msg, "operation not permitted") ||
 		strings.Contains(msg, "permission denied") ||
-		(hasBTF && strings.Contains(msg, "BTF: not supported")) {
+		(hasBTF && (strings.Contains(msg, "BTF not supported") || strings.Contains(msg, "BTF: not supported"))) {
 		return FallbackCapabilityDenied
 	}
 	return FallbackVerifierRejected
