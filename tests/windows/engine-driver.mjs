@@ -1,5 +1,5 @@
 // Test-only controller for the 1.0 engine acceptance profile. No HTTP engine,
-// service manager or legacy sing-box adapter is involved. The public traffic
+// service manager or compatibility adapter is involved. The public traffic
 // assertions remain in acceptance.mjs; this translates their control actions
 // into full revisions, closure intents and lease commands.
 import assert from 'node:assert/strict';

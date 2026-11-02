@@ -9,7 +9,6 @@
 //	nsaccept serve           the fake internet's servers (started by run)
 //	nsaccept app <mode>      the test app; run copies it to /opt/nsapps/<name>/nsapp
 //	nsaccept exec            start a program as an app on the fake PC (used by run)
-//	nsaccept fetch-sing-box  download the pinned sing-box and check its SHA-256
 //
 // See tests/linux/suite and tests/linux/harness for what is checked and how
 // results decide the job.
@@ -37,7 +36,6 @@ import (
 	"github.com/AyoubAchour/net-switch/tests/linux/app"
 	"github.com/AyoubAchour/net-switch/tests/linux/engine"
 	"github.com/AyoubAchour/net-switch/tests/linux/engine/nsengine"
-	"github.com/AyoubAchour/net-switch/tests/linux/engine/singbox"
 	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 	"github.com/AyoubAchour/net-switch/tests/linux/inet"
 	"github.com/AyoubAchour/net-switch/tests/linux/suite"
@@ -66,8 +64,6 @@ func main() {
 		os.Exit(app.Main(os.Args[2:]))
 	case "exec":
 		err = execMain(os.Args[2:])
-	case "fetch-sing-box":
-		err = fetchMain(os.Args[2:])
 	default:
 		usage()
 	}
@@ -78,7 +74,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: nsaccept run|list|release-gate|serve|app|exec|fetch-sing-box [flags]")
+	fmt.Fprintln(os.Stderr, "usage: nsaccept run|list|release-gate|serve|app|exec [flags]")
 	os.Exit(2)
 }
 
@@ -102,77 +98,20 @@ func listMain() error {
 	return nil
 }
 
-// repoRoot finds the checkout from the working directory.
-func repoRoot() string {
-	dir, _ := os.Getwd()
-	for d := dir; ; d = filepath.Dir(d) {
-		if _, err := os.Stat(filepath.Join(d, "packaging", "versions.json")); err == nil {
-			return d
-		}
-		if filepath.Dir(d) == d {
-			return dir
-		}
-	}
-}
-
-func fetchMain(args []string) error {
-	fs := flag.NewFlagSet("fetch-sing-box", flag.ContinueOnError)
-	repo := fs.String("repo", repoRoot(), "the checkout")
-	version := fs.String("version", "", "sing-box version (default: packaging/versions.json's)")
-	dest := fs.String("dest", "/opt/sing-box", "folder to put sing-box and its LICENSE in")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *version == "" {
-		v, err := singbox.PinnedVersion(filepath.Join(*repo, "packaging", "versions.json"))
-		if err != nil {
-			return err
-		}
-		*version = v
-	}
-	pin, err := singbox.LookupPin(filepath.Join(*repo, "tests", "linux", "sing-box-linux.json"), *version, runtime.GOARCH)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("downloading %s\n", pin.URL)
-	data, err := singbox.Download(context.Background(), pin)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("verified: %d bytes, SHA-256 %s\n", len(data), pin.SHA256)
-	if err := singbox.Extract(data, *dest); err != nil {
-		return err
-	}
-	bin := filepath.Join(*dest, "sing-box")
-	sum, err := harness.FileSHA256(bin)
-	if err != nil {
-		return err
-	}
-	out, err := exec.Command(bin, "version").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%s version: %v: %s", bin, err, out)
-	}
-	fmt.Printf("installed %s (SHA-256 %s)\n%s", bin, sum, out)
-	return nil
-}
-
 type options struct {
-	engine, enginePath, expect, node, repo, out string
-	quic                                        string
-	uid, gid                                    int
-	run, labels                                 string
-	buildMode                                   string
-	github                                      bool
+	engine, enginePath, out string
+	quic                    string
+	uid, gid                int
+	run, labels             string
+	buildMode               string
+	github                  bool
 }
 
 func runMain(args []string) int {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	var o options
-	fs.StringVar(&o.engine, "engine", "sing-box", `engine under test: "sing-box" (baseline) or "netswitch-engine" (1.0)`)
-	fs.StringVar(&o.enginePath, "engine-path", "/opt/sing-box/sing-box", "the engine's program")
-	fs.StringVar(&o.expect, "expect-version", "", "the version the engine must report (default for sing-box: packaging/versions.json's)")
-	fs.StringVar(&o.node, "node", "node", "Node.js, to run the app's config generator (sing-box)")
-	fs.StringVar(&o.repo, "repo", repoRoot(), "the checkout")
+	fs.StringVar(&o.engine, "engine", "netswitch-engine", `engine under test ("netswitch-engine")`)
+	fs.StringVar(&o.enginePath, "engine-path", "/opt/netswitch/netswitch-engine", "the engine's program")
 	fs.StringVar(&o.out, "out", "acceptance-out", "folder for the report and logs")
 	fs.StringVar(&o.quic, "quic", "", "the QUIC fixture (tests/quicfixture), for the QUIC cases")
 	fs.IntVar(&o.uid, "app-uid", envInt("SUDO_UID", -1), "the desktop user apps run as")
@@ -257,13 +196,6 @@ func run(o options, report *harness.Report) (int, error) {
 
 	var drv engine.Driver
 	switch o.engine {
-	case "sing-box":
-		if o.expect == "" {
-			if o.expect, err = singbox.PinnedVersion(filepath.Join(o.repo, "packaging", "versions.json")); err != nil {
-				return 1, err
-			}
-		}
-		drv = singbox.New(singbox.Options{Binary: o.enginePath, Expect: o.expect, Node: o.node, RepoRoot: o.repo})
 	case "netswitch-engine":
 		drv = nsengine.New(o.enginePath)
 	default:

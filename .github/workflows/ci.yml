@@ -301,11 +301,6 @@ jobs:
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: wintun
-      - name: Build today's native helper
-        # The helper has its own module and its own dependency policy.
-        env:
-          GOFLAGS: -mod=readonly -p=2
-        run: ./scripts/build-helper.ps1
       - name: Measure cold owner latency at 1950–2100 actual TCP rows
         if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
         env:
@@ -400,84 +395,6 @@ jobs:
         with:
           name: testisp-proof-${{ matrix.arch }}
           path: dist/testisp-proof/
-          retention-days: 14
-
-  engine:
-    needs: changes
-    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
-    name: Windows ${{ matrix.arch }} / engine configs and TUN
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: x64
-            runner: windows-latest
-          - arch: arm64
-            runner: windows-11-arm
-    defaults:
-      run:
-        shell: powershell
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Read the exact bundled Node version
-        id: node
-        run: |
-          $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
-          [IO.File]::AppendAllText($env:GITHUB_OUTPUT, "version=$($pins.node.version)`n")
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: ${{ steps.node.outputs.version }}
-          architecture: ${{ matrix.arch }}
-          package-manager-cache: false
-      - name: Unit tests on the exact bundled Node
-        run: |
-          npm test
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Fetch the verified engine
-        run: ./scripts/fetch-engine.ps1
-      - name: Check generated configs, deprecations and build tags
-        run: |
-          node scripts/check-engine-config.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: false
-      - uses: ./.github/actions/cache-pinned-archive
-        with:
-          artifact: wintun
-      - name: Build TestISP for the legacy TUN assertions
-        env:
-          GOTOOLCHAIN: local
-          GOMAXPROCS: '2'
-          GOFLAGS: -mod=vendor -p=2
-        run: |
-          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
-      - name: Test real TUN routing and report port reuse and DNS changes
-        run: |
-          node scripts/e2e-tun.mjs --engine-adapter
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Keep TUN logs and probe results, including on failure
-        if: always()
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: tun-test-${{ matrix.arch }}
-          path: |
-            dist/tun-test/*.log*
-            dist/tun-test/udp/*.log*
-            dist/tun-test/report.txt
-            dist/tun-test/executables.json
-            dist/tun-test/https-observations.json
-            dist/tun-test/testisp/*.json
-            dist/tun-test/testisp/*.log*
           retention-days: 14
 
   # Net Switch 1.0, in progress: the Go code in the root module (cmd/, internal/).
@@ -1081,15 +998,6 @@ jobs:
       - &windows-node-tests
         name: Test app, tray program and C# tray with Windows PowerShell 5.1
         run: npm test
-      - &windows-node-routing
-        name: Route real connections through the engine, per app and combined
-        run: |
-          ./scripts/fetch-engine.ps1
-          node scripts/e2e-routing.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - &windows-node-payload
-        name: Verify pinned downloads and stage the installer payload
-        run: ./scripts/build-release.ps1 -SkipInstaller
 
   test-node-24:
     needs: changes
@@ -1111,8 +1019,6 @@ jobs:
       - *windows-node-helper
       - *windows-node-tray
       - *windows-node-tests
-      - *windows-node-routing
-      - *windows-node-payload
 
   installer:
     needs: changes
@@ -1127,18 +1033,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: go
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: wintun
-      - name: Build the installer
-        run: ./scripts/build-release.ps1
-      - name: Install, upgrade and uninstall it
+      - name: Build and test the native helper with the pinned Go
+        run: ./scripts/build-helper.ps1
+      - name: Build the tray program with the C# compiler that comes with Windows
+        run: ./scripts/build-tray.ps1
+      - name: Verify installer packaging inputs
         run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-x64.exe"
+          foreach ($path in @('docs/user-guide.md', 'packaging/NetSwitch.iss', 'packaging/versions.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'assets/net-switch.ico', 'licenses/lucide-ISC.txt')) {
+            if (-not (Test-Path -LiteralPath $path)) { throw "Missing packaging input: $path" }
+          }
 
   arm64:
     needs: changes
@@ -1176,24 +1089,6 @@ jobs:
       # or charge PowerShell startup and module inspection to a timed case.
       - name: Print the tray's loaded CLR architecture
         run: ./scripts/show-tray-runtime.ps1
-      - name: Route real connections through the ARM64 engine, per app and combined
-        if: ${{ !cancelled() }}
-        run: |
-          ./scripts/fetch-engine.ps1
-          node scripts/e2e-routing.mjs
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Verify source provenance for both engine architectures
-        if: ${{ !cancelled() }}
-        run: node scripts/write-source-manifest.mjs --verify-only
-      - name: Build the ARM64 installer and verify its payload
-        if: ${{ !cancelled() }}
-        id: arm64-build
-        run: ./scripts/build-release.ps1 -Arch arm64
-      - name: Install, upgrade and uninstall it
-        if: ${{ !cancelled() && steps.arm64-build.outcome == 'success' }}
-        run: |
-          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          ./scripts/smoke-test-installer.ps1 -Installer "dist/NetSwitch-Setup-$version-arm64.exe" -Arch arm64
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
@@ -1206,4 +1101,4 @@ jobs:
           node --test test/architecture.test.mjs test/updates.test.mjs test/engine.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           . ./scripts/build-common.ps1
-          if ((Get-NativeArchitecture) -ne 'arm64') { throw 'Source engine download would use the wrong architecture.' }
+          if ((Get-NativeArchitecture) -ne 'arm64') { throw 'Native architecture detection under x64 emulation returned the wrong architecture.' }

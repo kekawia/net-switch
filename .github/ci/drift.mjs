@@ -22,10 +22,7 @@ const scannable = path => /\.(?:mjs|js|go|ps1|sh)$/.test(path) && !generated.tes
 
 // References these readers make that only some of their jobs exercise. Each
 // narrows the jobs carried along that reference and must still be in use.
-export const narrowed = [{
-  from: 'scripts/e2e-routing.mjs', to: /^internal\/platform\/worker\//, groups: ['control'],
-  why: 'it runs go test ./internal/platform/worker only against the Go control server (!isNodeServer), which only the Control jobs start',
-}];
+export const narrowed = [];
 
 // Call sites the guard can't place, each with what it reads (repository
 // files or folders, which are followed like any other reference) or, for
@@ -57,18 +54,11 @@ export const declared = [{
   reads: ['internal/control/native_golden_control_test.go', 'internal/control/engine/native_golden_test.go', 'internal/lifecycle/native_recovery_replay_test.go', 'internal/control/native_api_replay_test.go', 'internal/control/native_startup_replay_test.go', 'internal/platform/windows/security_windows_test.go'],
   why: 'supportingEvidence and bound annotations in mapping.json name test declarations in these source files; parsing checks references, not test execution',
 }, {
-  from: 'scripts/smoke-test-installer.ps1', call: 'import(process.argv[1])', reads: ['lib/engine.mjs'],
-  why: 'it imports the installed copy of lib/engine.mjs, passed on the node command line',
-}, {
   from: 'test/windows-acceptance.test.mjs', call: 'import(${JSON.stringify(moduleURL)})', sites: 2, reads: ['scripts/server-under-test.mjs', 'tests/windows/launch.mjs'],
   why: 'the child script imports the module URL this test builds from one of those literal paths',
 }, {
   from: 'test/windows-acceptance.test.mjs', call: 'import(${JSON.stringify(sharedURL)})', sites: 2, reads: ['tests/windows/launch.mjs'],
   why: 'the child script imports the shared launcher URL this test builds from that literal path',
-}, {
-  from: 'scripts/build-release.ps1', call: 'Test-Path((Join-Path $repoRoot $_))',
-  reads: ['launch.ps1', 'tray.ps1', 'server.mjs', 'package.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'assets/net-switch.ico', 'engine/LICENSE', 'lib', 'ui', 'tools', 'licenses', 'docs'],
-  why: 'it checks that every entry of the installer allowlist ($required) exists; the entries are the literal root files and trees listed above it',
 }, {
   from: 'tests/windows/testisp/network.ps1', call: 'Test-Path($env:TESTISP_PROBE)', outside: 'the probe executable that harness.mjs builds under dist/windows-test',
   why: 'harness.mjs sets TESTISP_PROBE to the probe it built before it starts this script',

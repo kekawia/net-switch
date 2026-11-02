@@ -10,9 +10,7 @@ export const groups = [
 ];
 export const areas = {
   docs: [],
-  // The TestISP proof imports tests/windows/local-traffic.mjs, which imports
-  // scripts/tun-test-https.mjs and through it lib/engine.mjs.
-  frozen: ['node', 'helper', 'installer', 'legacy_windows', 'testisp', 'go_linux', 'acceptance', 'control'],
+  frozen: ['node', 'helper', 'installer', 'go_linux', 'control'],
   go_shared: ['go_windows', 'go_linux', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'],
   go_windows: ['go_windows', 'legacy_windows', 'testisp', 'wintun', 'control'],
   go_linux: ['go_linux', 'acceptance'],
@@ -81,8 +79,8 @@ export function areaFor(path, tracked = new Set()) {
   // Fixtures that the 0.3.x Node tests and the Go ports beside them both read:
   // test/pure-port-fixtures.test.mjs reads internal/*/node-*.json.
   if (/^internal\/[^/]+\/node-[\w-]+\.json$/.test(path)) return 'frozen+go_shared';
-  // The snap pins and the sing-box config at the top of tests/linux, which
-  // holds no code itself; the Linux acceptance job reads both.
+  // The snap pins script at the top of tests/linux, which holds no code
+  // itself; the Linux acceptance job reads it.
   if (/^tests\/linux\/[^/]+\.(?:json|sh)$/.test(path)) return 'tests_linux';
   // Locality: anything else belongs to the code in its folder, or in the
   // nearest folder above that has code. A test that reads a file beside it by

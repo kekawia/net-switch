@@ -217,8 +217,8 @@ func testRevision(n uint64) ce.Revision {
 	return ce.Revision{Number: n, Hash: "control-hash-" + strconv.FormatUint(n, 10), Policy: p}
 }
 
-// On main, Control refuses any engine that does not advertise the sing-box
-// adapter dialect ("engine swap is not installed"). This fails there.
+// Control attaches to the native engine when it advertises the native
+// capabilities ("revisions", "lease", "flows", "totals", "stats").
 func TestRemoteAttachesToTheNativeEngine(t *testing.T) {
 	f := newNativeFixture(t, nativeProber{})
 	ctx := context.Background()

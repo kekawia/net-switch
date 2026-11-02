@@ -1,10 +1,7 @@
 // Package engine is the acceptance suite's view of a routing engine: the
 // operations Net Switch's control service needs (SYSTEM-DESIGN.md section
-// 5.10), without saying how an engine does them. Each engine under test has a
-// driver:
+// 5.10), without saying how an engine does them. The active driver is:
 //
-//   - singbox: the baseline, sing-box as today's app configures it, plus the
-//     Linux changes the feasibility spike found (LINUX-PLAN.md section 0).
 //   - nsengine: netswitch-engine, 1.0's own engine. It speaks
 //     internal/engine/protocol over the real engine's Unix control socket.
 //

@@ -33,7 +33,7 @@ func TestProductBuildHasNoDesktopLauncher(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "netswitch service") || !strings.Contains(err.Error(), "installed Net Switch service") {
 		t.Fatal("bare start did not explain the service", err)
 	}
-	os.Args = []string{"netswitch", "--dev-proxy", "--engine-executable", "sing-box.exe"}
+	os.Args = []string{"netswitch", "--dev-proxy", "--engine-executable", "netswitch-engine.exe"}
 	if err := run(); err == nil || !strings.Contains(err.Error(), "netswitch service") {
 		t.Fatal("launcher flags were accepted by the product build", err)
 	}

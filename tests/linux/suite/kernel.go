@@ -35,7 +35,7 @@ func addKernel(r *registry) {
 		"exclude_interface is fixed at start, so a bridge created later sends its traffic through the engine", "5.5", 0,
 		func(e *Env) { containers(e, true) })
 	r.defect("routes.default-route-removed", "A line that loses its default route refuses its apps at once, sends nothing, and recovers when the route returns",
-		"sing-box binds the line's interface and, with no route, treats the destination as on-link: the app waits about 3 s on ARP before it's refused, "+
+		"the 0.3.x baseline binds the line's interface and, with no route, treats the destination as on-link: the app waits about 3 s on ARP before it's refused, "+
 			"and a SYN the app retransmits in that wait can be dialed again as a new, owner-less connection on the main line (seen in about half the runs)", "5.5", 0, defaultRouteRemoved)
 	r.add("routes.uplink-down", "A line whose router loses the internet: its apps' connections fail without ever looking connected, other lines carry on, and it recovers without a restart", harness.Parity, "5.2, 5.5", 0, uplinkDown)
 	r.add("routes.address-change", "A line's address changes mid-flow: other lines' flows stay, new flows use the new address", harness.Parity, "5.5, 5.7", 0, addressChange)
@@ -54,7 +54,7 @@ func addKernel(r *registry) {
 	r.add("mtu.egress-1400", "A 1400-byte path: TCP both ways over IPv4 and IPv6 and large DNS answers, all over that line", harness.Parity, "5.8", 3*time.Minute,
 		func(e *Env) { smallMTU(e, 1400) })
 	r.defect("mtu.big-udp-delivered", "Big datagrams an app sent without DF get through a smaller path (fragmented, not dropped)",
-		"sing-box sets DF on its own UDP sockets (udp_fragment is off by default), so an app's oversized datagram is silently dropped", "5.3, 5.8", 0, bigUDP)
+		"the 0.3.x baseline sets DF on its own UDP sockets (udp_fragment is off by default), so an app's oversized datagram is silently dropped", "5.3, 5.8", 0, bigUDP)
 	r.defect("mtu.df-too-big-reported", "Datagrams that mustn't fragment get 'too big' back, and none of them gets out",
 		"no ICMP frag-needed or Packet Too Big ever reaches the app", "5.3, 5.8", 0, dfTooBig)
 	r.add("mtu.large-udp-replies", "12,000-byte and maximum-size UDP replies arrive intact through the real TUN, over IPv4 and IPv6", harness.Parity, "5.3", 0, largeUDPReplies)
@@ -560,7 +560,7 @@ func dnsChange(e *Env) {
 }
 
 // foreignObjects is what other tools on a real PC might have installed: a
-// Tailscale-like layout, a default sing-box/mihomo table and rule, a
+// Tailscale-like layout, a default proxy/mihomo table and rule, a
 // WireGuard-style mark, and rules and a mark on 1.0's own base layout (5.5),
 // which 1.0 must move around rather than take over. None of them touch the
 // suite's traffic unless an engine collides with them.

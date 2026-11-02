@@ -33,7 +33,7 @@ const (
 func init() { register(50, addLookup) }
 
 func addLookup(r *registry) {
-	const slow = "sing-box scans every open file of the socket's user on each new connection (about 3 µs per file), so its estimated p95 lookup is well over 10 ms"
+	const slow = "the 0.3.x baseline scans every open file of the socket's user on each new connection (about 3 µs per file), so its estimated p95 lookup is well over 10 ms"
 	r.defect("lookup.gate-terminal", "Owner lookup with 10,000 open files, from a plain terminal: owner found for 99.5% (p95: an estimate here, measured in lookup.p95-measured)", slow, "5.6", 4*time.Minute,
 		func(e *Env) { lookupGate(e, false, false) })
 	r.defect("lookup.gate-app-scope", "Owner lookup with 10,000 open files, app in its own scope: owner found for 99.5% (p95: an estimate here, measured in lookup.p95-measured)", slow, "5.6", 4*time.Minute,

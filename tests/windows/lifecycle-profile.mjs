@@ -12,7 +12,6 @@ import { hostedOnly, run, startHarness, until } from './testisp/harness.mjs';
 hostedOnly();
 const native = launchOptions();
 assert.equal(native.profile, 'v1');
-const legacy = { ...native, profile: 'baseline', entry: path.resolve('server.mjs'), engine: path.resolve('engine/sing-box.exe') };
 const directory = path.resolve('dist/windows-lifecycle');
 await mkdir(directory, { recursive: true });
 const log = createWriteStream(path.join(directory, 'server-output.log'));
@@ -65,12 +64,8 @@ try {
     for (const pending of calls.values()) { clearTimeout(pending.timer); pending.reject(new Error('Profile client exited')); }
     calls.clear();
   });
-  // The legacy engine leaves a non-present adapter after stop. Measure 1.0
-  // first so that its intentional refusal to adopt a foreign adapter cannot
-  // turn the legacy cleanup defect into a failed 1.0 startup precondition.
   const variants = [['1.0', native, false]];
   if (process.argv.includes('--adapter-first-comparison')) variants.push(['1.0-adapter-first', native, true]);
-  variants.push(['0.3.x', legacy, false]);
   for (const [name, options, adapterFirst] of variants) {
     const isNative = options.profile === 'v1';
     process.env.NETSWITCH_ENGINE_ADAPTER_FIRST = adapterFirst ? '1' : '0';

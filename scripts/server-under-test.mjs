@@ -1,5 +1,5 @@
-// Shared launch/identity boundary for Node and the milestone-one Go service.
-// Callers retain their routing assertions and cleanup ownership.
+// Shared launch/identity boundary for the native Windows acceptance and
+// Win32 parity harnesses.
 import { spawn, execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
@@ -10,11 +10,7 @@ import { launchOptions, serverCommand } from '../tests/windows/launch.mjs';
 
 const run = promisify(execFile);
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const nodeEntry = path.join(root, 'scripts', 'server-under-test-node.mjs');
 export const launchSpec = launchOptions();
-// The v1 profile's default entry is the 1.0 engine driver, not today's Node
-// server; only the Node server's default is replaced by the shim.
-if (launchSpec.entry && launchSpec.profile !== 'v1' && !process.argv.includes('--server-entry')) launchSpec.entry = nodeEntry;
 export const serverExecutable = launchSpec.server;
 export const engineExecutable = launchSpec.engine;
 export const isNodeServer = launchSpec.entry !== null;
@@ -29,11 +25,6 @@ export async function recordExecutable(label, executable, args = ['--version']) 
 }
 export async function recordServerAndEngine() {
   await recordExecutable('SERVER UNDER TEST', serverExecutable, launchSpec.serverVersionArgs);
-  if (isNodeServer) {
-    for (const entry of [launchSpec.entry, path.join(root, 'lib', 'server-factory.mjs')]) {
-      console.log(`NODE ENTRY: ${JSON.stringify({ path: entry, sha256: createHash('sha256').update(await readFile(entry)).digest('hex') })}`);
-    }
-  }
   await recordExecutable('ENGINE UNDER TEST', engineExecutable, launchSpec.engineVersionArgs);
 }
 export function launchServer(dataDir, mode = 'proxy') {

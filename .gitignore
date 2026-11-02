@@ -3,10 +3,6 @@
 data/
 data-test/
 
-# sing-box is downloaded and checked against engine/SHA256SUMS.txt, not committed.
-engine/*.exe
-engine/*.dll
-
 # A bundled Node.js runtime, added by the release build.
 runtime/
 

@@ -1,0 +1,439 @@
+{
+  "schemaVersion": 1,
+  "exceptions": [
+    {
+      "path": "CHANGELOG.md",
+      "sha256": "e7f0ea5c5543b229c75ee79f95550688f45919ee638ecc608d93f917a57530cd",
+      "matches": 1,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "sha256": "3ed3d2853f77522a98c6d7859731f18d9333e13c5e297829296687d98ce5fcca",
+      "matches": 3,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "README.md",
+      "sha256": "67a8fb5fbbf37034dbd00953cdf276b2a657953ce5fd9fa8b371ae213e01b022",
+      "matches": 5,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "SECURITY.md",
+      "sha256": "e56f5cc808f261bc03b848ea32971bf7dc06ae9dc22ade6f7b873dd8ba7b94bb",
+      "matches": 2,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "docs/linux-release-blockers.md",
+      "sha256": "8d2fd87263de3a8f40c3b224bf1cbf54934e949cc9cbaf6900b5848929afd2bd",
+      "matches": 1,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "docs/m4-native-goldens.md",
+      "sha256": "5915d88319da19f7bf96c729a0f8321ffd3fcdf4ed4998eb5ca9ad415275838b",
+      "matches": 2,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "docs/m4-native-service-contracts.md",
+      "sha256": "09e5521af369207f502176aacb412b5d3aabc14b1f36de9abd7df09a898ef5a5",
+      "matches": 5,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "docs/m4-policy-evidence.md",
+      "sha256": "cfa78bd2cab41189b50eda0dd322d99e789c7b6b31e478ae34dc9f188aeae7df",
+      "matches": 1,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "docs/m4-production-cutover.md",
+      "sha256": "5e5598ad0c9d0938489dc4fd63acdfaceaa40f4750849be81acdb5fafd7c485b",
+      "matches": 8,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "docs/user-guide.md",
+      "sha256": "dfd8b35341e5ec79ea6fc1dd73272faeb851ef38f43f2a76d53d29821a637752",
+      "matches": 1,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "helper/main_test.go",
+      "sha256": "77a2487e7d170eba2128860c64dbade007e2a7351c35d1c13044b11f91a13f66",
+      "matches": 2,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "helper/outside_test.go",
+      "sha256": "e78044d1e9497d0f07ae8d0d0dd7331107e94932b6411ee81b8beb5db4d3ce16",
+      "matches": 2,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "internal/control/native_live_replay_test.go",
+      "sha256": "3381e6f45ff81a3106c13ed41183ec7742ae0577299da315a4f699df1a72296e",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "internal/control/replay_test.go",
+      "sha256": "bc00e4162e19044d3902069b8b1d41c4c5de15b90d641fb1bca18ca5d1e40dd3",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "internal/lifecycle/native_remaining_replay_test.go",
+      "sha256": "fc82510d10ab162562e0735755187792beabbd5f9f99151f760e52f209c7f2ea",
+      "matches": 1,
+      "category": "stand-in-refusal",
+      "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
+    },
+    {
+      "path": "internal/lifecycle/remote_native.go",
+      "sha256": "4811914f9b3e46b2bda78adb65347e9a5987c72729c8eb67be2713fc8da567c7",
+      "matches": 1,
+      "category": "stand-in-refusal",
+      "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
+    },
+    {
+      "path": "internal/lifecycle/remote_native_test.go",
+      "sha256": "be16ffe9ebedbf61e0acff4cc5e1ff206a0d19d7e03e5ee764c623d492adbed4",
+      "matches": 1,
+      "category": "stand-in-refusal",
+      "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
+    },
+    {
+      "path": "internal/lifecycle/standin.go",
+      "sha256": "587008080d85376366af6649da1f1bdcb48d42e7890b6667904c13f053a76e77",
+      "matches": 1,
+      "category": "stand-in-refusal",
+      "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
+    },
+    {
+      "path": "internal/lifecycle/standin_test.go",
+      "sha256": "8970dfb850752e130722314d8715063a7f11edc8a0c39a8d2bb248a2312bf06f",
+      "matches": 2,
+      "category": "stand-in-refusal",
+      "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
+    },
+    {
+      "path": "lib/app-path.mjs",
+      "sha256": "7f7a49121cd77a833c4f310e5673b493a29acc8f92984ec6d685bedc4bb0f8d9",
+      "matches": 1,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "lib/engine.mjs",
+      "sha256": "374e7f695d3c2e501f5c141ebc234b2eb4b076bc982e61e636e8e0609d502fae",
+      "matches": 11,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "lib/platform/windows.mjs",
+      "sha256": "de79e928f8f3f25447fdbc4625ddd777ee67f23fe38c88ec27027727d784c2bb",
+      "matches": 3,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "lib/server-factory.mjs",
+      "sha256": "1ab0651f3275ef88107e916bf99c5197e62e3977c785004a0f69ecc901423980",
+      "matches": 4,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "test/engine-stop.test.mjs",
+      "sha256": "5d9fb75fe2c19384c76b19a559a70ed0b61bda70ccd09a30c0599f1cad288db2",
+      "matches": 1,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "test/engine.test.mjs",
+      "sha256": "807be167f1137cba631063c09c46e6a860a37524d38b87ad1b5f189063d2217d",
+      "matches": 24,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "test/monitor.test.mjs",
+      "sha256": "ed183126dc9857b52db5bb2a5a65579830d0b04abcf92818b54d6c2eff887acd",
+      "matches": 2,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "test/platform.test.mjs",
+      "sha256": "a65debda5af6a51c4d224e62a95b15da445482b45813872716994f68d5afbba9",
+      "matches": 2,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "test/windows-golden.test.mjs",
+      "sha256": "470165b65703b56b3d7a1afc2fc4f665371f55958d9a5e0c5db6bc8d1c6834fd",
+      "matches": 1,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    },
+    {
+      "path": "tests/differential/README.md",
+      "sha256": "e1548087f315c0f0b38f9fab6c8f3642346e462a6a9616dbcc5b0e3db5136713",
+      "matches": 1,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "tests/oracle/TRACE-SPEC.md",
+      "sha256": "ed9967bf06e1472a58141adcf7de6048bf3c01f64ef6c06ff1c0f216cdf544fb",
+      "matches": 4,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/factory-tests.mjs",
+      "sha256": "3e7b4ad08af2ecda9de0541b2d68fecda0f59ede1f773f19addeddefdaed13ff",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/adapterRename.trace.json",
+      "sha256": "ee8bb84545c7f87898dea6f1d9ce954c0addb2494a6d1ba14456889fb8abaa9c",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/appLine.trace.json",
+      "sha256": "80a0365dc4be2eb7617807696f8ecd6948d01511288b1074b0311d31d9133c11",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/busyFailedChecks.trace.json",
+      "sha256": "4a7fa2d2d6bd45de3df51c5fbd3db94906a954631e8bf0939bdd7b15fd0d94a0",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/capBlockedAndMainException.trace.json",
+      "sha256": "a8cdde97f49e55dab076aca4d8b294c15f96e8df77f91637898101717f5df8d5",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/capMoved.trace.json",
+      "sha256": "248a73a61d415c9571d4b82f3c6709982b07c28ec6c5b66fa5be38f3b667be8d",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/capReset.trace.json",
+      "sha256": "a6b9f40014bfd2b3d83b725739877da0f6710a3cbed30e9dd901007a2384960b",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/combining.trace.json",
+      "sha256": "ee481d488900023c07849039154aaa2174f452615e010093f6b1195bf5b65d87",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/combiningNoOpenLine.trace.json",
+      "sha256": "ae1f93d7db2ff793b039bb749b3b43f59b29a671f3f4d0552e774f8c6d78d687",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/failoverFailback.trace.json",
+      "sha256": "a6d7fe68c98f3d5f65c65745463e13646eb6eda4755f9aed1a3ce528b1e3c781",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/hungEngine.trace.json",
+      "sha256": "cd955d79ced641e10312605dfe7079def2bffd582aa97cf7763382f53bb0fa00",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/ipv6.trace.json",
+      "sha256": "a98865fa22b6fbce283549b9ff90a5164ee55a445873c15623ea5bcdba2ef922",
+      "matches": 3,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/legacyCaseOrder.trace.json",
+      "sha256": "5a5704acbd30ed32dcc5d3fc78a3df3108b3d4e802e723940ab2e487df9be7eb",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/lineAdd.trace.json",
+      "sha256": "5e6b7eb9758f3ebe657c09704c5b25eb5d7f4579feba61c80f5986eeef0ac098",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/lineOrder.trace.json",
+      "sha256": "eb033450c57f7a8c47a2ba4cfaa18e312977746612c0085562b26da1a090e9b6",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/lineRemove.trace.json",
+      "sha256": "d838b53319eb1b2e79a4867f6a88bde687766ef4503564bab91090336755f887",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/lostDefaultRoute.trace.json",
+      "sha256": "1d1375c4fa889bdd060e478ef4a8342ae75d1cb142a4cdfa66e2f4c270b5847f",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/midnightGap.trace.json",
+      "sha256": "313a35fdeef675e7de2b75f0f8e41cc2646d769a5afcec85d69fe2c2a31d7759",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/migration.trace.json",
+      "sha256": "e026fe09eee7b7b412eb388c091beb89e64c920cdacb023c4f365c48e355a1f3",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/node.json",
+      "sha256": "ad2e78b72494f3fbe9fed70ad760a7264d58aaa0df80913d8875720b29c0d7a4",
+      "matches": 5,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/probeFailover.trace.json",
+      "sha256": "192c3331df82c1e657d227b57c12acbb8b50c614bb0e3ee3895c75898671a787",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/quitFailure.trace.json",
+      "sha256": "891a10c081f55206543b7067c6327c6483b00df55e59c9369af3adc22db048fd",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/reconnectPinned.trace.json",
+      "sha256": "ff1004e30238923884c2b25c1ac2af75b65ab7ac947455bc794eadaa6d85b26d",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/reconnectShared.trace.json",
+      "sha256": "15c91cd1ad25dfc2d6d7ad408baf9566f33896a134573d139a34cdfccaa967dc",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/routingAndReads.trace.json",
+      "sha256": "efa644badddcbfe7936c4e9af6ddbd0d9e434dfe7d7646098cf627f0cbf00804",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/savedVersionOrder.trace.json",
+      "sha256": "dfc36143eacac78ec0f1a1221f54c53b6ba72fe37fc8bba71a8b651a7e5141c3",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/fixtures/settingsSetupUpdate.trace.json",
+      "sha256": "e85878e061da850cbe6c1ddb6c55bbe485b1b64f0d7255a43d6205aab9adae73",
+      "matches": 1,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/oracle/harness.mjs",
+      "sha256": "42b0c317df55b0c7ce9e7cf8b6b1e916b286c5a3a5d250a52cd117e2e4be84fe",
+      "matches": 2,
+      "category": "oracle-fixture",
+      "reason": "Pinned 0.3.x oracle replay trace or harness reference"
+    },
+    {
+      "path": "tests/windows/README.md",
+      "sha256": "1d044cfb548c6507f5081e36949cdd25ce0e5de5909097715f9998ec31a2ef3f",
+      "matches": 4,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "tests/windows/ci-failure-investigation.md",
+      "sha256": "240bf54dfa56ba076a2487423869b6dbb482872fa5d1afc4b9a7e0986e0f4137",
+      "matches": 4,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "tests/windows/control-https-inventory.md",
+      "sha256": "5cd80c806d7bc087ad94276033267c87262ef354e8eb8e422a0000537492ea67",
+      "matches": 7,
+      "category": "historical-doc",
+      "reason": "Historical architecture and retirement documentation"
+    },
+    {
+      "path": "tools/stop.ps1",
+      "sha256": "3e0e2c096ed45e8a1d1aeccc82899d20465d9dce181f859f65040f687882183d",
+      "matches": 2,
+      "category": "frozen-0.3.x",
+      "reason": "Frozen 0.3.x legacy baseline retained for oracle comparison only"
+    }
+  ]
+}

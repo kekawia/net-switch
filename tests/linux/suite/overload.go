@@ -35,7 +35,7 @@ const (
 func init() { register(55, addOverload) }
 
 func addOverload(r *registry) {
-	const noLimits = "sing-box has no per-app or total admission limits: it admits every session and connection it's asked for, and other flows can stall meanwhile"
+	const noLimits = "the 0.3.x baseline has no per-app or total admission limits: it admits every session and connection it's asked for, and other flows can stall meanwhile"
 	r.defect("overload.udp-sessions-per-app", "Two apps open 5,000 UDP sessions each: each gets at most 4,096 and the rest are refused, far under the total limit, while other traffic carries on",
 		noLimits, "5.9", 3*time.Minute, udpSessionsPerAppCase)
 	r.defect("overload.udp-sessions-total", "Five apps open 4,000 UDP sessions each, all under their own limit: together they get at most 16,384 and the rest are refused",

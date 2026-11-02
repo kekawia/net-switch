@@ -66,7 +66,7 @@ jobs:
       max-parallel: 10
       matrix:
         runner: [windows-latest, windows-11-arm]
-        control: [node, go]
+        control: [go]
         include:
           - runner: windows-latest
             arch: x64
@@ -128,29 +128,6 @@ jobs:
         if: matrix.control == 'go'
         continue-on-error: true
         run: node scripts/win32-parity.mjs (Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI/netswitch.exe') --installed-startup-suite
-      - name: Fetch verified sing-box
-        if: matrix.control == 'node'
-        run: ./scripts/fetch-engine.ps1
-      - name: Build the two-path TUN harness and fetch its signed driver
-        if: matrix.control == 'node'
-        run: |
-          go build -o dist/windows-test/testisp.exe ./tests/windows/testisp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -o dist/windows-test/testisp-probe.exe ./tests/windows/testisp
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          ./tests/windows/testisp/fetch-wintun.ps1 -Directory dist/windows-test
-      - name: Routing against the selected control executable
-        if: matrix.control == 'node'
-        run: |
-          $server = (Get-Command node).Source
-          node scripts/e2e-routing.mjs --server-executable $server --public-via-tun
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: TUN against the selected control executable
-        if: matrix.control == 'node'
-        run: |
-          $server = (Get-Command node).Source
-          node scripts/e2e-tun.mjs --server-executable $server
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Installed startup and quarantine
         id: startup
         if: matrix.control == 'go'

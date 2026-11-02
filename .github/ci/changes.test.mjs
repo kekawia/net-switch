@@ -17,13 +17,13 @@ const cases = {
   go_shared: ['internal/engine/stack/stack.go', 'cmd/netswitch/main.go', 'internal/platform/windows/meters.go', 'internal/usage/GO-LICENSE.txt'],
   go_windows: ['internal/wintun/ring_windows.go', 'internal/platform/windows/com_windows_test.go', 'internal/wintun/README.md'],
   go_linux: ['internal/platform/linux/socket_linux.go', 'cmd/netswitch/main_linux_arm64.go'],
-  tests_linux: ['tests/linux/wire/wire.go', 'tests/linux/suite/suite.go', 'tests/linux/snap-inputs.sh', 'tests/linux/suite/snap-inputs.json', 'tests/linux/sing-box-linux.json'],
+  tests_linux: ['tests/linux/wire/wire.go', 'tests/linux/suite/suite.go', 'tests/linux/snap-inputs.sh', 'tests/linux/suite/snap-inputs.json'],
   tests_windows: ['tests/windows/client.mjs', 'tests/windows/testisp/stack_windows.go', 'tests/windows/README.md', 'tests/windows/testisp/README.md'],
   'frozen+go_shared': ['internal/apps/node-tests.json', 'internal/usage/node-zones.json'],
 };
 // Expected dependencies are deliberately independent of the classifier's map.
 // Changing that map must also explain why this coverage contract has changed.
-const frozen = ['node', 'helper', 'installer', 'legacy_windows', 'testisp', 'go_linux', 'acceptance', 'control'];
+const frozen = ['node', 'helper', 'installer', 'go_linux', 'control'];
 const goShared = ['go_windows', 'go_linux', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'];
 const expected = {
   docs: [],
@@ -60,14 +60,14 @@ test('a non-code file takes the area of the code beside it, wherever it is', () 
   assert.equal(area('internal/zz/data.json', 'internal/zz/a.go', 'internal/zz/b_linux.go'), 'go_shared', 'go_shared selects every go_linux job');
   assert.equal(area('tests/windows/zz/data.json', 'tests/windows/zz/a.mjs', 'tests/windows/zz/b_windows.go'), 'tests_windows');
   // Beside code the map can't place, or no code at all: everything runs.
-  for (const path of ['tests/oracle/README.md', 'tests/differential/README.md', 'notes/design.md', 'engine/LICENSE', 'packaging/NetSwitch.iss', 'assets/net-switch.ico']) {
+  for (const path of ['tests/oracle/README.md', 'tests/differential/README.md', 'notes/design.md', 'THIRD_PARTY_NOTICES.md', 'packaging/NetSwitch.iss', 'assets/net-switch.ico']) {
     assert.equal(area(path), null, path);
     assert.equal(known([path]).full, true, path);
   }
 });
 
 test('unclassified dependencies run everything, before docs matching', () => {
-  for (const path of ['.github/workflows/ci.yml', '.github/README.md', 'scripts/build-release.ps1', 'scripts/generate-gvisor.mjs', 'scripts/readme.md', 'go.mod', 'go.sum', 'helper/go.mod', 'tests/quicfixture/go.sum', 'vendor/README.md', 'third_party/gvisor/patches/fix.patch', 'package.json', 'package-lock.json', 'ui/app.js', 'packaging/versions.json', 'internal/control/http.go', 'unknown.txt', 'LICENSE', '.gitattributes', 'assets.go']) {
+  for (const path of ['.github/workflows/ci.yml', '.github/README.md', 'scripts/build-helper.ps1', 'scripts/generate-gvisor.mjs', 'scripts/readme.md', 'go.mod', 'go.sum', 'helper/go.mod', 'tests/quicfixture/go.sum', 'vendor/README.md', 'third_party/gvisor/patches/fix.patch', 'package.json', 'package-lock.json', 'ui/app.js', 'packaging/versions.json', 'internal/control/http.go', 'unknown.txt', 'LICENSE', '.gitattributes', 'assets.go']) {
     assert.equal(known(['README.md', path]).full, true, path);
     assert.deepEqual(enabled(known([path])), [...groups].sort(), path);
   }
