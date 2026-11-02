@@ -73,7 +73,7 @@ and [run 41007619728](https://github.com/kekawia/net-switch/actions/runs/4100761
       `P2_HOLDER ready=true tid=4563 cpu=0 policy=FIFO priority=10`
       `P2_PREEMPT preempt_rcu=false rcu_read_lock=preempt_disable hold_ns=2313946 consume_recursion_delta=0 task_serialized=true`
 - **Nested free (`TestBridgeNestedFreeDrop`) and delete fault (`TestBridgeDeleteFault`):**
-  -Note: `EFAULT` during `read()` with `TerminalFree` (`count=1`) is covered by the pure `CheckRead` model test `TestProvenanceTerminalAndHealth/copy_fault`, not a kernel `P2_EFAULT` log tag.
+  - Note: `EFAULT` during `read()` with `TerminalFree` (`count=1`) is covered by the pure `CheckRead` model test `TestProvenanceTerminalAndHealth/copy_fault`, not a kernel `P2_EFAULT` log tag.
   - Verbatim lines from run `40934322738`:
     - `amd64` (job `123667040419`):
       `P2_DELETE retained_before_reload=true cookie=7 health=1`

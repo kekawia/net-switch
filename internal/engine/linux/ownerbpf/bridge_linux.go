@@ -55,8 +55,8 @@ type Bridge struct {
 	activeReads                                               sync.WaitGroup
 	readers                                                   [ReaderLimit]bool
 	next                                                      uint64
-	stopped                                                   bool
-	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord atomic.Uint64
+	stopped                                                                bool
+	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord, ReadUnknown atomic.Uint64
 }
 
 func actualOnlineCPUCount() (uint32, error) {
@@ -404,8 +404,11 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 		decision := CheckRead(ReadBinding{Slot: r.reg.Slot, Ifindex: r.reg.Ifindex, NetNS: r.reg.NetNS, Registration: r.reg.Generation, Epoch: r.reg.Epoch, Sequence: r.sequence}, r.reg, snapshot, n, e, b.Faults())
 		if n > 0 && e == nil {
 			frames = append(frames, ReadFrame{Data: data[:n], Decision: decision})
-			if decision.Status == ReadMissing {
+			switch decision.Status {
+			case ReadMissing:
 				b.DeliveredWithoutRecord.Add(1)
+			case ReadUnknown:
+				b.ReadUnknown.Add(1)
 			}
 		}
 		if decision.Rebuild {

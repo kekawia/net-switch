@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/linux/ownerbpf"
 )
 
 //go:embed guest.lock.json
@@ -141,8 +143,13 @@ func ValidateGuestLock(lock *GuestLock) error {
 	if lock.Kernel.RawRecursionGuard || lock.Kernel.RecursionMissesField {
 		return errors.New("upstream v5.8 floor profile must record rawRecursionGuard=false and recursionMissesField=false")
 	}
-	if len(lock.Kernel.BuildAdjustments) != 3 {
-		return fmt.Errorf("expected 3 documented v5.8 kernel build adjustments, got %d", len(lock.Kernel.BuildAdjustments))
+	if len(lock.Kernel.BuildAdjustments) == 0 {
+		return errors.New("empty v5.8 kernel build adjustments")
+	}
+	for i, adj := range lock.Kernel.BuildAdjustments {
+		if strings.TrimSpace(adj) == "" {
+			return fmt.Errorf("blank v5.8 kernel build adjustment at index %d", i)
+		}
 	}
 	for _, arch := range []string{"amd64", "arm64"} {
 		cfg, ok := lock.Kernel.Configs[arch]
@@ -156,8 +163,9 @@ func ValidateGuestLock(lock *GuestLock) error {
 		if got := sha256Hex(raw); got != cfg.SHA256 {
 			return fmt.Errorf("%s kernel config sha256 mismatch: embedded=%s lock=%s", arch, got, cfg.SHA256)
 		}
-		if len(cfg.ResolvedConfigSHA256) != 64 {
-			return fmt.Errorf("%s resolvedConfigSha256 missing or invalid: %q", arch, cfg.ResolvedConfigSHA256)
+		wantResolved, ok := ownerbpf.Floor58ResolvedConfigSHA256(arch)
+		if !ok || cfg.ResolvedConfigSHA256 != wantResolved {
+			return fmt.Errorf("%s resolvedConfigSha256 mismatch: lock=%q want=%q", arch, cfg.ResolvedConfigSHA256, wantResolved)
 		}
 		if err := ValidateKernelConfigText(arch, string(raw)); err != nil {
 			return err
@@ -233,6 +241,68 @@ func ValidateKernelConfigText(arch, text string) error {
 	for _, req := range required {
 		if !lines[req] {
 			return fmt.Errorf("%s kernel config missing required setting %s", arch, req)
+		}
+	}
+	return nil
+}
+
+// ExtractScriptBuildAdjustments parses the container build script inside
+// scripts/build-owner-floor-guest.mjs and extracts every sed patching line
+// and KCFLAGS/HOSTCFLAGS make override in order.
+func ExtractScriptBuildAdjustments(script string) ([]string, error) {
+	start := strings.Index(script, "const containerScript = [")
+	if start < 0 {
+		return nil, errors.New("missing containerScript block in build script")
+	}
+	rest := script[start:]
+	end := strings.Index(rest, "].join('\\n');")
+	if end < 0 {
+		return nil, errors.New("unterminated containerScript block in build script")
+	}
+	block := rest[:end]
+	var adjustments []string
+	for _, rawLine := range strings.Split(block, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "//") || len(line) < 3 {
+			continue
+		}
+		line = strings.TrimSuffix(line, ",")
+		if (strings.HasPrefix(line, "'") && strings.HasSuffix(line, "'")) ||
+			(strings.HasPrefix(line, "`") && strings.HasSuffix(line, "`")) {
+			cmd := line[1 : len(line)-1]
+			if strings.HasPrefix(cmd, "sed ") {
+				adjustments = append(adjustments, cmd)
+			} else if strings.HasPrefix(cmd, "make ") && strings.Contains(cmd, "KCFLAGS=") {
+				kcIdx := strings.Index(cmd, "KCFLAGS=")
+				targetIdx := strings.Index(cmd, " ${cfgProfile.imageTarget}")
+				if kcIdx < 0 || targetIdx <= kcIdx {
+					return nil, fmt.Errorf("malformed make adjustment line: %q", cmd)
+				}
+				adjustments = append(adjustments, strings.TrimSpace(cmd[kcIdx:targetIdx]))
+			}
+		}
+	}
+	if len(adjustments) == 0 {
+		return nil, errors.New("no kernel build adjustments found in containerScript")
+	}
+	return adjustments, nil
+}
+
+func ValidateBuildScriptAdjustments(script string, lock *GuestLock) error {
+	if lock == nil {
+		return errors.New("nil guest lock")
+	}
+	want, err := ExtractScriptBuildAdjustments(script)
+	if err != nil {
+		return err
+	}
+	got := lock.Kernel.BuildAdjustments
+	if len(got) != len(want) {
+		return fmt.Errorf("guest.lock.json buildAdjustments count=%d, build script has %d (%v)", len(got), len(want), want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return fmt.Errorf("guest.lock.json buildAdjustments[%d]=%q, build script has %q", i, got[i], want[i])
 		}
 	}
 	return nil

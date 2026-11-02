@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/linux/ownerbpf"
 	"golang.org/x/sys/unix"
 )
 
@@ -116,14 +117,9 @@ func verifyFloorKernel() error {
 	}
 	cfgSum := sha256.Sum256(cfgBytes)
 	gotConfigSHA := hex.EncodeToString(cfgSum[:])
-	wantConfigSHA := ""
-	switch runtime.GOARCH {
-	case "amd64":
-		wantConfigSHA = "42309a5b01aef7aec5a856561eef8c049dd247501b3edaad746382413aff9252"
-	case "arm64":
-		wantConfigSHA = "8f2fd8ae8b40b3875083d636f8308d5b16e4b43c3e8abf1170780e6ea27e2a0b"
-	default:
-		return fmt.Errorf("unsupported floor guest GOARCH %q", runtime.GOARCH)
+	wantConfigSHA, ok := ownerbpf.Floor58ResolvedConfigSHA256(runtime.GOARCH)
+	if !ok {
+		return fmt.Errorf("missing resolvedConfigSha256 for GOARCH %q", runtime.GOARCH)
 	}
 	if gotConfigSHA != wantConfigSHA {
 		return fmt.Errorf("running /proc/config.gz sha256 mismatch on %s: got=%s want=%s", runtime.GOARCH, gotConfigSHA, wantConfigSHA)
@@ -192,6 +188,7 @@ func runPrivateSuite() error {
 	}{
 		{"kernel-proof", "^TestKernelProof$", "5m"},
 		{"bridge-proof", "^TestBridge", "15m"},
+		{"identity-proof", "^TestIdentity", "10m"},
 	}
 	for _, s := range suites {
 		fmt.Printf("FLOOR_GUEST_SUITE_START suite=%s pattern=%s\n", s.name, s.pattern)

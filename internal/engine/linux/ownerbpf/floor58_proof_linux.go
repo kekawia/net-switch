@@ -14,11 +14,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const (
-	lockedFloor58ConfigSHA256AMD64 = "42309a5b01aef7aec5a856561eef8c049dd247501b3edaad746382413aff9252"
-	lockedFloor58ConfigSHA256ARM64 = "8f2fd8ae8b40b3875083d636f8308d5b16e4b43c3e8abf1170780e6ea27e2a0b"
-)
-
 func verifiedFloor58Profile() bool {
 	if os.Getenv("NS_OWNERBPF_FLOOR58") != "1" {
 		return false
@@ -30,13 +25,8 @@ func verifiedFloor58Profile() bool {
 	if unix.ByteSliceToString(uts.Release[:]) != "5.8.0" {
 		return false
 	}
-	wantSHA := ""
-	switch runtime.GOARCH {
-	case "amd64":
-		wantSHA = lockedFloor58ConfigSHA256AMD64
-	case "arm64":
-		wantSHA = lockedFloor58ConfigSHA256ARM64
-	default:
+	wantSHA, ok := Floor58ResolvedConfigSHA256(runtime.GOARCH)
+	if !ok {
 		return false
 	}
 	gzBytes, err := os.ReadFile("/proc/config.gz")
