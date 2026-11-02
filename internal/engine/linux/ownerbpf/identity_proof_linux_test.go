@@ -25,8 +25,8 @@ import (
 const (
 	ioringSetupSQPoll    = 1 << 1
 	ioringSqNeedWakeup   = 1 << 0
-	ioringEnterSqWakeup  = 1 << 0
 	ioringEnterGetEvents = 1 << 0
+	ioringEnterSqWakeup  = 1 << 1
 	ioringRegisterFiles  = 2
 
 	ioringOffSqRing = 0
@@ -224,6 +224,7 @@ func TestIdentityChild(t *testing.T) {
 		}
 
 	case "snap_setup":
+		_ = os.Remove("/.flatpak-info")
 		if err := unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(93)
@@ -253,6 +254,7 @@ func TestIdentityChild(t *testing.T) {
 		}
 
 	case "appimage_setup":
+		_ = os.Remove("/.flatpak-info")
 		if err := unix.Mount("", "/", "", unix.MS_PRIVATE|unix.MS_REC, ""); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(99)
@@ -429,8 +431,8 @@ func TestIdentityChild(t *testing.T) {
 		os.Exit(0)
 
 	case "i2_ring_owner":
-		// fd 3 is AF_UNIX socketpair to pass ringFD to parent so i2-app-b can receive it.
 		shmPath := os.Getenv("NS_IDENTITY_SHM")
+		peerBin := os.Getenv("NS_IDENTITY_PEER_BIN")
 		useSQPoll := os.Getenv("NS_IDENTITY_SQPOLL") == "1"
 		s, err := dialBridgeUDPSocket(port)
 		if err != nil {
@@ -503,11 +505,11 @@ func TestIdentityChild(t *testing.T) {
 		}
 		submitSharedRingSQE(sqRing, sqeMem, params.SqOff, ioringOpSend, sqeFlags, 0, baseAddr+256, uint32(len(payload)), 1)
 		if useSQPoll {
-			flagsPtr := (*uint32)(unsafe.Pointer(&sqRing[params.SqOff.Flags]))
-			if atomic.LoadUint32(flagsPtr)&ioringSqNeedWakeup != 0 {
-				_, _, _ = unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(ringFD), 0, 0, ioringEnterSqWakeup, 0, 0)
+			_, _, errno = unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(ringFD), 0, 1, ioringEnterSqWakeup|ioringEnterGetEvents, 0, 0)
+			if errno != 0 {
+				fmt.Fprintln(os.Stderr, "io_uring_enter sqpoll app-a:", errno)
+				os.Exit(138)
 			}
-			_, _, _ = unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(ringFD), 0, 1, ioringEnterGetEvents, 0, 0)
 		} else {
 			_, _, errno = unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(ringFD), 1, 1, ioringEnterGetEvents, 0, 0)
 			if errno != 0 {
@@ -516,24 +518,40 @@ func TestIdentityChild(t *testing.T) {
 			}
 		}
 
-		rights := unix.UnixRights(ringFD)
-		if err := unix.Sendmsg(3, []byte("R"), rights, nil, 0); err != nil {
-			fmt.Fprintln(os.Stderr, "sendmsg ringFD:", err)
+		// Spawn separate executable i2-app-b with inherited ringFD (fd 3); UDP socket s has SOCK_CLOEXEC so i2-app-b never receives s.
+		ringFile := os.NewFile(uintptr(ringFD), "shared-ring")
+		cmdPeer := exec.Command(peerBin, "-test.run=^TestIdentityChild$")
+		cmdPeer.Env = append(os.Environ(),
+			"NS_IDENTITY_CHILD=i2_ring_peer",
+			"NS_IDENTITY_SHM="+shmPath,
+			"NS_IDENTITY_SQPOLL="+os.Getenv("NS_IDENTITY_SQPOLL"),
+			"NS_IDENTITY_PAYLOAD="+payload2,
+		)
+		cmdPeer.ExtraFiles = []*os.File{ringFile}
+		cmdPeer.Stderr = os.Stderr
+		if err := cmdPeer.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "run i2_ring_peer:", err)
 			os.Exit(139)
 		}
-		fmt.Println("RING_READY")
-		var step [1]byte
-		_, _ = os.Stdin.Read(step[:])
-		if !useSQPoll {
-			// Submit the SQE that i2-app-b wrote into the shared ring without i2-app-b making any send syscall.
-			_, _, errno = unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(ringFD), 1, 1, ioringEnterGetEvents, 0, 0)
+
+		// Drive and wait for completion of the second SQE enqueued by i2-app-b (cq.head is 0, so min_complete=2 waits for both CQEs).
+		if useSQPoll {
+			_, _, errno = unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(ringFD), 0, 2, ioringEnterSqWakeup|ioringEnterGetEvents, 0, 0)
+			if errno != 0 {
+				fmt.Fprintln(os.Stderr, "io_uring_enter sqpoll app-b:", errno)
+				os.Exit(140)
+			}
+		} else {
+			_, _, errno = unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(ringFD), 1, 2, ioringEnterGetEvents, 0, 0)
 			if errno != 0 {
 				fmt.Fprintln(os.Stderr, "io_uring_enter app-b:", errno)
 				os.Exit(140)
 			}
-			fmt.Println("IOWQ_SUBMITTED")
-			_, _ = os.Stdin.Read(step[:])
 		}
+		fmt.Println("RING_READY")
+		var step [1]byte
+		_, _ = os.Stdin.Read(step[:])
+		_ = ringFile.Name()
 		os.Exit(0)
 
 	case "i2_ring_peer":
@@ -573,13 +591,6 @@ func TestIdentityChild(t *testing.T) {
 			sqeFlags |= iosqeAsync
 		}
 		submitSharedRingSQE(sqRing, sqeMem, sqOff, ioringOpSend, sqeFlags, 0, baseAddr+512, uint32(len(payload)), 2)
-		if useSQPoll {
-			flagsPtr := (*uint32)(unsafe.Pointer(&sqRing[sqOff.Flags]))
-			if atomic.LoadUint32(flagsPtr)&ioringSqNeedWakeup != 0 {
-				_, _, _ = unix.Syscall6(unix.SYS_IO_URING_ENTER, uintptr(ringFD), 0, 0, ioringEnterSqWakeup, 0, 0)
-			}
-		}
-		fmt.Println("PEER_ENQUEUED")
 		os.Exit(0)
 	}
 }
@@ -844,6 +855,7 @@ func TestIdentityI1(t *testing.T) {
 		defer func() {
 			_ = inPipe.Close()
 			_ = c.Wait()
+			_ = os.Remove("/.flatpak-info")
 		}()
 		waitLine(t, bufio.NewReader(outPipe), "STEP1")
 		f.syncLedger(t, ledger, processed)
@@ -1318,16 +1330,6 @@ func TestIdentityI2(t *testing.T) {
 		if err := os.WriteFile(shmPath, make([]byte, 4096), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		sp, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer func() {
-			_ = unix.Close(sp[0])
-			if sp[1] >= 0 {
-				_ = unix.Close(sp[1])
-			}
-		}()
 
 		sqpollVal := "0"
 		if sqpoll {
@@ -1338,18 +1340,18 @@ func TestIdentityI2(t *testing.T) {
 			preVal = "1"
 		}
 
-		passEnd := os.NewFile(uintptr(sp[1]), "ring-pass")
 		cmdA := exec.Command(appABin, "-test.run=^TestIdentityChild$")
 		cmdA.Env = append(os.Environ(),
 			"NS_IDENTITY_CHILD=i2_ring_owner",
+			"NS_IDENTITY_PEER_BIN="+appBBin,
 			"NS_IDENTITY_PORT="+strconv.Itoa(port),
 			"NS_IDENTITY_SHM="+shmPath,
 			"NS_IDENTITY_SQPOLL="+sqpollVal,
 			"NS_IDENTITY_PRE_SENDTO="+preVal,
 			"NS_IDENTITY_PRE_PAYLOAD="+prePayload,
 			"NS_IDENTITY_PAYLOAD="+payloadA,
+			"NS_IDENTITY_PAYLOAD2="+payloadB,
 		)
-		cmdA.ExtraFiles = []*os.File{passEnd}
 		inA, err := cmdA.StdinPipe()
 		if err != nil {
 			t.Fatal(err)
@@ -1362,8 +1364,6 @@ func TestIdentityI2(t *testing.T) {
 		if err := cmdA.Start(); err != nil {
 			t.Fatal(err)
 		}
-		_ = passEnd.Close()
-		sp[1] = -1
 		defer func() {
 			_ = inA.Close()
 			if cmdA.Process != nil {
@@ -1387,36 +1387,6 @@ func TestIdentityI2(t *testing.T) {
 		}
 
 		waitLine(t, readerA, "RING_READY")
-		ringFD := receiveFDFromSocket(t, sp[0])
-		ringFile := os.NewFile(uintptr(ringFD), "shared-ring")
-		defer func() { _ = ringFile.Close() }()
-
-		// Separate app process i2-app-b enqueues its SQE directly into the shared ring memory.
-		cmdB := exec.Command(appBBin, "-test.run=^TestIdentityChild$")
-		cmdB.Env = append(os.Environ(),
-			"NS_IDENTITY_CHILD=i2_ring_peer",
-			"NS_IDENTITY_SHM="+shmPath,
-			"NS_IDENTITY_SQPOLL="+sqpollVal,
-			"NS_IDENTITY_PAYLOAD="+payloadB,
-		)
-		cmdB.ExtraFiles = []*os.File{ringFile}
-		outB, err := cmdB.StdoutPipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		cmdB.Stderr = os.Stderr
-		if err := cmdB.Start(); err != nil {
-			t.Fatal(err)
-		}
-		waitLine(t, bufio.NewReader(outB), "PEER_ENQUEUED")
-		if err := cmdB.Wait(); err != nil {
-			t.Fatalf("i2-app-b wait: %v", err)
-		}
-
-		if !sqpoll {
-			_, _ = io.WriteString(inA, "S")
-			waitLine(t, readerA, "IOWQ_SUBMITTED")
-		}
 
 		rdecs := f.readUDPSet(t, port, payloadA, payloadB)
 		rdecA := rdecs[payloadA]
