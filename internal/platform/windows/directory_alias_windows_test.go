@@ -270,6 +270,13 @@ func TestMachineStoreStagedAlias(t *testing.T) {
 				if err != nil || !os.SameFile(original, quarantined) {
 					t.Fatal("quarantine lost original directory identity", err)
 				}
+				if kind == "short-leaf" {
+					// Publishing the staged directory replaces the directory object
+					// at path, so the old object's explicit 8.3 short name does not
+					// belong to the new object. Assign a short name to the recovered
+					// directory before verifying through a short-leaf alias.
+					alias = filepath.Join(parent, assignShortName(t, path))
+				}
 				if err := VerifyDirectory(alias); err != nil {
 					t.Fatal(err)
 				}

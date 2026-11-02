@@ -97,7 +97,7 @@ func CleanupMachineData(path string, log func(string)) error {
 		}
 		parent = f
 	}
-	path, err = canonicalizeFromPinnedParent(windows.Handle(parent.Fd()), filepath.Base(path))
+	canonical, err := canonicalizeFromPinnedParent(windows.Handle(parent.Fd()), filepath.Base(path))
 	if err != nil {
 		return err
 	}
@@ -165,7 +165,7 @@ func CleanupMachineData(path string, log func(string)) error {
 		return err
 	}
 	for _, name := range names {
-		if machineCleanupName(name, filepath.Base(path)) {
+		if machineCleanupName(name, filepath.Base(canonical)) {
 			if _, err := remove(filepath.Join(filepath.Dir(path), name)); err != nil {
 				problems = append(problems, err)
 				log(err.Error())
@@ -176,7 +176,7 @@ func CleanupMachineData(path string, log func(string)) error {
 	if err != nil {
 		return err
 	}
-	err = key.DeleteValue(directoryCertificateName(path))
+	err = key.DeleteValue(directoryCertificateName(canonical))
 	if err != nil && !errors.Is(err, registry.ErrNotExist) {
 		key.Close()
 		return err

@@ -124,11 +124,12 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			return fmt.Errorf("protected ancestor %s is not a directory", parents[i])
 		}
 	}
-	path, err = canonicalizeFromPinnedParent(windows.Handle(held[len(held)-1].Fd()), filepath.Base(path))
+	canonical, err := canonicalizeFromPinnedParent(windows.Handle(held[len(held)-1].Fd()), filepath.Base(path))
 	if err != nil {
 		return err
 	}
-	certificate, err := directoryCertificate(path)
+	path = filepath.Join(filepath.Dir(path), filepath.Base(canonical))
+	certificate, err := directoryCertificate(canonical)
 	if err != nil {
 		return fmt.Errorf("read machine-folder provenance: %w", err)
 	}
@@ -256,7 +257,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			}
 			data, err := read(item)
 			if err == nil {
-				return parseDirectoryMarker(sd, data, root.identity, path, certificate)
+				return parseDirectoryMarker(sd, data, root.identity, canonical, certificate)
 			}
 		}
 		return directoryMarker{}, false
@@ -330,12 +331,13 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			}
 		}
 		closeChildren(tree)
-		if certified && len(m.Quarantine) > len(path+".untrusted-") &&
-			strings.EqualFold(m.Quarantine[:len(path+".untrusted-")], path+".untrusted-") &&
-			strings.EqualFold(filepath.Dir(m.Quarantine), filepath.Dir(path)) {
+		canonicalQuarantine, qErr := canonicalMachinePath(m.Quarantine)
+		if certified && qErr == nil && len(canonicalQuarantine) > len(canonical+".untrusted-") &&
+			strings.EqualFold(canonicalQuarantine[:len(canonical+".untrusted-")], canonical+".untrusted-") &&
+			strings.EqualFold(filepath.Dir(canonicalQuarantine), filepath.Dir(canonical)) {
 			// A previous certificate write may have become visible before its
 			// flush failed. Reaffirm durability before moving the original.
-			if err := certifyDirectory(path, m.certificate()); err != nil {
+			if err := certifyDirectory(canonical, m.certificate()); err != nil {
 				return err
 			}
 			if err := publish(staged, m); err != nil {
@@ -407,7 +409,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 				}
 			}
 			if !migrated {
-				m, err := newDirectoryMarker(root.identity, path, "", "", nil)
+				m, err := newDirectoryMarker(root.identity, canonical, "", "", nil)
 				if err != nil {
 					return err
 				}
@@ -415,7 +417,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 				if err := writeFresh(path, directoryMarkerName, b); err != nil {
 					return err
 				}
-				if err := certifyDirectory(path, m.certificate()); err != nil {
+				if err := certifyDirectory(canonical, m.certificate()); err != nil {
 					return err
 				}
 				return ready(m)
@@ -481,7 +483,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 				}
 			}
 		}
-		m, err = newDirectoryMarker(staged.identity, path, root.identity, oldName, notes)
+		m, err = newDirectoryMarker(staged.identity, canonical, root.identity, oldName, notes)
 		if err != nil {
 			return err
 		}
@@ -489,7 +491,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 		if err := writeFresh(stagePath, directoryMarkerName, b); err != nil {
 			return err
 		}
-		if err := certifyDirectory(path, m.certificate()); err != nil {
+		if err := certifyDirectory(canonical, m.certificate()); err != nil {
 			return err
 		}
 		if checkpoint != nil {
