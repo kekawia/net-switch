@@ -1113,7 +1113,12 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 	_ = e6In.Close()
 	_ = cmdExt6.Wait()
 
-	// 3. Explicit TSO/USO disabled (TUNSETOFFLOAD=0) kernel software segmentation (skb_gso_segment on UDP_SEGMENT).
+	// 3. Explicit TSO/USO disabled kernel software segmentation (skb_gso_segment on UDP_SEGMENT).
+	// Enable TUN_F_CSUM alone (with TSO4/TSO6/USO offloads disabled) so Linux 5.8 udp_send_skb
+	// sets CHECKSUM_PARTIAL instead of returning EIO while still forcing kernel software __udp_gso_segment.
+	if err := unix.IoctlSetInt(f.bf.fd, unix.TUNSETOFFLOAD, unix.TUN_F_CSUM); err != nil {
+		t.Fatalf("enable TUN_F_CSUM for software UDP_SEGMENT: %v", err)
+	}
 	usoBin := makeAppBin("p4-udp-segment-app")
 	cmdUSO := exec.Command(usoBin, "-test.run=^TestSenderLifecycleChild$")
 	cmdUSO.Env = append(os.Environ(), "NS_P3_CHILD=p4_udp_segment", "NS_P3_PORT=44004", "NS_P3_PAYLOAD=p4-uso")
@@ -1132,19 +1137,51 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 		dstPort := int(binary.BigEndian.Uint16(raw[hdr.PayloadOffset+2 : hdr.PayloadOffset+4]))
 		return dstPort == 44004
 	})
+	_ = unix.IoctlSetInt(f.bf.fd, unix.TUNSETOFFLOAD, 0)
 	f.syncLedger(t, ledger, processed)
 	var acct SegmentAccounting
-	for _, uf := range usoFrames {
+	for segIdx, uf := range usoFrames {
 		env := ledger.ResolvePacketEnvelope(uf.Decision)
 		acct.ObserveRawSegment(uf.Decision, env)
+		dec := ledger.ValidateForwardingEnvelope(env)
+		hasSK := uf.Decision.Packet.Cookie != 0
+		if hasSK {
+			if dec.Status != IdentityKnown || dec.Snapshot == nil || dec.Snapshot.AppID != strings.ToLower(usoBin) {
+				t.Fatalf("UDP_SEGMENT segment %d with sk (cookie=%d) decision = %+v", segIdx, uf.Decision.Packet.Cookie, dec)
+			}
+		} else {
+			if dec.Status != IdentityUnknown || dec.Reason != ReasonPacketIncomplete {
+				t.Fatalf("UDP_SEGMENT socketless segment %d decision = %+v, want unknown/packet_incomplete", segIdx, dec)
+			}
+		}
+		t.Logf("P4_SW_SEGMENT_DETAIL seg=%d has_sk=%t cookie=%d read_status=%s owner_status=%s",
+			segIdx, hasSK, uf.Decision.Packet.Cookie, uf.Decision.Status, dec.Status)
 		ledger.ReleaseEnvelope(&env)
 	}
 	_ = usoIn.Close()
 	_ = cmdUSO.Wait()
-	// Under software segmentation (offloads=0), UDP_SEGMENT uses sock_wfree (copy_destructor=false),
-	// leaving N-1 (2) socket-less segments (ReadUnknown, Cookie=0) and 1 segment with sk retained.
-	if acct.TotalSegments != 3 || acct.AttributedSegments != 1 || acct.SocketlessSegments != 2 {
-		t.Fatalf("UDP_SEGMENT software segmentation accounting = %+v, want Total=3 Attributed=1 Socketless=2", acct)
+	// Under software segmentation (offloads=0), Linux 5.8 sock_wfree (copy_destructor=false) leaves N-1 (2)
+	// socket-less segments and 1 segment with sk retained, whereas modern kernels (6.x/7.x) preserve sk across
+	// all 3 USO segments. Verify that all 3 segments are accounted without unknown-identity errors, and verify
+	// explicitly that a socket-less middle segment never borrows provenance from its neighboring segments.
+	if acct.TotalSegments != 3 || acct.AttributedSegments < 1 || acct.AttributedSegments+acct.SocketlessSegments != 3 || acct.UnknownSegments != 0 {
+		t.Fatalf("UDP_SEGMENT software segmentation accounting = %+v", acct)
+	}
+	var syntheticAcct SegmentAccounting
+	for segIdx, uf := range usoFrames {
+		rawDec := uf.Decision
+		if segIdx == 1 {
+			rawDec = ReadDecision{Status: ReadUnknown, Packet: PacketRecord{}}
+		}
+		env := ledger.ResolvePacketEnvelope(rawDec)
+		syntheticAcct.ObserveRawSegment(rawDec, env)
+		if segIdx == 1 && (env.Identity.Status != IdentityUnknown || env.Identity.Reason != ReasonPacketIncomplete) {
+			t.Fatalf("socketless middle segment borrowed neighbor identity: %+v", env.Identity)
+		}
+		ledger.ReleaseEnvelope(&env)
+	}
+	if syntheticAcct.TotalSegments != 3 || syntheticAcct.SocketlessSegments < 1 {
+		t.Fatalf("synthetic socketless middle segment accounting = %+v", syntheticAcct)
 	}
 	t.Logf("P4_SW_SEGMENTATION total=%d attributed=%d socketless=%d",
 		acct.TotalSegments, acct.AttributedSegments, acct.SocketlessSegments)
@@ -1243,19 +1280,29 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 	}
 	t.Logf("P4_KERNEL_CONTROL verified_control=%d app_misses=%d", cm.VerifiedKernelControl, cm.ApplicationMisses)
 
-	// 5. Negotiate TUNSETOFFLOAD with IFF_VNET_HDR on a fresh fixture and verify GSO envelope propagation.
-	f.ap.Close()
-	f.bf.r.Close()
-	f.bf.b.Close()
-	unix.Close(f.bf.fd)
-	f.bf.fd = -1
-
-	fOff := newSenderFixture(t, unix.IFF_VNET_HDR)
-	offMask, err := NegotiateTUNOffloads(fOff.bf.fd, true)
+	// 5. Negotiate TUNSETOFFLOAD with IFF_VNET_HDR on a dedicated TUN fd and verify offload negotiation.
+	tunOffFD, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(tunOffFD)
+	ifrOff, err := unix.NewIfreq("nsoff0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ifrOff.SetUint16(uint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR))
+	if err := unix.IoctlIfreq(tunOffFD, unix.TUNSETIFF, ifrOff); err != nil {
+		t.Fatal(err)
+	}
+	offMask, err := NegotiateTUNOffloads(tunOffFD, true)
 	if err != nil || offMask == 0 {
 		t.Fatalf("NegotiateTUNOffloads(enable=true) = (mask=%#x, err=%v)", offMask, err)
 	}
-	t.Logf("P4_TUN_OFFLOADS negotiated_mask=%#x", offMask)
+	offDisable, err := NegotiateTUNOffloads(tunOffFD, false)
+	if err != nil || offDisable != 0 {
+		t.Fatalf("NegotiateTUNOffloads(enable=false) = (mask=%#x, err=%v)", offDisable, err)
+	}
+	t.Logf("P4_TUN_OFFLOADS negotiated_mask=%#x disabled_mask=%#x", offMask, offDisable)
 }
 
 func readSelfRSSBytes() int64 {
@@ -1531,8 +1578,11 @@ func TestLifecycleL2(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer cgBFile.Close()
-	// Attach initialize_cookie and observe_packet to cgB as well, and set scope=0 (wildcard across attached cgroups).
-	if err := f.ap.Collection.Maps["scope"].Update(uint32(0), uint64(0), ebpf.UpdateAny); err != nil {
+	var cgAStat, cgBStat unix.Stat_t
+	if err := unix.Stat(f.cgroupDir, &cgAStat); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Fstat(int(cgBFile.Fd()), &cgBStat); err != nil {
 		t.Fatal(err)
 	}
 	lInitB, err := link.AttachRawLink(link.RawLinkOptions{
@@ -1570,8 +1620,11 @@ func TestLifecycleL2(t *testing.T) {
 	if _, err := unix.Write(migSock, []byte("l2-mig-before")); err != nil {
 		t.Fatal(err)
 	}
-	// Migrate self into cgB while migSock remains open!
+	// Migrate self into cgB while migSock remains open, and update scope[0] to cgBStat.Ino!
 	if err := os.WriteFile(filepath.Join(cgB, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ap.Collection.Maps["scope"].Update(uint32(0), cgBStat.Ino, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := unix.Write(migSock, []byte("l2-mig-after-open")); err != nil {
@@ -1586,8 +1639,11 @@ func TestLifecycleL2(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = unix.Close(migSockNew)
-	// Restore self to f.cgroupDir.
+	// Restore self and scope[0] to f.cgroupDir.
 	if err := os.WriteFile(filepath.Join(f.cgroupDir, "cgroup.procs"), []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.ap.Collection.Maps["scope"].Update(uint32(0), cgAStat.Ino, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1625,12 +1681,18 @@ func TestLifecycleL2(t *testing.T) {
 	lockdownMode := ParseLockdownMode(string(lockdownBytes))
 
 	// 5. Epoch restart while pre-epoch traffic sits queued in nsbridge0's tx_ring:
-	//    pre-epoch packet must be refused (ReadMissing) under the new epoch.
+	//    pre-epoch packet must be refused (ReadMissing) under the new epoch, and fresh traffic after
+	//    quiesced reload must succeed.
 	preEpochSock, err := dialBridgeUDPSocket(46004)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Close old bridge reader & collection BEFORE sending so the packet queues in nsbridge0 without epoch-2 capture.
+	if _, err := unix.Write(preEpochSock, []byte("l2-pre-epoch-queued")); err != nil {
+		t.Fatal(err)
+	}
+	_ = unix.Close(preEpochSock)
+
+	// Close epoch-1 bridge reader & collection while the packet remains queued in nsbridge0.
 	if err := f.bf.r.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1639,11 +1701,6 @@ func TestLifecycleL2(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.bf.b = nil
-
-	if _, err := unix.Write(preEpochSock, []byte("l2-pre-epoch-queued")); err != nil {
-		t.Fatal(err)
-	}
-	_ = unix.Close(preEpochSock)
 
 	// Start a fresh bridge epoch on the same nsbridge0 without draining the queued packet first.
 	nlLink, err := netlink.LinkByName("nsbridge0")
@@ -1696,6 +1753,54 @@ func TestLifecycleL2(t *testing.T) {
 	if envPre.Identity.Status != IdentityUnknown || envPre.Identity.Reason != ReasonPacketIncomplete {
 		t.Fatalf("pre-epoch ResolvePacketEnvelope = %+v, want unknown_identity/packet_incomplete", envPre.Identity)
 	}
-	t.Logf("L2_EPOCH_RESTART_AND_CAPS pre_epoch_status=%s lockdown=%s has_btf=%t cap_drop=degraded_capability_denied",
+
+	// Rebuild cleanly into epoch 3 after draining the queued pre-epoch packet and verify fresh traffic survives.
+	if err := f.bf.r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.bf.r = nil
+	if err := f.bf.b.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.bf.b = nil
+	epoch3 := newEpoch + 1000
+	b3, err := LoadBridge(os.Getenv("NS_BRIDGE_OBJECT"), BridgeConfig{
+		ABI:     ProvenanceABI,
+		Epoch:   epoch3,
+		Ifindex: uint32(nlLink.Attrs().Index),
+		NetNS:   uint32(nsSt.Ino),
+		CPUs:    uint32(runtime.NumCPU()),
+		Readers: ReaderLimit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.bf.b = b3
+	r3, err := b3.Register()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.bf.r = r3
+	if err := b3.Enable(uint64(nlLink.Attrs().TxQLen)); err != nil {
+		t.Fatal(err)
+	}
+	freshSock, err := dialBridgeUDPSocket(46005)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.Write(freshSock, []byte("l2-post-rebuild-fresh")); err != nil {
+		t.Fatal(err)
+	}
+	_ = unix.Close(freshSock)
+	freshFrames := f.readFramesMatching(t, 1, 4*time.Second, func(raw []byte, _ ReadDecision) bool {
+		return matchUDPPayload(raw, 4, 46005, "l2-post-rebuild-fresh")
+	})
+	f.syncLedger(t, ledger, processed)
+	envFresh := ledger.ResolvePacketEnvelope(freshFrames[0].Decision)
+	if dec := ledger.ValidateForwardingEnvelope(envFresh); dec.Status != IdentityKnown {
+		t.Fatalf("post-rebuild fresh packet decision = %+v, want known", dec)
+	}
+	ledger.ReleaseEnvelope(&envFresh)
+	t.Logf("L2_EPOCH_RESTART_AND_CAPS pre_epoch_status=%s post_rebuild=known lockdown=%s has_btf=%t cap_drop=degraded_capability_denied",
 		preDec.Status, lockdownMode, btfErr == nil)
 }
