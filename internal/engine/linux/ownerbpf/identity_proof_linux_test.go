@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -136,7 +137,21 @@ func submitSharedRingSQE(sqRing, sqeMem []byte, sqOff ioSqringOffsets, opcode, f
 	atomic.StoreUint32(tailPtr, tail+1)
 }
 
+func init() {
+	if os.Getenv("NS_IDENTITY_CHILD") != "" {
+		runtime.LockOSThread()
+		runIdentityChild()
+	}
+}
+
 func TestIdentityChild(t *testing.T) {
+	if os.Getenv("NS_IDENTITY_CHILD") != "" {
+		runtime.LockOSThread()
+		runIdentityChild()
+	}
+}
+
+func runIdentityChild() {
 	mode := os.Getenv("NS_IDENTITY_CHILD")
 	if mode == "" {
 		return
