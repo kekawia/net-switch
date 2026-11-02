@@ -595,7 +595,11 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	if err != nil || l.Attrs().Statistics == nil {
 		t.Fatal(err)
 	}
-	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 5000, Limit: 100})
+	latencyUs := uint32(2000)
+	if verifiedFloor58Profile() && runtime.GOARCH == "arm64" {
+		latencyUs = 5000
+	}
+	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: latencyUs, Limit: 100})
 	if err := netlink.QdiscReplace(q); err != nil {
 		t.Fatal("netem positive-control prerequisite", err)
 	}
@@ -609,7 +613,7 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	}
 	defer func() { _ = unix.Munmap(faultBuf) }()
 
-	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=5000us=5ms)
+	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=2000us native/KVM, 5000us arm64 TCG)
 	// inside readBurst's callback (after the 64KiB buffer allocation has already completed)
 	// immediately before entering the kfree_skb hold (~13.5ms-20ms) on f.cpu. Even when
 	// preemption is disabled on f.cpu, the hrtimer hardirq fires on f.cpu and

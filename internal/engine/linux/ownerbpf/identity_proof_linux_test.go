@@ -766,6 +766,8 @@ func TestIdentityI1(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpDir := t.TempDir()
+	_ = os.Chmod(filepath.Dir(tmpDir), 0o755)
+	_ = os.Chmod(tmpDir, 0o755)
 
 	// 1. Cold unique native executable enriched while live, followed by warm retained exit.
 	nativeBin := filepath.Join(tmpDir, "cold-native-app")
@@ -1000,6 +1002,7 @@ func TestIdentityI1(t *testing.T) {
 	if _, err := fmt.Sscanf(childLine, "CHILD_FORKED pid=%d", &forkedPID); err != nil || forkedPID <= 0 {
 		t.Fatalf("parse forked pid from %q: %v", childLine, err)
 	}
+	rdecChild := f.readUDPByPayload(t, "i1-fork-child", 41004)
 	recAfterFork := f.snapshotActors(t)
 	var foundChildKey ActorKey
 	var foundChildEv ActorEvidence
@@ -1021,7 +1024,6 @@ func TestIdentityI1(t *testing.T) {
 	if _, reason := ledger.InheritFork(parentActorKey, foundChildKey, foundChildEv, childCtx); reason != ReasonInheritedValidated {
 		t.Fatalf("InheritFork reason = %s, want %s", reason, ReasonInheritedValidated)
 	}
-	rdecChild := f.readUDPByPayload(t, "i1-fork-child", 41004)
 	idecChild := ledger.ResolvePacket(rdecChild)
 	if idecChild.Status != IdentityKnown || idecChild.Conflicts != 0 || idecChild.Snapshot == nil ||
 		idecChild.Snapshot.AppID != strings.ToLower(forkBin) {
@@ -1315,6 +1317,8 @@ func TestIdentityI2(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmpDir := t.TempDir()
+	_ = os.Chmod(filepath.Dir(tmpDir), 0o755)
+	_ = os.Chmod(tmpDir, 0o755)
 	appABin := filepath.Join(tmpDir, "i2-app-a")
 	appBBin := filepath.Join(tmpDir, "i2-app-b")
 	if err := copyFileExecutable(selfExe, appABin); err != nil {
