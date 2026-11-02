@@ -6,6 +6,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 type SandboxKind string
@@ -173,6 +174,7 @@ type LedgerMetrics struct {
 	ActiveSnapshots       int
 	ActiveBlobs           int
 	UsedBlobBytes         int
+	ActiveSocketSlots     int
 }
 
 func unescapeMountField(s string) string {
@@ -459,6 +461,7 @@ type IdentityLedger struct {
 	actors       map[ActorIdentityKey]*IdentitySnapshot
 	sockets      map[uint64]*SocketIdentityState
 	blobs        map[string]*identityBlob
+	slotTable    *SocketSlotTable
 	metrics      LedgerMetrics
 }
 
@@ -482,6 +485,11 @@ func (l *IdentityLedger) Metrics() LedgerMetrics {
 	m := l.metrics
 	m.ActiveSnapshots = len(l.actors)
 	m.ActiveBlobs = len(l.blobs)
+	if l.slotTable != nil {
+		m.ActiveSocketSlots = l.slotTable.Metrics().ActiveSlots
+	} else {
+		m.ActiveSocketSlots = len(l.sockets)
+	}
 	return m
 }
 
@@ -552,6 +560,26 @@ func (l *IdentityLedger) applyContributor(cookie uint64, actorKey ActorIdentityK
 	if cookie == 0 {
 		return
 	}
+	if l.slotTable != nil {
+		var prevAppID string
+		var hadValidOwner bool
+		if idx, exists := l.slotTable.cookieToSlot[cookie]; exists {
+			m := &l.slotTable.meta[idx]
+			s := &l.slotTable.slots[idx]
+			if m.owner != nil && atomic.LoadUint64(&s.Conflicts) == 0 {
+				hadValidOwner = true
+				prevAppID = m.owner.AppID
+			}
+		}
+		if !l.slotTable.publishContributor(l, cookie, actorKey, snap, reason) {
+			l.metrics.BudgetExceeded++
+			return
+		}
+		if hadValidOwner && snap != nil && prevAppID != snap.AppID {
+			l.metrics.ConflictingApp++
+		}
+		return
+	}
 	st := l.ensureSocket(cookie)
 	if actorKey != (ActorIdentityKey{}) {
 		st.Contributors[actorKey] = reason
@@ -595,34 +623,29 @@ func (l *IdentityLedger) applyContributor(cookie uint64, actorKey ActorIdentityK
 	l.metrics.ConflictingApp++
 }
 
-func (l *IdentityLedger) EnrichActor(key ActorKey, ev ActorEvidence, mat RawProcessMaterial) (*IdentitySnapshot, IdentityReason) {
+func (l *IdentityLedger) enrichActorSnapshotOnly(key ActorKey, ev ActorEvidence, mat RawProcessMaterial) (*IdentitySnapshot, IdentityReason) {
 	actorKey := ActorIdentityKey{TGID: key.TGID, StartBoottime: key.Start, ExecID: key.Exec}
 	if existing, ok := l.actors[actorKey]; ok {
 		if existing.Context.ExeDev == ev.Device && existing.Context.ExeIno == ev.Inode {
 			l.metrics.WarmRetained++
-			l.applyContributor(key.Cookie, actorKey, existing, existing.Reason)
 			return existing, existing.Reason
 		}
 		l.recordFailureMetric(ReasonContextChanged)
-		l.applyContributor(key.Cookie, actorKey, nil, ReasonContextChanged)
 		return nil, ReasonContextChanged
 	}
 
 	val, reason := ValidateProcessIdentity(key, ev, mat)
 	if reason != ReasonValidated {
 		l.recordFailureMetric(reason)
-		l.applyContributor(key.Cookie, actorKey, nil, reason)
 		return nil, reason
 	}
 	if len(l.actors) >= l.MaxSnapshots {
 		l.recordFailureMetric(ReasonBudgetExceeded)
-		l.applyContributor(key.Cookie, actorKey, nil, ReasonBudgetExceeded)
 		return nil, ReasonBudgetExceeded
 	}
 	blob, ok := l.acquireBlob(val.Path, val.AppID, val.Sandbox)
 	if !ok {
 		l.recordFailureMetric(ReasonBudgetExceeded)
-		l.applyContributor(key.Cookie, actorKey, nil, ReasonBudgetExceeded)
 		return nil, ReasonBudgetExceeded
 	}
 	l.revision++
@@ -640,8 +663,14 @@ func (l *IdentityLedger) EnrichActor(key ActorKey, ev ActorEvidence, mat RawProc
 	}
 	l.actors[actorKey] = snap
 	l.metrics.ColdEnriched++
-	l.applyContributor(key.Cookie, actorKey, snap, ReasonValidated)
 	return snap, ReasonValidated
+}
+
+func (l *IdentityLedger) EnrichActor(key ActorKey, ev ActorEvidence, mat RawProcessMaterial) (*IdentitySnapshot, IdentityReason) {
+	actorKey := ActorIdentityKey{TGID: key.TGID, StartBoottime: key.Start, ExecID: key.Exec}
+	snap, reason := l.enrichActorSnapshotOnly(key, ev, mat)
+	l.applyContributor(key.Cookie, actorKey, snap, reason)
+	return snap, reason
 }
 
 // ObserveWarmSend binds a new send attempt from an already-validated actor
@@ -759,6 +788,70 @@ func (l *IdentityLedger) ResolvePacket(readDec ReadDecision) PacketIdentityDecis
 		}
 	}
 	cookie := readDec.Packet.Cookie
+	if l.slotTable != nil {
+		if l.slotTable.metrics.EpochPoisoned {
+			l.metrics.UnknownPackets++
+			l.metrics.BudgetExceeded++
+			return PacketIdentityDecision{
+				Status: IdentityUnknown,
+				Reason: ReasonBudgetExceeded,
+				Cookie: cookie,
+			}
+		}
+		idx, ok := l.slotTable.cookieToSlot[cookie]
+		if !ok {
+			l.metrics.UnknownPackets++
+			l.metrics.IdentityUnretained++
+			return PacketIdentityDecision{
+				Status: IdentityUnknown,
+				Reason: ReasonIdentityUnretained,
+				Cookie: cookie,
+			}
+		}
+		s := &l.slotTable.slots[idx]
+		m := &l.slotTable.meta[idx]
+		v1 := atomic.LoadUint64(&s.Version)
+		c1 := atomic.LoadUint64(&s.Conflicts)
+		owner := m.owner
+		rev := atomic.LoadUint64(&s.EvidenceRevision)
+		flags := SocketSlotFlags(atomic.LoadUint32(&s.Flags))
+		lastReason := m.lastReason
+		v2 := atomic.LoadUint64(&s.Version)
+		c2 := atomic.LoadUint64(&s.Conflicts)
+		if v1 != v2 || v1 == 0 || c1 != 0 || c2 != 0 ||
+			(flags&SocketSlotValid) == 0 ||
+			(flags&(SocketSlotIncomplete|SocketSlotConflicting|SocketSlotPoisoned)) != 0 ||
+			owner == nil || owner.EvidenceRevision != rev {
+			status := IdentityUnknown
+			reason := lastReason
+			if reason == "" {
+				reason = ReasonIdentityUnretained
+			}
+			if reason == ReasonConflictingApp {
+				status = IdentityConflicting
+				l.metrics.ConflictingPackets++
+			} else {
+				l.metrics.UnknownPackets++
+			}
+			return PacketIdentityDecision{
+				Status:       status,
+				Reason:       reason,
+				Cookie:       cookie,
+				OwnerVersion: v2,
+				Conflicts:    c2,
+			}
+		}
+		owner.packetRefs++
+		l.metrics.KnownPackets++
+		return PacketIdentityDecision{
+			Status:       IdentityKnown,
+			Reason:       owner.Reason,
+			Cookie:       cookie,
+			OwnerVersion: v1,
+			Conflicts:    0,
+			Snapshot:     owner,
+		}
+	}
 	st, ok := l.sockets[cookie]
 	if !ok {
 		l.metrics.UnknownPackets++
@@ -837,6 +930,15 @@ func (l *IdentityLedger) ReleaseActor(key ActorIdentityKey) {
 }
 
 func (l *IdentityLedger) ReleaseSocket(cookie uint64) {
+	if l.slotTable != nil {
+		if idx, ok := l.slotTable.cookieToSlot[cookie]; ok {
+			m := &l.slotTable.meta[idx]
+			s := &l.slotTable.slots[idx]
+			m.socketAlive = false
+			atomic.StoreUint32(&s.Flags, atomic.LoadUint32(&s.Flags)|uint32(SocketSlotDestroyed))
+			l.slotTable.tryReclaimSlot(l, idx)
+		}
+	}
 	st, ok := l.sockets[cookie]
 	if !ok {
 		return
