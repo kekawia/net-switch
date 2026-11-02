@@ -56,23 +56,30 @@ and its native Windows platform implementation.
 
 - The unshipped `netswitch-cleanup` tool includes the Go runtime and golang.org/x/sys under the same BSD-3-Clause licenses as the helper.
 
-gVisor is copyright The gVisor Authors. Net Switch modifies eight TCP files,
+gVisor is copyright The gVisor Authors. Net Switch modifies eleven files,
 each with a modification notice. `third_party/gvisor-local-close.patch` contains
 the opt-in local-app close admission, TIME_WAIT handling, retained-buffer budget
 and buffer accounting hooks in five files. It also adds
 `dispatcher_netswitch_test.go`, marked "Net Switch addition, not upstream".
+`third_party/gvisor-provenance.patch` carries packet provenance across packet
+clones, conservative IPv4/IPv6 fragment reassembly and TCP forwarder requests in
+three files (`packet_buffer.go`, `reassembler.go` and `forwarder.go`), and adds
+`provenance_netswitch_test.go`, marked "Net Switch addition, not upstream".
 `third_party/gvisor-rto-recovery.patch` changes `rack.go` and `snd.go` to preserve
 TCP timeout recovery until its flight drains, independently of the opt-in hooks.
 `third_party/gvisor-sack-cache.patch` shares a bounded SACK node cache in
 `sack_scoreboard.go` so idle connections need no private node free list.
 The generator applies the reproducible patches in filename order. License and
 authors are preserved in the generated source and vendor trees. wireguard-go is
-copyright WireGuard LLC and is used unmodified for Linux TUN I/O. netlink and
-netns are used unmodified for Linux routing and network namespaces.
+copyright WireGuard LLC and is used unmodified for Linux TUN I/O. cilium/ebpf is
+copyright Nathan Sweet, Cloudflare and Authors of Cilium and is used unmodified
+for Linux eBPF program and map loading. netlink and netns are used unmodified for
+Linux routing and network namespaces.
 
 <!-- engine-modules:start -->
 Go 1.27.3 runtime and standard library: BSD-3-Clause (the toolchain's LICENSE and PATENTS).
 
+- github.com/cilium/ebpf `v0.22.0`, MIT; license: `vendor/github.com/cilium/ebpf/LICENSE`.
 - github.com/godbus/dbus/v5 `v5.2.4`, BSD-2-Clause; license: `vendor/github.com/godbus/dbus/v5/LICENSE`.
 - github.com/google/btree `v1.1.2`, Apache-2.0; license: `vendor/github.com/google/btree/LICENSE`.
 - github.com/vishvananda/netlink `v1.3.1`, Apache-2.0; license: `vendor/github.com/vishvananda/netlink/LICENSE`.
