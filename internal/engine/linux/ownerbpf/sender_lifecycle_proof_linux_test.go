@@ -427,7 +427,9 @@ func runSenderLifecycleChild() {
 		}
 
 	case "l2_cap_dropped_loader":
-		// Drop all effective and permitted capabilities and verify BPF load fails with EPERM/EACCES.
+		// Drop all effective and permitted capabilities on the locked OS thread
+		// and verify BPF load fails with capability denial.
+		runtime.LockOSThread()
 		hdr := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3, Pid: 0}
 		var data [2]unix.CapUserData
 		if err := unix.Capset(&hdr, &data[0]); err != nil {

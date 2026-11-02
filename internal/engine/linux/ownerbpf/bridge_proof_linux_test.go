@@ -290,9 +290,16 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 		cookies[i] = c
 	}
 	var wg sync.WaitGroup
-	var startSpin, midSpin atomic.Int32
+	var startSpin, midSpin, tailSpin0, tailSpin1, tailSpin2 atomic.Int32
 	var started, ended [senders]time.Time
 	errCh := make(chan error, senders)
+	abortSpins := func() {
+		startSpin.Add(-10)
+		midSpin.Add(-10)
+		tailSpin0.Add(-10)
+		tailSpin1.Add(-10)
+		tailSpin2.Add(-10)
+	}
 	spinBarrier := func(spin *atomic.Int32, phase string) error {
 		spin.Add(1)
 		deadline := time.Now().Add(5 * time.Second)
@@ -301,7 +308,7 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 				return fmt.Errorf("%s spin barrier aborted by peer", phase)
 			}
 			if iter&1023 == 1023 && time.Now().After(deadline) {
-				spin.Add(-10)
+				abortSpins()
 				return fmt.Errorf("%s spin barrier timed out after 5s (count=%d)", phase, spin.Load())
 			}
 		}
@@ -318,37 +325,59 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 			var set unix.CPUSet
 			set.Set(i)
 			if e := unix.SchedSetaffinity(0, &set); e != nil {
-				startSpin.Add(-10)
-				midSpin.Add(-10)
+				abortSpins()
 				errCh <- e
 				return
 			}
-			// Two-phase atomic spin barrier: both pinned sender threads must be
-			// actively running on CPUs 0 and 1 before either records started[i],
-			// and both must rendezvous mid-burst (after 300 sends, once the
-			// 500-packet TUN ring is already dropping) before either finishes.
+			// Atomic spin barriers: both pinned sender threads must be actively
+			// running on CPUs 0 and 1 before either records started[i], both
+			// rendezvous mid-burst (after 300 sends, once the 500-packet TUN
+			// ring is already dropping), and after 560 concurrent sends per CPU
+			// the final 40 sends per CPU run in turn so pfifo_fast's single-owner
+			// qdisc_run_begin cannot hand all post-full drops to one CPU.
 			if e := spinBarrier(&startSpin, "start"); e != nil {
-				midSpin.Add(-10)
 				errCh <- e
 				return
 			}
 			started[i] = time.Now()
 			defer func() { ended[i] = time.Now() }()
 			for j := range 600 {
-				if j == 300 {
+				switch j {
+				case 300:
 					if e := spinBarrier(&midSpin, "mid-burst"); e != nil {
 						errCh <- e
 						return
+					}
+				case 560:
+					if e := spinBarrier(&tailSpin0, "tail-0"); e != nil {
+						errCh <- e
+						return
+					}
+					if i == 1 {
+						if e := spinBarrier(&tailSpin1, "tail-1"); e != nil {
+							errCh <- e
+							return
+						}
 					}
 				}
 				var p [8]byte
 				binary.BigEndian.PutUint32(p[:4], uint32(i))
 				binary.BigEndian.PutUint32(p[4:], uint32(j))
 				if e := unix.Sendto(sockets[i], p[:], 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); e != nil {
-					midSpin.Add(-10)
+					abortSpins()
 					errCh <- e
 					return
 				}
+			}
+			if i == 0 {
+				if e := spinBarrier(&tailSpin1, "tail-1"); e != nil {
+					errCh <- e
+					return
+				}
+			}
+			if e := spinBarrier(&tailSpin2, "tail-2"); e != nil {
+				errCh <- e
+				return
 			}
 		}()
 	}
