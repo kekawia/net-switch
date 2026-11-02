@@ -67,7 +67,7 @@ jobs:
           go tool objdump -s 'ownerbpf.burstBarrier' dist/bridge-proof
       - name: Isolated kernel diagnostics (not complete P1/P2 qualification)
         run: |
-          sudo env GOMAXPROCS=2 NS_OWNERBPF_PROOF=1 NS_BRIDGE_OBJECT="$PWD/dist/ownerbpf/bridge_${{ matrix.target }}_bpfel.o" NS_BRIDGE_FAULT_OBJECT="$PWD/dist/ownerbpf/fault_${{ matrix.target }}_bpfel.o" unshare --net -- dist/bridge-proof -test.v -test.timeout=90s -test.run='^TestBridge'
+          sudo env GOMAXPROCS=2 NS_OWNERBPF_PROOF=1 NS_OWNERBPF_OBJECT="$PWD/dist/ownerbpf/proof_${{ matrix.target }}_bpfel.o" NS_BRIDGE_OBJECT="$PWD/dist/ownerbpf/bridge_${{ matrix.target }}_bpfel.o" NS_BRIDGE_FAULT_OBJECT="$PWD/dist/ownerbpf/fault_${{ matrix.target }}_bpfel.o" unshare --net -- dist/bridge-proof -test.v -test.timeout=3m -test.run='^(TestBridge|TestIdentity)'
 
   floor-5-8-amd64:
     needs: objects

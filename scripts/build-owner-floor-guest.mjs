@@ -197,7 +197,11 @@ async function buildArchInitramfs(lock, arch, outDir) {
 async function buildArchKernel(lock, arch, outDir) {
   const cfgProfile = lock.kernel.configs[arch];
   if (!cfgProfile) throw new Error(`Unsupported kernel arch ${arch}`);
-  const configFile = join(root, cfgProfile.path);
+  const expectedConfigRel = `tests/linux/ownerproof/kernel-5.8-${arch}.config`;
+  if (cfgProfile.path !== expectedConfigRel) {
+    throw new Error(`Unexpected kernel config path ${cfgProfile.path}, want ${expectedConfigRel}`);
+  }
+  const configFile = join(root, 'tests/linux/ownerproof', `kernel-5.8-${arch}.config`);
   const configBytes = await readFile(configFile);
   if (sha256(configBytes) !== cfgProfile.sha256) {
     throw new Error(`Kernel config hash mismatch for ${cfgProfile.path}`);

@@ -186,3 +186,16 @@ func CheckRead(b ReadBinding, r ReaderRegistration, s ReaderSlot, n int, readErr
 	}
 	return ReadDecision{Status: ReadCookie, Packet: p}
 }
+
+// Floor58ResolvedConfigSHA256 returns the single canonical SHA-256 digest of
+// the resolved upstream Linux v5.8 guest kernel .config for the given GOARCH.
+func Floor58ResolvedConfigSHA256(arch string) (string, bool) {
+	switch arch {
+	case "amd64":
+		return "42309a5b01aef7aec5a856561eef8c049dd247501b3edaad746382413aff9252", true
+	case "arm64":
+		return "8f2fd8ae8b40b3875083d636f8308d5b16e4b43c3e8abf1170780e6ea27e2a0b", true
+	default:
+		return "", false
+	}
+}

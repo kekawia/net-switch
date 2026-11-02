@@ -293,6 +293,20 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 	var startSpin, midSpin atomic.Int32
 	var started, ended [senders]time.Time
 	errCh := make(chan error, senders)
+	spinBarrier := func(spin *atomic.Int32, phase string) error {
+		spin.Add(1)
+		deadline := time.Now().Add(5 * time.Second)
+		for iter := 0; spin.Load() < senders; iter++ {
+			if spin.Load() < 0 {
+				return fmt.Errorf("%s spin barrier aborted by peer", phase)
+			}
+			if iter&1023 == 1023 && time.Now().After(deadline) {
+				spin.Add(-10)
+				return fmt.Errorf("%s spin barrier timed out after 5s (count=%d)", phase, spin.Load())
+			}
+		}
+		return nil
+	}
 	for i := range senders {
 		wg.Add(1)
 		go func() {
@@ -313,21 +327,18 @@ func TestBridgeConcurrentDrops(t *testing.T) {
 			// actively running on CPUs 0 and 1 before either records started[i],
 			// and both must rendezvous mid-burst (after 300 sends, once the
 			// 500-packet TUN ring is already dropping) before either finishes.
-			startSpin.Add(1)
-			for startSpin.Load() < senders {
-				if startSpin.Load() < 0 {
-					return
-				}
+			if e := spinBarrier(&startSpin, "start"); e != nil {
+				midSpin.Add(-10)
+				errCh <- e
+				return
 			}
 			started[i] = time.Now()
 			defer func() { ended[i] = time.Now() }()
 			for j := range 600 {
 				if j == 300 {
-					midSpin.Add(1)
-					for midSpin.Load() < senders {
-						if midSpin.Load() < 0 {
-							return
-						}
+					if e := spinBarrier(&midSpin, "mid-burst"); e != nil {
+						errCh <- e
+						return
 					}
 				}
 				var p [8]byte
@@ -770,8 +781,8 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		t.Fatalf("AF_PACKET TPACKET_V2 TX_RING did not record cookie_missing on CPU %d: state=%+v", f.cpu, states[f.cpu])
 	}
 	noCookieFrames, noCookieErr := f.r.ReadBurst(f.fd, 1)
-	if noCookieErr != nil || f.b.stopped || len(noCookieFrames) != 1 || noCookieFrames[0].Decision.Status != ReadUnknown || noCookieFrames[0].Decision.Rebuild {
-		t.Fatalf("uninitialized AF_PACKET skb (cookie == 0) was not classified as ReadUnknown with Rebuild=false: err=%v stopped=%t frames=%+v", noCookieErr, f.b.stopped, noCookieFrames)
+	if noCookieErr != nil || f.b.stopped || len(noCookieFrames) != 1 || noCookieFrames[0].Decision.Status != ReadUnknown || noCookieFrames[0].Decision.Rebuild || f.b.ReadUnknown.Load() != 1 {
+		t.Fatalf("uninitialized AF_PACKET skb (cookie == 0) was not classified as ReadUnknown with Rebuild=false: err=%v stopped=%t readUnknown=%d frames=%+v", noCookieErr, f.b.stopped, f.b.ReadUnknown.Load(), noCookieFrames)
 	}
 	_ = unix.Munmap(ringMem)
 	ringMem = nil
@@ -794,9 +805,10 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		t.Fatalf("shared-skb fault control did not record shared skb (users != 1) on CPU %d: state=%+v", f.cpu, states[f.cpu])
 	}
 	sharedFrames, sharedErr := f.r.ReadBurst(f.fd, 1)
-	if sharedErr != nil || f.b.stopped || len(sharedFrames) != 1 || sharedFrames[0].Decision.Status != ReadUnknown || sharedFrames[0].Decision.Rebuild {
-		t.Fatalf("shared skb (users != 1) was not classified as ReadUnknown with Rebuild=false: err=%v stopped=%t frames=%+v", sharedErr, f.b.stopped, sharedFrames)
+	if sharedErr != nil || f.b.stopped || len(sharedFrames) != 1 || sharedFrames[0].Decision.Status != ReadUnknown || sharedFrames[0].Decision.Rebuild || f.b.ReadUnknown.Load() != 2 {
+		t.Fatalf("shared skb (users != 1) was not classified as ReadUnknown with Rebuild=false: err=%v stopped=%t readUnknown=%d frames=%+v", sharedErr, f.b.stopped, f.b.ReadUnknown.Load(), sharedFrames)
 	}
+	readUnknownCount := f.b.ReadUnknown.Load()
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), BridgeFault{}, ebpf.UpdateAny); err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +971,7 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if deleted < 500 {
 		t.Fatalf("expected >=500 deleted records after close purge, got %d", deleted)
 	}
-	t.Logf("P2_LIFETIMES empty=pass zero_read=pass eintr=pass truncated=%d cross_cpu=%d cross_cpu_health_bound=1_read shared_skb_rejected=%d multi_burst_refused=4 nested_terminal=%d ambiguous_reads=1 pub_fault_cookie=%d purge_deleted=%d packet_map_empty=true", truncFrames[0].Decision.Packet.Length, otherCPU, sharedCount, nestedCount, c3, deleted)
+	t.Logf("P2_LIFETIMES empty=pass zero_read=pass eintr=pass truncated=%d cross_cpu_id=%d cross_cpu_health_bound=1_read shared_skb_rejected=%d read_unknown=%d multi_burst_refused=4 nested_terminal=%d ambiguous_reads=1 pub_fault_cookie=%d purge_deleted=%d packet_map_empty=true", truncFrames[0].Decision.Packet.Length, otherCPU, sharedCount, readUnknownCount, nestedCount, c3, deleted)
 }
 
 
