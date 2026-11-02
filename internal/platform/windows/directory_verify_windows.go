@@ -7,8 +7,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/AyoubAchour/net-switch/internal/wintrust"
-
 	"golang.org/x/sys/windows"
 )
 
@@ -17,10 +15,14 @@ import (
 // have live files and a working directory inside the tree. Provisioning uses
 // ProtectDirectory, which needs exclusive mutation access.
 func VerifyDirectory(path string) error {
-	path, err := filepath.Abs(path)
+	// Reject reparse ancestors and canonicalize path before looking up the
+	// certificate or resolving descendants. Ancestor handles remain pinned
+	// against rename throughout this read-only check.
+	path, release, err := pinMachineParent(path, true)
 	if err != nil {
 		return err
 	}
+	defer release()
 	certificate, err := directoryCertificate(path)
 	if err != nil {
 		return err
@@ -96,40 +98,6 @@ func VerifyDirectory(path string) error {
 			}
 		}
 		return nil
-	}
-	// Reject reparse ancestors before resolving descendants. Their handles
-	// remain pinned against rename throughout this read-only check.
-	var held []windows.Handle
-	defer func() {
-		for _, h := range held {
-			windows.CloseHandle(h)
-		}
-	}()
-	for parent := filepath.Dir(path); ; parent = filepath.Dir(parent) {
-		if err := wintrust.Path(parent, true); err != nil {
-			return err
-		}
-		p, err := windows.UTF16PtrFromString(parent)
-		if err != nil {
-			return err
-		}
-		// Metadata-only handles do not enforce delete sharing. Directory
-		// read access makes this handle pin the ancestor against renames.
-		h, err := windows.CreateFile(p, windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT|windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
-		if err != nil {
-			return err
-		}
-		held = append(held, h)
-		var info windows.ByHandleFileInformation
-		if err := windows.GetFileInformationByHandle(h, &info); err != nil {
-			return err
-		}
-		if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return fmt.Errorf("machine-store ancestor is a reparse point")
-		}
-		if filepath.Dir(parent) == parent {
-			break
-		}
 	}
 	if err := walk(path, true); err != nil {
 		return err
