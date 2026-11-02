@@ -61,9 +61,8 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 	if err != nil {
 		return err
 	}
-	certificate, err := directoryCertificate(path)
-	if err != nil {
-		return fmt.Errorf("read machine-folder provenance: %w", err)
+	if err := validateMachineLeaf(path, filepath.Base(path)); err != nil {
+		return err
 	}
 	var held []*os.File
 	defer func() {
@@ -117,9 +116,21 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 		}
 	}
 	for i := len(parents) - 1; i >= 0; i-- {
-		if _, err := open(parents[i], windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE); err != nil {
+		parentObj, err := open(parents[i], windows.FILE_LIST_DIRECTORY, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE)
+		if err != nil {
 			return err
 		}
+		if !parentObj.directory {
+			return fmt.Errorf("protected ancestor %s is not a directory", parents[i])
+		}
+	}
+	path, err = canonicalizeFromPinnedParent(windows.Handle(held[len(held)-1].Fd()), filepath.Base(path))
+	if err != nil {
+		return err
+	}
+	certificate, err := directoryCertificate(path)
+	if err != nil {
+		return fmt.Errorf("read machine-folder provenance: %w", err)
 	}
 	final, err := windows.SecurityDescriptorFromString("O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
 	if err != nil {
@@ -319,7 +330,9 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 			}
 		}
 		closeChildren(tree)
-		if certified && strings.HasPrefix(m.Quarantine, path+".untrusted-") && filepath.Dir(m.Quarantine) == filepath.Dir(path) {
+		if certified && len(m.Quarantine) > len(path+".untrusted-") &&
+			strings.EqualFold(m.Quarantine[:len(path+".untrusted-")], path+".untrusted-") &&
+			strings.EqualFold(filepath.Dir(m.Quarantine), filepath.Dir(path)) {
 			// A previous certificate write may have become visible before its
 			// flush failed. Reaffirm durability before moving the original.
 			if err := certifyDirectory(path, m.certificate()); err != nil {
@@ -504,7 +517,7 @@ func prepareDirectory(path string, log func(string), checkpoint func(string) err
 
 func parseDirectoryMarker(sd *windows.SECURITY_DESCRIPTOR, data []byte, identity, target, certificate string) (directoryMarker, bool) {
 	var m directoryMarker
-	if trustedMarkerSecurity(sd) && json.Unmarshal(data, &m) == nil && m.Identity == identity && m.Target == target && len(m.Nonce) == 64 {
+	if trustedMarkerSecurity(sd) && json.Unmarshal(data, &m) == nil && m.Identity == identity && strings.EqualFold(m.Target, target) && len(m.Nonce) == 64 {
 		if _, err := hex.DecodeString(m.Nonce); err == nil && certificate == m.certificate() {
 			return m, true
 		}

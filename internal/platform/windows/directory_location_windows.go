@@ -16,10 +16,11 @@ import (
 // ResolveMachineDirectory reads only the protected HKLM mapping. A recorded
 // physical store is authenticated on every resolution, never repaired in place.
 func ResolveMachineDirectory(path string) (string, error) {
-	path, err := filepath.Abs(path)
+	path, release, err := pinMachineParent(path, false)
 	if err != nil {
 		return "", err
 	}
+	defer release()
 	key, err := openDirectoryCertificates(false)
 	if errors.Is(err, registry.ErrNotExist) {
 		return path, nil
@@ -53,7 +54,7 @@ func prepareMachineDirectory(path string, beforePublish func(string) error) (str
 	if err != nil {
 		return "", err
 	}
-	path, err = filepath.Abs(path)
+	path, err = canonicalMachinePath(path)
 	if err != nil {
 		return "", err
 	}

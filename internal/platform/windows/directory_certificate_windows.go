@@ -19,6 +19,9 @@ import (
 const directoryCertificateKey = `SOFTWARE\NetSwitch.ControlDirectoryCertificates.v1`
 
 func directoryCertificateName(path string) string {
+	if canonical, err := canonicalMachinePath(path); err == nil {
+		path = canonical
+	}
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(strings.ToLower(path))))
 }
 

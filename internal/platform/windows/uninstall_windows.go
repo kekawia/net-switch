@@ -30,12 +30,13 @@ func PrepareMachineUninstall(path string, log func(string)) error {
 }
 
 func machineCleanupName(name, base string) bool {
-	if name == base || name == base+".migrating" {
+	if strings.EqualFold(name, base) || strings.EqualFold(name, base+".migrating") {
 		return true
 	}
-	for _, prefix := range []string{base + ".untrusted-", base + ".migrating.untrusted-"} {
-		if tail, ok := strings.CutPrefix(name, prefix); ok && len(tail) == 24 {
-			_, err := hex.DecodeString(tail)
+	for _, suffix := range []string{".untrusted-", ".migrating.untrusted-"} {
+		prefix := base + suffix
+		if len(name) == len(prefix)+24 && strings.EqualFold(name[:len(prefix)], prefix) {
+			_, err := hex.DecodeString(name[len(prefix):])
 			return err == nil
 		}
 	}
@@ -48,6 +49,9 @@ func machineCleanupName(name, base string) bool {
 func CleanupMachineData(path string, log func(string)) error {
 	path, err := filepath.Abs(path)
 	if err != nil {
+		return err
+	}
+	if err := validateMachineLeaf(path, filepath.Base(path)); err != nil {
 		return err
 	}
 	open := func(name string, access uint32) (*os.File, windows.ByHandleFileInformation, error) {
@@ -92,6 +96,10 @@ func CleanupMachineData(path string, log func(string)) error {
 			return fmt.Errorf("cleanup ancestor is not a plain directory: %s", ancestors[i])
 		}
 		parent = f
+	}
+	path, err = canonicalizeFromPinnedParent(windows.Handle(parent.Fd()), filepath.Base(path))
+	if err != nil {
+		return err
 	}
 	var problems []error
 	var remove func(string) (bool, error)
