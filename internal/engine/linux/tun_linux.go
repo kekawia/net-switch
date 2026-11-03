@@ -240,11 +240,6 @@ func openTun(v tunObject) (*Tun, error) {
 		netns:   uint32(nsStat.Ino),
 		rawConn: rawConn,
 		mtu:     v.MTU,
-		sizes:   make([]int, device.BatchSize()),
-		bufs:    make([][]byte, device.BatchSize()),
-	}
-	for i := range t.bufs {
-		t.bufs[i] = make([]byte, 65535)
 	}
 	t.prepareBatchStorage()
 	ok = true
@@ -280,15 +275,18 @@ func (t *Tun) drainNonblockCountLocked() (uint64, error) {
 		return 0, nil
 	}
 	scratch := t.writeBuffer[:]
-	if len(t.bufs) > 0 && len(t.bufs[0]) > len(scratch) {
+	if len(t.provRawBufs) > 0 && len(t.provRawBufs[0]) > len(scratch) {
+		scratch = t.provRawBufs[0]
+	} else if len(t.bufs) > 0 && len(t.bufs[0]) > len(scratch) {
 		scratch = t.bufs[0]
 	}
+	limit := uint64(max(t.txqlen, 1024) + 64)
 	var (
 		drained  uint64
 		drainErr error
 	)
 	ctlErr := t.rawConn.Control(func(fd uintptr) {
-		for {
+		for drained < limit {
 			_, err := unix.Read(int(fd), scratch)
 			if err == nil {
 				drained++
@@ -468,6 +466,14 @@ func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
 	if t.next == t.count {
 		if t.closedRead != nil {
 			return 0, t.closedRead
+		}
+		if len(t.bufs) == 0 {
+			batchSize := t.device.BatchSize()
+			t.sizes = make([]int, batchSize)
+			t.bufs = make([][]byte, batchSize)
+			for i := range t.bufs {
+				t.bufs[i] = make([]byte, 65535)
+			}
 		}
 		if stop := t.interrupt(ctx); stop != nil {
 			defer stop()
@@ -660,6 +666,9 @@ func (t *Tun) ReadPacketWithProvenance(ctx context.Context, out []byte) (int, an
 		return 0, nil, nil
 	}
 	copy(out, t.provArena[item.offset:item.offset+item.length])
+	if item.env == nil {
+		return item.length, nil, nil
+	}
 	return item.length, item.env, nil
 }
 func (t *Tun) WritePacket(ctx context.Context, packet []byte) error {

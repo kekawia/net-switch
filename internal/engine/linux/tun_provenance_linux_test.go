@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/linux/ownerbpf"
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -596,5 +597,145 @@ func TestTunProvenanceLiveEpochRebuildRecoversWithoutAdmittingFaultedBurst(t *te
 	unbind()
 	if !epoch2Src.closed {
 		t.Fatal("unbind did not close rebuilt epoch 2 reader")
+	}
+}
+
+func TestNeedsPacketProvenanceEnvelopeAndUntypedNilReturn(t *testing.T) {
+	rt := ownerbpf.NewProvenanceRuntime(3, ownerbpf.NewIdentityLedger(16, 16<<10), ownerbpf.NewSocketSlotTable(16))
+	defer rt.Close()
+	_ = enrichTunTestActor(t, rt, 0x77, 4401, 600_000_000, "/usr/bin/AppStream")
+
+	owners := &Owners{}
+	owners.ebpf.runtime = rt
+
+	src4 := netip.MustParseAddr("198.18.0.1").As4()
+	dst4 := netip.MustParseAddr("198.51.100.10").As4()
+	src6 := netip.MustParseAddr("fdfe:dcba:9876::1").As16()
+	dst6 := netip.MustParseAddr("2001:db8::42").As16()
+
+	makeTCP4 := func(flagsFrag uint16, tcpFlags uint8, payload []byte) []byte {
+		raw := make([]byte, ownerbpf.VirtioNetHdrLen+40+len(payload))
+		ip4 := raw[ownerbpf.VirtioNetHdrLen:]
+		ip4[0] = 0x45
+		binary.BigEndian.PutUint16(ip4[2:4], uint16(40+len(payload)))
+		binary.BigEndian.PutUint16(ip4[4:6], 0x1234)
+		binary.BigEndian.PutUint16(ip4[6:8], flagsFrag)
+		ip4[8] = 64
+		ip4[9] = unix.IPPROTO_TCP
+		copy(ip4[12:16], src4[:])
+		copy(ip4[16:20], dst4[:])
+		binary.BigEndian.PutUint16(ip4[10:12], ^fold16(csum16(0, ip4[:20])))
+		tcp := ip4[20:]
+		binary.BigEndian.PutUint16(tcp[0:2], 55000)
+		binary.BigEndian.PutUint16(tcp[2:4], 443)
+		binary.BigEndian.PutUint32(tcp[4:8], 9000)
+		tcp[12] = 5 << 4
+		tcp[13] = tcpFlags
+		copy(tcp[20:], payload)
+		return raw
+	}
+
+	makeTCP6 := func(nextHdr uint8, tcpFlags uint8) []byte {
+		ext := 0
+		if nextHdr != unix.IPPROTO_TCP {
+			ext = 8
+		}
+		raw := make([]byte, ownerbpf.VirtioNetHdrLen+40+ext+20)
+		ip6 := raw[ownerbpf.VirtioNetHdrLen:]
+		ip6[0] = 0x60
+		binary.BigEndian.PutUint16(ip6[4:6], uint16(ext+20))
+		ip6[6] = nextHdr
+		ip6[7] = 64
+		copy(ip6[8:24], src6[:])
+		copy(ip6[24:40], dst6[:])
+		tcp := ip6[40+ext:]
+		if ext > 0 {
+			ip6[40] = unix.IPPROTO_TCP
+			ip6[41] = 0
+		}
+		binary.BigEndian.PutUint16(tcp[0:2], 55001)
+		binary.BigEndian.PutUint16(tcp[2:4], 443)
+		tcp[12] = 5 << 4
+		tcp[13] = tcpFlags
+		return raw
+	}
+
+	cleanDec := ownerbpf.ReadDecision{
+		Status: ownerbpf.ReadCookie,
+		Packet: ownerbpf.PacketRecord{Epoch: 3, Cookie: 0x77, Serial: 1},
+	}
+	missingDec := ownerbpf.ReadDecision{Status: ownerbpf.ReadMissing}
+
+	// Established IPv4 TCP with DF (0x4000) and ACK|PSH (0x18) skips envelope allocation.
+	estTCP4 := makeTCP4(0x4000, 0x18, []byte("established-payload"))
+	if needsPacketProvenanceEnvelope(estTCP4[ownerbpf.VirtioNetHdrLen:], cleanDec) {
+		t.Fatal("established DF IPv4 TCP ACK|PSH must not allocate provenance envelope")
+	}
+	// Established IPv6 TCP ACK without extension headers skips envelope allocation.
+	estTCP6 := makeTCP6(unix.IPPROTO_TCP, 0x10)
+	if needsPacketProvenanceEnvelope(estTCP6[ownerbpf.VirtioNetHdrLen:], cleanDec) {
+		t.Fatal("established IPv6 TCP ACK must not allocate provenance envelope")
+	}
+	// SYN, SYN+ACK, fragmented TCP, IPv6 extension headers, and missing-cookie frames must allocate envelopes.
+	synTCP4 := makeTCP4(0x4000, 0x02, []byte("tfo"))
+	synAckTCP4 := makeTCP4(0x4000, 0x12, nil)
+	fragTCP4 := makeTCP4(0x2000, 0x10, []byte("frag0000"))
+	fragTailTCP4 := makeTCP4(0x0002, 0x10, []byte("fragtail"))
+	synTCP6 := makeTCP6(unix.IPPROTO_TCP, 0x02)
+	extTCP6 := makeTCP6(60, 0x10) // Destination Options before TCP
+	for name, frame := range map[string][]byte{
+		"synTCP4":      synTCP4,
+		"synAckTCP4":   synAckTCP4,
+		"fragTCP4":     fragTCP4,
+		"fragTailTCP4": fragTailTCP4,
+		"synTCP6":      synTCP6,
+		"extTCP6":      extTCP6,
+	} {
+		if !needsPacketProvenanceEnvelope(frame[ownerbpf.VirtioNetHdrLen:], cleanDec) {
+			t.Fatalf("%s unexpectedly skipped provenance envelope", name)
+		}
+	}
+	if !needsPacketProvenanceEnvelope(estTCP4[ownerbpf.VirtioNetHdrLen:], missingDec) {
+		t.Fatal("missing-cookie TCP segment must keep provenance envelope path")
+	}
+
+	// Verify ReadPacketWithProvenance returns untyped nil (prov == nil) when onProvenanceBurst skips AcquirePacket.
+	src := &fakeProvBurstSource{
+		bursts: []fakeProvBurst{{
+			frames: []fakeProvFrame{
+				{raw: synTCP4, decision: cleanDec},
+				{raw: estTCP4, decision: cleanDec},
+				{raw: estTCP6, decision: cleanDec},
+			},
+		}},
+	}
+	tun := &Tun{mtu: 9000}
+	tun.AttachProvenanceReader(src, owners.onProvenanceBurst)
+	unbind, err := tun.BindPumpThread()
+	if err != nil {
+		t.Fatalf("BindPumpThread: %v", err)
+	}
+	defer unbind()
+
+	ctx := context.Background()
+	buf := make([]byte, 9000)
+
+	nSyn, pSyn, err := tun.ReadPacketWithProvenance(ctx, buf)
+	if err != nil || nSyn == 0 || pSyn == nil {
+		t.Fatalf("SYN read: n=%d p=%#v err=%v", nSyn, pSyn, err)
+	}
+	if owner, st := pSyn.(*ownerbpf.ProvenanceEnvelope).ValidateForwarding(); st != ownerbpf.EnvelopeKnown || owner.AppID != "/usr/bin/AppStream" {
+		t.Fatalf("SYN ValidateForwarding: status=%s owner=%+v", st, owner)
+	}
+
+	for idx, label := range []string{"estTCP4", "estTCP6"} {
+		_ = idx
+		nEst, pEst, err := tun.ReadPacketWithProvenance(ctx, buf)
+		if err != nil || nEst == 0 {
+			t.Fatalf("%s read: n=%d err=%v", label, nEst, err)
+		}
+		if pEst != nil {
+			t.Fatalf("%s returned non-nil interface (%T = %#v), want untyped nil", label, pEst, pEst)
+		}
 	}
 }

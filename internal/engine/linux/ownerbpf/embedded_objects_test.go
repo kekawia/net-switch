@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"runtime"
 	"testing"
@@ -107,19 +108,19 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 	for _, progName := range []string{"consume", "freed"} {
 		cp := bridgeSpec.Programs[progName].Copy()
 		insns := cp.Instructions
-		if len(insns) != 230 {
-			t.Fatalf("%s patched instruction count = %d, want 230", progName, len(insns))
+		if len(insns) != 216 {
+			t.Fatalf("%s patched instruction count = %d, want 216", progName, len(insns))
 		}
 		if btf.FuncMetadata(&insns[0]) == nil || insns[0].Source() == nil {
 			t.Fatalf("%s insns[0] lost BTF FuncMetadata or initial LineInfo", progName)
 		}
-		if !insns[18].IsLoadFromMap() || insns[18].Reference() != "packets" {
-			t.Fatalf("%s insns[18] = %v (ref=%q), want LoadMapPtr packets immediately after config/cpu_state lookup", progName, insns[18], insns[18].Reference())
+		if !insns[4].IsLoadFromMap() || insns[4].Reference() != "packets" {
+			t.Fatalf("%s insns[4] = %v (ref=%q), want LoadMapPtr packets immediately on entry", progName, insns[4], insns[4].Reference())
 		}
 		probeReads := 0
 		for idx, ins := range insns {
 			if ins.OpCode == asm.Call.Op(asm.ImmSource) && ins.Constant == int64(asm.FnProbeReadKernel) {
-				if idx < 18 {
+				if idx < 4 {
 					t.Fatalf("%s retained pre-packets probe_read_kernel at insn %d", progName, idx)
 				}
 				probeReads++
@@ -129,7 +130,10 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 			t.Fatalf("%s probe_read_kernel count = %d, want 1 (task->start_boottime only)", progName, probeReads)
 		}
 		assertAllInstructionsReachableAndValidJumps(t, progName, insns)
-		for i, mapName := range []string{"config", "cpu_state", "packets", "health", "readers", "read_slots"} {
+		if err := cp.Instructions.AssociateMap("cpu_state", fakeFD(99)); !errors.Is(err, asm.ErrUnreferencedSymbol) {
+			t.Fatalf("%s AssociateMap(cpu_state) = %v, want ErrUnreferencedSymbol", progName, err)
+		}
+		for i, mapName := range []string{"config", "packets", "health", "readers", "read_slots"} {
 			if err := cp.Instructions.AssociateMap(mapName, fakeFD(20+i)); err != nil {
 				t.Fatalf("%s AssociateMap(%s): %v", progName, mapName, err)
 			}
@@ -139,8 +143,8 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 			if err := cp.Instructions.Marshal(&encoded, binary.LittleEndian); err != nil {
 				t.Fatalf("%s Marshal patched instructions: %v", progName, err)
 			}
-			if encoded.Len() != 239*asm.InstructionSize {
-				t.Fatalf("%s encoded byte len = %d, want %d", progName, encoded.Len(), 239*asm.InstructionSize)
+			if encoded.Len() != 224*asm.InstructionSize {
+				t.Fatalf("%s encoded byte len = %d, want %d", progName, encoded.Len(), 224*asm.InstructionSize)
 			}
 		}
 	}

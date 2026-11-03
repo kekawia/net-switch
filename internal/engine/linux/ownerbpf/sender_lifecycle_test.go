@@ -558,3 +558,92 @@ func TestLifecycleSaturationChurnAndBaselineReturn(t *testing.T) {
 		t.Fatalf("unexpected CapacityProfile = %+v", prof)
 	}
 }
+
+func assertSlotMetricsMatchScan(t *testing.T, slots *SocketSlotTable) {
+	t.Helper()
+	got := slots.Metrics()
+	var wantActive, wantLive, wantRetained int
+	for i := uint32(0); i < slots.highWater; i++ {
+		m := slots.meta[i]
+		if !m.inUse {
+			continue
+		}
+		wantActive++
+		if m.socketAlive {
+			wantLive++
+		} else if m.envelopeRefs > 0 {
+			wantRetained++
+		}
+	}
+	if got.ActiveSlots != wantActive || got.LiveSockets != wantLive || got.RetainedSlots != wantRetained {
+		t.Fatalf("O(1) slot metrics = (active=%d live=%d retained=%d), scan want (%d, %d, %d)",
+			got.ActiveSlots, got.LiveSockets, got.RetainedSlots, wantActive, wantLive, wantRetained)
+	}
+}
+
+func TestLazySocketSlotTableGrowthAndO1Metrics(t *testing.T) {
+	slots := NewSocketSlotTable(DefaultEngineMaxSocketSlots)
+	if len(slots.meta) != 0 || slots.highWater != 0 || len(slots.freeSlots) != 0 {
+		t.Fatalf("fresh lazy SocketSlotTable allocated upfront slices: meta=%d highWater=%d freeSlots=%d",
+			len(slots.meta), slots.highWater, len(slots.freeSlots))
+	}
+	ledger := NewIdentityLedger(1024, 256<<10)
+	rt := NewProvenanceRuntime(1, ledger, slots)
+	defer rt.Close()
+	assertSlotMetricsMatchScan(t, slots)
+
+	dev := EncodeKernelDev(8, 1)
+	const total = 300
+	var pinned []ForwardEnvelope
+	for i := 1; i <= total; i++ {
+		cookie := uint64(20_000 + i)
+		key, ev, mat := validFixtureActor(cookie, uint32(30_000+i), uint64(700_000+i), 1, dev, uint64(90_000+i), "/usr/bin/lazy-slot-app")
+		if _, reason := rt.EnrichActor(key, ev, mat); reason != ReasonValidated {
+			t.Fatalf("EnrichActor(%d) = %v", i, reason)
+		}
+		if i%3 == 0 {
+			env := ledger.ResolvePacketEnvelope(ReadDecision{
+				Status: ReadCookie,
+				Packet: PacketRecord{Cookie: cookie, Serial: uint64(i)},
+			})
+			pinned = append(pinned, env, ledger.CloneEnvelope(env))
+		}
+	}
+	if slots.highWater != total || len(slots.meta) != 512 {
+		t.Fatalf("after %d sockets: highWater=%d len(meta)=%d, want highWater=%d len(meta)=512",
+			total, slots.highWater, len(slots.meta), total)
+	}
+	assertSlotMetricsMatchScan(t, slots)
+
+	// Close half the sockets while envelopes remain pinned on every 3rd socket.
+	for i := 1; i <= total/2; i++ {
+		rt.ReleaseSocket(uint64(20_000 + i))
+	}
+	assertSlotMetricsMatchScan(t, slots)
+	if sm := slots.Metrics(); sm.LiveSockets != total/2 || sm.RetainedSlots == 0 {
+		t.Fatalf("expected live=%d and retained>0, got %+v", total/2, sm)
+	}
+
+	// Stage and discard an uncommitted cork on a recycled slot.
+	corkKey, corkEv, corkMat := validFixtureActor(99_999, 40_001, 800_001, 1, dev, 99_001, "/usr/bin/cork-lazy")
+	rt.StageCorkContributor(corkKey, corkEv, corkMat)
+	assertSlotMetricsMatchScan(t, slots)
+	rt.DiscardCork(99_999)
+	assertSlotMetricsMatchScan(t, slots)
+
+	// AdvanceEpoch destroys remaining live sockets while keeping envelope-pinned slots retained.
+	rt.AdvanceEpoch(2)
+	assertSlotMetricsMatchScan(t, slots)
+	if sm := slots.Metrics(); sm.LiveSockets != 0 || sm.RetainedSlots == 0 {
+		t.Fatalf("after AdvanceEpoch with pinned envelopes: %+v, want LiveSockets=0 RetainedSlots>0", sm)
+	}
+
+	// Release all pinned envelopes -> all slots reclaim to zero active/live/retained without growing highWater.
+	for i := range pinned {
+		ledger.ReleaseEnvelope(&pinned[i])
+	}
+	assertSlotMetricsMatchScan(t, slots)
+	if sm := slots.Metrics(); sm.ActiveSlots != 0 || sm.LiveSockets != 0 || sm.RetainedSlots != 0 {
+		t.Fatalf("after releasing all envelopes: %+v, want all zero", sm)
+	}
+}

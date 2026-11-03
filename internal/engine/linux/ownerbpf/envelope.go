@@ -39,7 +39,10 @@ func FormatCookieGeneration(cookie uint64) string {
 }
 
 func snapshotToOwner(snap *IdentitySnapshot, cookie uint64) platform.Owner {
-	gen := FormatCookieGeneration(cookie)
+	return snapshotToOwnerWithGen(snap, FormatCookieGeneration(cookie))
+}
+
+func snapshotToOwnerWithGen(snap *IdentitySnapshot, gen string) platform.Owner {
 	if snap == nil {
 		return platform.Owner{Generation: gen}
 	}
@@ -128,7 +131,7 @@ func NewProvenanceRuntime(epoch uint64, ledger *IdentityLedger, slots *SocketSlo
 		ledger:          ledger,
 		slots:           slots,
 		classifier:      NewKernelControlClassifier(),
-		cookies:         make(map[uint64]trackedCookie, min(slots.MaxSlots, 4096)),
+		cookies:         make(map[uint64]trackedCookie, min(slots.MaxSlots, 256)),
 		actorRefCookies: make(map[ActorIdentityKey]int),
 	}
 	rt.epoch.Store(epoch)
@@ -209,7 +212,7 @@ func (rt *ProvenanceRuntime) AdvanceEpoch(newEpoch uint64) {
 	rt.epochPoisoned.Store(false)
 	if rt.slots != nil {
 		rt.slots.metrics.EpochPoisoned = false
-		for idx := range rt.slots.meta {
+		for idx := uint32(0); idx < rt.slots.highWater; idx++ {
 			m := &rt.slots.meta[idx]
 			if !m.inUse {
 				continue
@@ -217,10 +220,12 @@ func (rt *ProvenanceRuntime) AdvanceEpoch(newEpoch uint64) {
 			s := &rt.slots.slots[idx]
 			cookie := atomic.LoadUint64(&s.Cookie)
 			delete(rt.slots.cookieToSlot, cookie)
+			before := *m
 			m.socketAlive = false
+			rt.slots.updateSlotMetrics(before, *m)
 			flags := SocketSlotFlags(atomic.LoadUint32(&s.Flags))
 			atomic.StoreUint32(&s.Flags, uint32((flags&^SocketSlotValid)|SocketSlotDestroyed))
-			rt.slots.tryReclaimSlot(rt.ledger, uint32(idx))
+			rt.slots.tryReclaimSlot(rt.ledger, idx)
 		}
 	}
 	if rt.ledger != nil {
@@ -696,7 +701,7 @@ func (rt *ProvenanceRuntime) LookupLiveCookieOwner(cookie uint64) (platform.Owne
 		return platform.Owner{Generation: gen}, IdentityUnknown, false
 	}
 	idx, ok := rt.slots.cookieToSlot[cookie]
-	if !ok || int(idx) >= len(rt.slots.slots) {
+	if !ok || int(idx) >= int(rt.slots.highWater) || int(idx) >= len(rt.slots.meta) || int(idx) >= len(rt.slots.slots) {
 		return platform.Owner{Generation: gen}, IdentityUnknown, false
 	}
 	s := &rt.slots.slots[idx]
@@ -720,7 +725,7 @@ func (rt *ProvenanceRuntime) LookupLiveCookieOwner(cookie uint64) (platform.Owne
 	if v1 == v2 && v1 != 0 && c1 == 0 && c2 == 0 && (flags&SocketSlotValid) != 0 &&
 		(flags&(SocketSlotIncomplete|SocketSlotPoisoned)) == 0 &&
 		m.owner != nil && m.owner.EvidenceRevision == rev {
-		return snapshotToOwner(m.owner, cookie), IdentityKnown, true
+		return snapshotToOwnerWithGen(m.owner, gen), IdentityKnown, true
 	}
 	return platform.Owner{Generation: gen}, IdentityUnknown, true
 }
@@ -803,7 +808,7 @@ func (rt *ProvenanceRuntime) AcquirePacket(pkt []byte, readDec ReadDecision) *Pr
 			env.Reason = fwd.Identity.Reason
 		case fwd.Identity.Status == IdentityKnown && fwd.Identity.Snapshot != nil:
 			env.Status = EnvelopeKnown
-			env.Owner = snapshotToOwner(fwd.Identity.Snapshot, cookie)
+			env.Owner = snapshotToOwnerWithGen(fwd.Identity.Snapshot, gen)
 			env.EvidenceRevision = fwd.Identity.Snapshot.EvidenceRevision
 			env.Reason = fwd.Identity.Reason
 		case fwd.Identity.Status == IdentityConflicting:

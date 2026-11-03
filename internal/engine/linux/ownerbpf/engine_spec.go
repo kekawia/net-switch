@@ -102,13 +102,12 @@ func PrepareEngineBridgeSpec(actualQueue, cpus, readers uint64) (*ebpf.Collectio
 	return spec, packetSlots, nil
 }
 
-// stripUnusedBridgeTerminalCPUStats removes the fixture-only cpu_state.consumes
-// and cpu_state.frees skb->dev/ifindex/netns inspection block (insns[16..58] and
-// its out-of-line counter increment insns[190..195]) from production consume and
-// freed programs. Without this, every consume_skb and kfree_skb across the host
-// executes four bpf_probe_read_kernel calls before checking Maps["packets"],
-// inflating the raw_tracepoint prog->active window by ~40x under plain process
-// context where softirqs and (on Linux 7.0+) task preemption remain enabled.
+// stripUnusedBridgeTerminalCPUStats rewrites production consume and freed so
+// Maps["packets"] is checked immediately on entry before any config lookup, and
+// removes all fixture-only cpu_state lookups, skb->dev probe reads, and counter
+// updates. Non-TUN skbs exit after one hash lookup with zero helper calls beyond
+// bpf_map_lookup_elem(&packets), minimizing the raw_tracepoint prog->active
+// window on Linux 7.0+ where task preemption remains enabled.
 func stripUnusedBridgeTerminalCPUStats(name string, prog *ebpf.ProgramSpec) error {
 	if prog == nil {
 		return fmt.Errorf("embedded bridge %s program missing", name)
@@ -122,6 +121,8 @@ func stripUnusedBridgeTerminalCPUStats(name string, prog *ebpf.ProgramSpec) erro
 		wantAtomicOffset = 64
 	}
 	if insns[0].OpCode != asm.LoadMemOp(asm.DWord) || insns[0].Dst != asm.R7 || insns[0].Src != asm.R1 || insns[0].Offset != 0 ||
+		insns[1].OpCode != asm.Mov.Op(asm.ImmSource) || insns[1].Dst != asm.R1 || insns[1].Constant != 0 ||
+		insns[2].OpCode != asm.StoreMemOp(asm.Word) || insns[2].Dst != asm.RFP || insns[2].Src != asm.R1 || insns[2].Offset != -8 ||
 		insns[3].OpCode != asm.StoreMemOp(asm.DWord) || insns[3].Dst != asm.RFP || insns[3].Src != asm.R7 || insns[3].Offset != -16 ||
 		!insns[6].IsLoadFromMap() || insns[6].Reference() != "config" ||
 		!insns[10].IsLoadFromMap() || insns[10].Reference() != "cpu_state" ||
@@ -142,23 +143,114 @@ func stripUnusedBridgeTerminalCPUStats(name string, prog *ebpf.ProgramSpec) erro
 			return fmt.Errorf("embedded bridge %s expected probe_read_kernel at insn %d", name, callIdx)
 		}
 	}
+	if insns[104].OpCode != asm.JEq.Op(asm.ImmSource) || insns[104].Dst != asm.R0 || insns[104].Constant != 0 || insns[104].Offset != 13 ||
+		insns[116].OpCode != asm.Ja.Op(asm.ImmSource) || insns[116].Offset != 2 ||
+		insns[117].OpCode != asm.Mov.Op(asm.ImmSource) || insns[117].Dst != asm.R1 || insns[117].Constant != 1 ||
+		insns[118].Dst != asm.R8 || insns[118].Src != asm.R1 || insns[118].Offset != 80 ||
+		insns[119].OpCode != asm.Call.Op(asm.ImmSource) || insns[119].Constant != int64(asm.FnGetCurrentPidTgid) {
+		return fmt.Errorf("embedded bridge %s packets-erase cpu_state.deleted signature mismatch", name)
+	}
+	if insns[138].OpCode != asm.LoadMemOp(asm.DWord) || insns[138].Dst != asm.R2 || insns[138].Src != asm.R6 || insns[138].Offset != 8 ||
+		insns[139].OpCode != asm.JNE.Op(asm.RegSource) || insns[139].Dst != asm.R9 || insns[139].Src != asm.R2 || insns[139].Offset != 140 ||
+		insns[140].OpCode != asm.StoreMemOp(asm.DWord) || insns[140].Dst != asm.RFP || insns[140].Src != asm.R0 || insns[140].Offset != -192 ||
+		insns[141].OpCode != asm.StoreMemOp(asm.Word) || insns[141].Dst != asm.RFP || insns[141].Src != asm.R1 || insns[141].Offset != -116 ||
+		insns[142].OpCode != asm.Mov.Op(asm.RegSource) || insns[142].Dst != asm.R2 || insns[142].Src != asm.RFP {
+		return fmt.Errorf("embedded bridge %s reader-epoch check signature mismatch", name)
+	}
+	if insns[164].OpCode != asm.LoadMemOp(asm.DWord) || insns[164].Dst != asm.R1 || insns[164].Src != asm.R6 || insns[164].Offset != 32 ||
+		insns[165].OpCode != asm.JEq.Op(asm.ImmSource) || insns[165].Dst != asm.R1 || insns[165].Constant != 0 || insns[165].Offset != 4 ||
+		insns[166].OpCode != asm.LoadMemOp(asm.DWord) || insns[166].Dst != asm.R2 || insns[166].Src != asm.RFP || insns[166].Offset != -152 ||
+		insns[167].OpCode != asm.JNE.Op(asm.RegSource) || insns[167].Dst != asm.R2 || insns[167].Src != asm.R1 || insns[167].Offset != 2 ||
+		insns[168].OpCode != asm.Mov.Op(asm.ImmSource) || insns[168].Dst != asm.R1 || insns[168].Constant != 1 ||
+		insns[169].Dst != asm.R8 || insns[169].Src != asm.R1 || insns[169].Offset != 120 {
+		return fmt.Errorf("embedded bridge %s cpu_state.nested signature mismatch", name)
+	}
 	if insns[189].OpCode != asm.Ja.Op(asm.ImmSource) || insns[189].Offset != 84 ||
 		insns[190].OpCode != asm.LoadMemOp(asm.Word) || insns[190].Dst != asm.R1 || insns[190].Src != asm.R6 || insns[190].Offset != 20 ||
 		insns[191].OpCode != asm.LoadMemOp(asm.Word) || insns[191].Dst != asm.R2 || insns[191].Src != asm.RFP || insns[191].Offset != -128 ||
 		insns[192].OpCode != asm.JNE.Op(asm.RegSource) || insns[192].Dst != asm.R2 || insns[192].Src != asm.R1 || insns[192].Offset != -140 ||
 		insns[193].OpCode != asm.Mov.Op(asm.ImmSource) || insns[193].Dst != asm.R1 || insns[193].Constant != 1 ||
 		insns[194].Dst != asm.R8 || insns[194].Src != asm.R1 || insns[194].Offset != wantAtomicOffset ||
-		insns[195].OpCode != asm.Ja.Op(asm.ImmSource) || insns[195].Offset != -143 {
+		insns[195].OpCode != asm.Ja.Op(asm.ImmSource) || insns[195].Offset != -143 ||
+		insns[277].OpCode != asm.Mov.Op(asm.ImmSource) || insns[277].Dst != asm.R0 || insns[277].Constant != 0 ||
+		insns[278].OpCode != asm.Exit.Op(asm.ImmSource) {
 		return fmt.Errorf("embedded bridge %s cpu_state counter tail signature mismatch", name)
 	}
 
+	work := append(asm.Instructions(nil), insns...)
+	// Retarget successful bpf_map_delete_elem(&packets, &address) jump past
+	// the excised state->deleted increment straight to bpf_get_current_pid_tgid.
+	work[104].Offset = 15
+
 	removed := func(idx int) bool {
-		return (idx >= 16 && idx <= 58) || (idx >= 190 && idx <= 195)
+		return (idx >= 1 && idx <= 2) ||
+			(idx >= 4 && idx <= 58) ||
+			(idx >= 116 && idx <= 118) ||
+			(idx >= 138 && idx <= 139) ||
+			idx == 141 ||
+			(idx >= 164 && idx <= 169) ||
+			(idx >= 190 && idx <= 195)
 	}
-	patched, err := exciseInstructionsPreservingJumps(insns, removed)
+	patched, err := exciseInstructionsPreservingJumps(work, removed)
 	if err != nil {
 		return fmt.Errorf("embedded bridge %s excise cpu_state block: %w", name, err)
 	}
+	if len(patched) != 204 {
+		return fmt.Errorf("embedded bridge %s excised len = %d, want 204", name, len(patched))
+	}
+
+	const (
+		branchToCfgIdx = 78  // orig[140]: *(u64 *)(r10 - 192) = r0
+		resumeSlotsIdx = 79  // orig[142]: r2 = r10 (read_slots lookup)
+		exitZeroIdx    = 202 // orig[277]: r0 = 0
+		cfgCheckIdx    = 204 // appended out-of-line config->epoch verification
+	)
+	saveReaderMeta := patched[branchToCfgIdx].Metadata
+	patched[branchToCfgIdx] = asm.Instruction{
+		OpCode:   asm.Ja.Op(asm.ImmSource),
+		Metadata: saveReaderMeta,
+	}
+	patched = append(patched,
+		asm.StoreMem(asm.RFP, -192, asm.R0, asm.DWord),
+		asm.StoreMem(asm.RFP, -116, asm.R1, asm.Word),
+		asm.Mov.Imm(asm.R1, 0),
+		asm.StoreMem(asm.RFP, -8, asm.R1, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -8),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("config"),
+		asm.FnMapLookupElem.Call(),
+		asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R0, Constant: 0},
+		asm.LoadMem(asm.R2, asm.R0, 8, asm.DWord),
+		asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R9, Src: asm.R2},
+		asm.Instruction{OpCode: asm.Ja.Op(asm.ImmSource)},
+	)
+
+	rawSlot := make([]int, len(patched))
+	raw := 0
+	for i, ins := range patched {
+		rawSlot[i] = raw
+		raw += int(ins.Size() / asm.InstructionSize)
+	}
+	setJumpTarget := func(fromIdx, toIdx int) error {
+		width := int(patched[fromIdx].Size() / asm.InstructionSize)
+		delta := rawSlot[toIdx] - (rawSlot[fromIdx] + width)
+		if delta < -32768 || delta > 32767 {
+			return fmt.Errorf("jump delta %d overflows int16 (%d -> %d)", delta, fromIdx, toIdx)
+		}
+		patched[fromIdx].Offset = int16(delta)
+		return nil
+	}
+	for _, edge := range [][2]int{
+		{branchToCfgIdx, cfgCheckIdx},
+		{cfgCheckIdx + 8, exitZeroIdx},
+		{cfgCheckIdx + 10, exitZeroIdx},
+		{cfgCheckIdx + 11, resumeSlotsIdx},
+	} {
+		if err := setJumpTarget(edge[0], edge[1]); err != nil {
+			return fmt.Errorf("embedded bridge %s %w", name, err)
+		}
+	}
+
 	prog.Instructions = patched
 	return nil
 }
