@@ -1,8 +1,10 @@
 package ownerbpf
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strconv"
 	"strings"
@@ -309,14 +311,186 @@ func isAppImageMount(m MountEntry) bool {
 	if strings.HasPrefix(lowerFS, "fuse.") && strings.Contains(lowerFS, "appimage") {
 		return true
 	}
-	if (lowerFS == "fuse" || lowerFS == "squashfs" || lowerFS == "iso9660") &&
-		(strings.Contains(lowerSrc, "appimage") || (strings.HasPrefix(lowerSrc, "/dev/loop") && strings.HasPrefix(baseMnt, ".mount_"))) {
+	if strings.HasPrefix(baseMnt, ".mount_") &&
+		(lowerFS == "fuse" || strings.HasPrefix(lowerFS, "fuse.") || lowerFS == "squashfs" || lowerFS == "iso9660") {
+		return true
+	}
+	if (lowerFS == "fuse" || lowerFS == "squashfs" || lowerFS == "iso9660") && strings.Contains(lowerSrc, "appimage") {
 		return true
 	}
 	if lowerFS == "tmpfs" && strings.HasPrefix(baseMnt, ".mount_") && strings.HasSuffix(lowerSrc, ".appimage") {
 		return true
 	}
 	return false
+}
+
+// unescapeProcMapsPath reverses Linux seq_file_path(m, file, "\n") escaping,
+// which encodes only '\n' as \012 and '\\' as \134.
+func unescapeProcMapsPath(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) {
+			switch s[i+1 : i+4] {
+			case "012":
+				b.WriteByte('\n')
+				i += 3
+				continue
+			case "134":
+				b.WriteByte('\\')
+				i += 3
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func nextMapsField(line string) (field, rest string, ok bool) {
+	line = strings.TrimLeft(line, " \t")
+	if line == "" {
+		return "", "", false
+	}
+	i := 0
+	for i < len(line) && line[i] != ' ' && line[i] != '\t' {
+		i++
+	}
+	return line[:i], line[i:], true
+}
+
+// parseProcMapsExeIdentity extracts the kernel (s_dev, i_ino) pair for the
+// mapped executable matching rawExeLink (the exact string returned by
+// readlink("/proc/<tgid>/exe"), including any trailing " (deleted)") when a
+// root-squashed user FUSE mount (such as AppImage squashfuse without
+// allow_other) rejects stat("/proc/<tgid>/exe") with EACCES/EPERM.
+// It fails closed unless at least one executable (r?x?) VMA matches rawExeLink
+// with a non-zero inode and all matching VMAs agree on (dev, ino).
+func parseProcMapsExeIdentity(rawMaps, rawExeLink string) (dev, ino uint64, ok bool) {
+	if rawExeLink == "" || !strings.HasPrefix(rawExeLink, "/") {
+		return 0, 0, false
+	}
+	var matched bool
+	var hasExec bool
+	for len(rawMaps) > 0 {
+		var line string
+		if nl := strings.IndexByte(rawMaps, '\n'); nl >= 0 {
+			line = rawMaps[:nl]
+			rawMaps = rawMaps[nl+1:]
+		} else {
+			line = rawMaps
+			rawMaps = ""
+		}
+		line = strings.TrimRight(line, "\r")
+		if line == "" {
+			continue
+		}
+		_, r1, ok1 := nextMapsField(line)
+		perms, r2, ok2 := nextMapsField(r1)
+		_, r3, ok3 := nextMapsField(r2)
+		devField, r4, ok4 := nextMapsField(r3)
+		inoField, r5, ok5 := nextMapsField(r4)
+		if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 {
+			continue
+		}
+		rawPath := strings.TrimLeft(r5, " \t")
+		if rawPath == "" || unescapeProcMapsPath(rawPath) != rawExeLink {
+			continue
+		}
+		majStr, minStr, hasColon := strings.Cut(devField, ":")
+		if !hasColon {
+			return 0, 0, false
+		}
+		maj, err1 := strconv.ParseUint(majStr, 16, 32)
+		min, err2 := strconv.ParseUint(minStr, 16, 32)
+		parsedIno, err3 := strconv.ParseUint(inoField, 10, 64)
+		if err1 != nil || err2 != nil || err3 != nil || parsedIno == 0 {
+			return 0, 0, false
+		}
+		parsedDev := EncodeKernelDev(uint32(maj), uint32(min))
+		if !matched {
+			dev = parsedDev
+			ino = parsedIno
+			matched = true
+		} else if dev != parsedDev || ino != parsedIno {
+			return 0, 0, false
+		}
+		if len(perms) >= 3 && perms[2] == 'x' {
+			hasExec = true
+		}
+	}
+	if !matched || !hasExec {
+		return 0, 0, false
+	}
+	return dev, ino, true
+}
+
+func parseAppImageEnviron(r io.Reader, maxBytes int) (appImageEnv, appDirEnv string, ok bool) {
+	var chunk [8192]byte
+	var entry []byte
+	skipEntry := false
+	total := 0
+	finishEntry := func() {
+		if !skipEntry && len(entry) > 0 {
+			if bytes.HasPrefix(entry, []byte("APPIMAGE=")) {
+				appImageEnv = string(entry[len("APPIMAGE="):])
+			} else if bytes.HasPrefix(entry, []byte("APPDIR=")) {
+				appDirEnv = string(entry[len("APPDIR="):])
+			}
+		}
+		entry = entry[:0]
+		skipEntry = false
+	}
+	for {
+		n, err := r.Read(chunk[:])
+		if n > 0 {
+			total += n
+			if maxBytes > 0 && total > maxBytes {
+				return "", "", false
+			}
+			data := chunk[:n]
+			for len(data) > 0 {
+				nul := bytes.IndexByte(data, 0)
+				part := data
+				hasNul := nul >= 0
+				if hasNul {
+					part = data[:nul]
+					data = data[nul+1:]
+				} else {
+					data = nil
+				}
+				if !skipEntry {
+					entry = append(entry, part...)
+					if len(entry) >= len("APPIMAGE=") &&
+						!bytes.HasPrefix(entry, []byte("APPIMAGE=")) &&
+						!bytes.HasPrefix(entry, []byte("APPDIR=")) {
+						entry = entry[:0]
+						skipEntry = true
+					} else if len(entry) > 64<<10 {
+						entry = entry[:0]
+						skipEntry = true
+					}
+				}
+				if hasNul {
+					finishEntry()
+				}
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				finishEntry()
+				return appImageEnv, appDirEnv, true
+			}
+			return "", "", false
+		}
+		if n == 0 {
+			finishEntry()
+			return appImageEnv, appDirEnv, true
+		}
+	}
 }
 
 // ValidateProcessIdentity verifies synchronous BPF send evidence against
@@ -461,6 +635,7 @@ type IdentityLedger struct {
 	actors       map[ActorIdentityKey]*IdentitySnapshot
 	sockets      map[uint64]*SocketIdentityState
 	blobs        map[string]*identityBlob
+	stagedCork   map[uint64][]stagedCorkContributor
 	slotTable    *SocketSlotTable
 	metrics      LedgerMetrics
 }
@@ -815,7 +990,7 @@ func (l *IdentityLedger) ResolvePacket(readDec ReadDecision) PacketIdentityDecis
 		owner := m.owner
 		rev := atomic.LoadUint64(&s.EvidenceRevision)
 		flags := SocketSlotFlags(atomic.LoadUint32(&s.Flags))
-		lastReason := m.lastReason
+		lastReason := codeToReason(m.lastReasonCode)
 		v2 := atomic.LoadUint64(&s.Version)
 		c2 := atomic.LoadUint64(&s.Conflicts)
 		if v1 != v2 || v1 == 0 || c1 != 0 || c2 != 0 ||
@@ -930,6 +1105,9 @@ func (l *IdentityLedger) ReleaseActor(key ActorIdentityKey) {
 }
 
 func (l *IdentityLedger) ReleaseSocket(cookie uint64) {
+	if l.stagedCork != nil {
+		delete(l.stagedCork, cookie)
+	}
 	if l.slotTable != nil {
 		if idx, ok := l.slotTable.cookieToSlot[cookie]; ok {
 			m := &l.slotTable.meta[idx]
@@ -957,4 +1135,52 @@ func (l *IdentityLedger) ReleasePacket(snap *IdentitySnapshot) {
 		snap.packetRefs--
 	}
 	l.tryReclaimSnapshot(snap)
+}
+
+const maxAsyncMapsStreamBytes = 16 << 20
+
+// readerContainsToken streams r in fixed chunks with boundary overlap so tokens
+// spanning read boundaries or appearing past 64 KiB in /proc/<tgid>/maps are
+// never missed without allocating unbounded buffers. If r exceeds maxBytes, it
+// fails closed by returning (true, nil).
+func readerContainsToken(r io.Reader, token []byte, chunkSize, maxBytes int) (bool, error) {
+	if len(token) == 0 {
+		return true, nil
+	}
+	if chunkSize < len(token)*2 {
+		chunkSize = len(token) * 2
+	}
+	overlap := len(token) - 1
+	buf := make([]byte, overlap+chunkSize)
+	carry := 0
+	var total int
+	for {
+		n, err := r.Read(buf[carry : carry+chunkSize])
+		if n > 0 {
+			total += n
+			window := buf[:carry+n]
+			if bytes.Contains(window, token) {
+				return true, nil
+			}
+			if maxBytes > 0 && total > maxBytes {
+				return true, nil
+			}
+			if len(window) >= overlap {
+				copy(buf[:overlap], window[len(window)-overlap:])
+				carry = overlap
+			} else {
+				copy(buf[:len(window)], window)
+				carry = len(window)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			return false, err
+		}
+		if n == 0 {
+			return false, nil
+		}
+	}
 }

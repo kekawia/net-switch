@@ -595,7 +595,7 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	if err != nil || l.Attrs().Statistics == nil {
 		t.Fatal(err)
 	}
-	latencyUs := uint32(2000)
+	latencyUs := uint32(500)
 	if verifiedFloor58Profile() && runtime.GOARCH == "arm64" {
 		latencyUs = 5000
 	}
@@ -613,11 +613,16 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	}
 	defer func() { _ = unix.Munmap(faultBuf) }()
 
-	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=2000us native/KVM, 5000us arm64 TCG)
+	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=500us native/KVM, 5000us arm64 TCG)
 	// inside readBurst's callback (after the 64KiB buffer allocation has already completed)
-	// immediately before entering the kfree_skb hold (~13.5ms-20ms) on f.cpu. Even when
+	// immediately before entering the kfree_skb hold on f.cpu, under SCHED_FIFO so CFS
+	// preemption cannot consume the netem delay before unix.Read enters the kernel. Even when
 	// preemption is disabled on f.cpu, the hrtimer hardirq fires on f.cpu and
 	// runs NET_TX_SOFTIRQ on irq_exit in the interrupted reader task's context.
+	if err := setProofPriority(10); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = setProofPriority(0) }()
 	called := false
 	var sendErr error
 	_, readErr := f.r.readBurst(f.fd, 1, func(fd int, _ []byte) (int, error) {
@@ -632,6 +637,9 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 		called = true
 		return unix.Read(fd, faultBuf[:64])
 	})
+	if err := setProofPriority(0); err != nil {
+		t.Fatal(err)
+	}
 	if sendErr != nil {
 		t.Fatal(sendErr)
 	}

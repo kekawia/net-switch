@@ -25,6 +25,13 @@ type Controller interface {
 	ReleaseReply(int)
 }
 
+// TupleRejectController extends Controller with tuple-aware TCP rejection
+// pacing so silently dropped SYN tuples awaiting retransmit are not starved
+// behind newer bursts when the per-second notice cap resets.
+type TupleRejectController interface {
+	AllowRejectTuple(app string, tuple platform.Tuple) bool
+}
+
 type Ticket interface {
 	Resolve(platform.Owner) (Decision, error)
 	Buffers() (receive, send int)

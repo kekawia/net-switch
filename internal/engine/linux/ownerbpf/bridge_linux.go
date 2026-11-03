@@ -56,8 +56,22 @@ type Bridge struct {
 	activeReads                                               sync.WaitGroup
 	readers                                                   [ReaderLimit]bool
 	next                                                      uint64
-	stopped                                                   bool
-	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord, ReadUnknown atomic.Uint64
+	stopped                                                                   bool
+	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord, ReadUnknown    atomic.Uint64
+	UnknownRecursionCapture, UnknownRecursionConsume, UnknownRecursionFreed   atomic.Uint64
+}
+
+func (b *Bridge) recordUnknownRecursion(changed uint8) {
+	b.UnknownRecursion.Add(1)
+	if changed&(1<<0) != 0 {
+		b.UnknownRecursionCapture.Add(1)
+	}
+	if changed&(1<<1) != 0 {
+		b.UnknownRecursionConsume.Add(1)
+	}
+	if changed&(1<<2) != 0 {
+		b.UnknownRecursionFreed.Add(1)
+	}
 }
 
 func (b *Bridge) PacketSlots() uint64 {
@@ -189,17 +203,41 @@ func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
 	return b, nil
 }
 
-// LoadEngineBridge loads the embedded production bridge collection sized to
-// P = next_power_of_two(actualQueue+onlineCPUs+ReaderLimit+32), omitting the
-// tracefs-dependent fixture perf_consume program so it operates under CAP_BPF
+// LoadEngineBridge loads and attaches the embedded production bridge collection
+// sized to P = next_power_of_two(actualQueue+onlineCPUs+ReaderLimit+32), omitting
+// the tracefs-dependent fixture perf_consume program so it operates under CAP_BPF
 // and CAP_PERFMON inside a confined systemd unit without CAP_SYS_ADMIN.
 func LoadEngineBridge(ifindex, netns uint32, epoch, actualQueue uint64) (_ *Bridge, err error) {
+	b, err := newEngineBridgeUnattached(ifindex, netns, epoch, actualQueue)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.attachEngineLinksLocked(); err != nil {
+		_ = b.closeObjects()
+		return nil, err
+	}
+	return b, nil
+}
+
+// LoadEngineBridgeStandby pre-loads and mmaps a fresh unattached production
+// Bridge collection (with Enabled=0 and zero active kernel tracepoint links)
+// off the packet-pump critical path so a live epoch rebuild can activate it
+// in microseconds without waiting on kernel BTF CO-RE, preallocated hash-map
+// allocation, or BPF verifier execution.
+func LoadEngineBridgeStandby(ifindex, netns uint32, actualQueue uint64) (*Bridge, error) {
+	return newEngineBridgeUnattached(ifindex, netns, 1, actualQueue)
+}
+
+func newEngineBridgeUnattached(ifindex, netns uint32, epoch, actualQueue uint64) (_ *Bridge, err error) {
 	onlineCount, err := actualOnlineCPUCount()
 	if err != nil {
 		return nil, err
 	}
 	if epoch == 0 || ifindex == 0 || netns == 0 || actualQueue == 0 {
 		return nil, errors.New("invalid engine bridge configuration")
+	}
+	if err := checkCgroup2Root(); err != nil {
+		return nil, err
 	}
 	spec, packetSlots, err := PrepareEngineBridgeSpec(actualQueue, uint64(onlineCount), ReaderLimit)
 	if err != nil {
@@ -215,7 +253,7 @@ func LoadEngineBridge(ifindex, netns uint32, epoch, actualQueue uint64) (_ *Brid
 		Readers: ReaderLimit,
 	}
 	c, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{Programs: ebpf.ProgramOptions{
-		LogLevel: ebpf.LogLevelBranch | ebpf.LogLevelStats, LogSizeStart: 64 << 10,
+		LogSizeStart: 64 << 10,
 	}})
 	if err != nil {
 		return nil, loadError("engine bridge verifier/load", err)
@@ -225,24 +263,12 @@ func LoadEngineBridge(ifindex, netns uint32, epoch, actualQueue uint64) (_ *Brid
 		config:        cfg,
 		expectedQueue: actualQueue,
 		packetSlots:   packetSlots,
-		VerifierStats: make(map[string]string),
 	}
 	defer func() {
 		if err != nil {
 			_ = b.closeObjects()
 		}
 	}()
-	for name, program := range c.Programs {
-		for _, line := range strings.Split(program.VerifierLog, "\n") {
-			if line = strings.TrimSpace(line); strings.HasPrefix(line, "processed ") {
-				b.VerifierStats[name] = strings.Clone(line)
-			}
-		}
-		if b.VerifierStats[name] == "" {
-			return nil, fmt.Errorf("verifier statistics missing for %s", name)
-		}
-		program.VerifierLog = ""
-	}
 	if err = c.Maps["config"].Update(uint32(0), cfg, ebpf.UpdateAny); err != nil {
 		return nil, err
 	}
@@ -254,35 +280,80 @@ func LoadEngineBridge(ifindex, netns uint32, epoch, actualQueue uint64) (_ *Brid
 	if err != nil {
 		return nil, err
 	}
+	return b, nil
+}
+
+func checkCgroup2Root() error {
+	var fs unix.Statfs_t
+	if err := unix.Statfs("/sys/fs/cgroup", &fs); err != nil {
+		return err
+	}
+	if fs.Type != unix.CGROUP2_SUPER_MAGIC {
+		return errors.New("bridge requires cgroup2 root")
+	}
+	return nil
+}
+
+func (b *Bridge) attachEngineLinksLocked() error {
 	root, err := os.Open("/sys/fs/cgroup")
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer root.Close()
 	var fs unix.Statfs_t
 	if err = unix.Fstatfs(int(root.Fd()), &fs); err != nil {
-		return nil, err
+		return err
 	}
 	if fs.Type != unix.CGROUP2_SUPER_MAGIC {
-		return nil, errors.New("bridge requires cgroup2 root")
+		return errors.New("bridge requires cgroup2 root")
 	}
+	c := b.Collection
 	l, err := link.AttachRawLink(link.RawLinkOptions{
 		Target:  int(root.Fd()),
 		Program: c.Programs["init_egress_cookie"],
 		Attach:  ebpf.AttachCGroupInetEgress,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("root cgroup link: %w", err)
+		return fmt.Errorf("root cgroup link: %w", err)
 	}
 	b.links = append(b.links, l)
+	// Terminals precede capture. Reverse close detaches capture first.
 	for _, a := range [][2]string{{"consume", "consume_skb"}, {"freed", "kfree_skb"}, {"capture", "net_dev_start_xmit"}} {
 		l, e := link.AttachRawTracepoint(link.RawTracepointOptions{Name: a[1], Program: c.Programs[a[0]]})
 		if e != nil {
-			return nil, fmt.Errorf("raw_tracepoint/%s: %w", a[1], e)
+			return fmt.Errorf("raw_tracepoint/%s: %w", a[1], e)
 		}
 		b.links = append(b.links, l)
 	}
-	return b, nil
+	return nil
+}
+
+// ActivateStandby assigns epoch to an unattached standby Bridge (keeping
+// Enabled=0 until the caller registers its reader and drains TUN) and attaches
+// its cgroup and raw-tracepoint links.
+func (b *Bridge) ActivateStandby(epoch uint64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopped || b.Collection == nil || b.config.Enabled != 0 || len(b.links) != 0 || epoch == 0 {
+		return errors.New("cannot activate non-standby or stopped bridge")
+	}
+	for _, used := range b.readers {
+		if used {
+			return errors.New("standby bridge already has registered readers")
+		}
+	}
+	b.config.Epoch = epoch
+	if err := b.Collection.Maps["config"].Update(uint32(0), b.config, ebpf.UpdateAny); err != nil {
+		b.stopped = true
+		_ = b.closeObjects()
+		return err
+	}
+	if err := b.attachEngineLinksLocked(); err != nil {
+		b.stopped = true
+		_ = b.closeObjects()
+		return err
+	}
+	return nil
 }
 
 func checkBridgeSpec(s *ebpf.CollectionSpec) error {
@@ -373,8 +444,8 @@ func (b *Bridge) Sample() (out [3]CounterSample, err error) {
 func (b *Bridge) Enable(actualQueue uint64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.stopped || actualQueue == 0 || actualQueue != b.expectedQueue {
-		return fmt.Errorf("bridge stopped or queue readback %d differs from expected queue %d", actualQueue, b.expectedQueue)
+	if b.stopped || len(b.links) == 0 || actualQueue == 0 || actualQueue != b.expectedQueue {
+		return fmt.Errorf("bridge stopped, unattached, or queue readback %d differs from expected queue %d", actualQueue, b.expectedQueue)
 	}
 	onlineCount, err := actualOnlineCPUCount()
 	if err != nil {
@@ -391,7 +462,12 @@ func (b *Bridge) Enable(actualQueue uint64) error {
 	return b.Collection.Maps["config"].Update(uint32(0), b.config, ebpf.UpdateAny)
 }
 
-func (b *Bridge) Faults() uint64 { return atomic.LoadUint64((*uint64)(unsafe.Pointer(&b.health[0]))) }
+func (b *Bridge) Faults() uint64 {
+	if b == nil || len(b.health) < 8 {
+		return 0
+	}
+	return atomic.LoadUint64((*uint64)(unsafe.Pointer(&b.health[0])))
+}
 
 type BridgeReader struct {
 	Measure              bool
@@ -415,8 +491,8 @@ func (b *Bridge) Register() (_ *BridgeReader, err error) {
 	}()
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.stopped || b.config.Enabled != 0 {
-		return nil, errors.New("register only in a quiesced disabled epoch")
+	if b.stopped || b.config.Enabled != 0 || len(b.links) == 0 {
+		return nil, errors.New("register only in a quiesced attached disabled epoch")
 	}
 	index := -1
 	for i, used := range b.readers {
@@ -535,6 +611,7 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 		}
 	}
 	valid := true
+	var changed uint8
 	var sampleErr error
 	if !r.SkipPostCheck {
 		var sampleStart time.Time
@@ -547,12 +624,15 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 		if r.Measure {
 			r.LastSample = time.Since(sampleStart)
 		}
+		if sampleErr == nil {
+			changed = r.guard.ChangedMask(after)
+		}
 		valid = r.guard.Certify(after, sampleErr)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !valid {
-		b.UnknownRecursion.Add(1)
+		b.recordUnknownRecursion(changed)
 		b.AffectedPackets.Add(uint64(len(frames)))
 		for i := range frames {
 			if frames[i].Decision.Status != ReadMissing {
@@ -661,6 +741,7 @@ func (r *BridgeReader) readBurstInto(fd int, rawBufs [][]byte, sizes []int, deci
 	}
 
 	valid := true
+	var changed uint8
 	var sampleErr error
 	if !r.SkipPostCheck && (count > 0 || readFailure != nil) {
 		var sampleStart time.Time
@@ -673,13 +754,16 @@ func (r *BridgeReader) readBurstInto(fd int, rawBufs [][]byte, sizes []int, deci
 		if r.Measure {
 			r.LastSample = time.Since(sampleStart)
 		}
+		if sampleErr == nil {
+			changed = r.guard.ChangedMask(after)
+		}
 		valid = r.guard.Certify(after, sampleErr)
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !valid {
-		b.UnknownRecursion.Add(1)
+		b.recordUnknownRecursion(changed)
 		b.AffectedPackets.Add(uint64(count))
 		for i := 0; i < count; i++ {
 			if decisions[i].Status != ReadMissing {

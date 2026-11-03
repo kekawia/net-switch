@@ -1,8 +1,14 @@
 package ownerbpf
 
 import (
+	"bytes"
 	"errors"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/cilium/ebpf"
 )
 
 func validProcessFixture() (ActorKey, ActorEvidence, RawProcessMaterial) {
@@ -125,6 +131,30 @@ func TestIdentityRegisteredAppImageAndSandboxProofs(t *testing.T) {
 	val, reason := ValidateProcessIdentity(key, ev, mat)
 	if reason != ReasonValidated || val.Sandbox != SandboxAppImage || val.AppID != "appimage:CoolApp-x86_64" || val.Path != "/tmp/.mount_CoolApp123/usr/bin/cool" {
 		t.Fatalf("registered AppImage validation failed: val=%+v reason=%s", val, reason)
+	}
+
+	// 1b. type2-runtime squashfuse mount (FSType="fuse.squashfuse", MountSource="squashfuse") succeeds.
+	kSq, eSq, mSq := validProcessFixture()
+	eSq.Device = fuseDev
+	mSq.Before.ExeDev = fuseDev
+	mSq.After.ExeDev = fuseDev
+	mSq.ExePath = "/tmp/.mount_NsToolAbCdEf/usr/bin/nstool"
+	mSq.AppImageEnv = "/tmp/NsTool.AppImage"
+	mSq.AppDirEnv = "/tmp/.mount_NsToolAbCdEf"
+	mSq.AppImageBacking = &FileIdentity{Dev: EncodeKernelDev(8, 1), Ino: 777, Regular: true}
+	mSq.Mounts = append(mSq.Mounts, MountEntry{
+		MountID:     95,
+		ParentID:    29,
+		Major:       0,
+		Minor:       48,
+		Root:        "/",
+		MountPoint:  "/tmp/.mount_NsToolAbCdEf",
+		FSType:      "fuse.squashfuse",
+		MountSource: "squashfuse",
+	})
+	valSq, reasonSq := ValidateProcessIdentity(kSq, eSq, mSq)
+	if reasonSq != ReasonValidated || valSq.Sandbox != SandboxAppImage || valSq.AppID != "appimage:NsTool" || valSq.Path != "/tmp/.mount_NsToolAbCdEf/usr/bin/nstool" {
+		t.Fatalf("squashfuse AppImage validation failed: val=%+v reason=%s", valSq, reasonSq)
 	}
 
 	// 2. Spoofed APPIMAGE= environment on an ordinary binary without an AppImage mount fails.
@@ -300,5 +330,215 @@ func TestIdentitySharedSubmitterAndBudgetBounds(t *testing.T) {
 	matB3.After.TGID = 5003
 	if _, r := ledger.EnrichActor(keyB3, evB3, matB3); r != ReasonBudgetExceeded {
 		t.Fatalf("exceeding MaxSnapshots got %s, want %s", r, ReasonBudgetExceeded)
+	}
+}
+
+func TestReaderContainsTokenBoundaryAndOverflow(t *testing.T) {
+	token := []byte("[io_uring]")
+
+	// Token past 64 KiB and split right across a 32-byte chunk boundary.
+	prefix := strings.Repeat("7f0000000000-7f0000001000 r--p 00000000 08:01 123 /usr/lib/libfoo.so\n", 1100)
+	if len(prefix) <= 64<<10 {
+		t.Fatalf("prefix too short: %d", len(prefix))
+	}
+	rem := len(prefix) % 32
+	pad := (32 - rem - 4 + 32) % 32
+	stream := prefix + strings.Repeat("x", pad) + "[io_uring]\n"
+	found, err := readerContainsToken(strings.NewReader(stream), token, 32, maxAsyncMapsStreamBytes)
+	if err != nil || !found {
+		t.Fatalf("expected boundary-split token past 64 KiB to be found: found=%v err=%v", found, err)
+	}
+
+	// Absent token across multi-chunk read returns false.
+	foundAbsent, err := readerContainsToken(strings.NewReader(prefix), token, 64, maxAsyncMapsStreamBytes)
+	if err != nil || foundAbsent {
+		t.Fatalf("expected absent token to return false: found=%v err=%v", foundAbsent, err)
+	}
+
+	// Exceeding maxBytes fails closed (true, nil).
+	huge := bytes.NewReader(bytes.Repeat([]byte("a"), 4096))
+	foundOverflow, err := readerContainsToken(huge, token, 64, 1024)
+	if err != nil || !foundOverflow {
+		t.Fatalf("expected maxBytes overflow to fail closed: found=%v err=%v", foundOverflow, err)
+	}
+}
+
+func TestClassifyLoadFailureDistinguishesVerifierFromUnsupportedKernel(t *testing.T) {
+	verErr := loadError("load probe", &ebpf.VerifierError{Cause: syscall.EINVAL, Log: []string{"invalid mem access"}})
+	if got := ClassifyLoadFailure(verErr, "none [integrity] confidentiality", true, true); got != FallbackVerifierRejected {
+		t.Fatalf("VerifierError classified as %q, want %q", got, FallbackVerifierRejected)
+	}
+	if got := ClassifyLoadFailure(syscall.ENOSYS, "[none]", true, true); got != FallbackKernelUnsupported {
+		t.Fatalf("ENOSYS classified as %q, want %q", got, FallbackKernelUnsupported)
+	}
+	if got := ClassifyLoadFailure(ebpf.ErrNotSupported, "[none]", true, true); got != FallbackKernelUnsupported {
+		t.Fatalf("ErrNotSupported classified as %q, want %q", got, FallbackKernelUnsupported)
+	}
+	if got := ClassifyLoadFailure(syscall.EPERM, "[none]", true, true); got != FallbackCapabilityDenied {
+		t.Fatalf("EPERM classified as %q, want %q", got, FallbackCapabilityDenied)
+	}
+	if got := ClassifyLoadFailure(nil, "none integrity [confidentiality]", true, true); got != FallbackLockdownConfidentiality {
+		t.Fatalf("confidentiality lockdown classified as %q, want %q", got, FallbackLockdownConfidentiality)
+	}
+}
+
+func TestProvenanceRuntimeAdvanceEpochAndLookupCost(t *testing.T) {
+	rt := NewProvenanceRuntime(1, NewIdentityLedger(16, 4096), NewSocketSlotTable(16))
+	defer rt.Close()
+
+	key, ev, mat := validProcessFixture()
+	if _, reason := rt.EnrichActor(key, ev, mat); reason != ReasonValidated {
+		t.Fatalf("EnrichActor epoch 1: %s", reason)
+	}
+	env1 := rt.Acquire(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie, Serial: 1}})
+	env1.SetAcquireCost(1500 * time.Nanosecond)
+	if owner, status := env1.ValidateForwarding(); status != EnvelopeKnown || owner.AppID != "/usr/bin/DirectSender" {
+		t.Fatalf("epoch 1 ValidateForwarding: status=%s owner=%+v", status, owner)
+	}
+
+	// AdvanceEpoch invalidates env1 immediately while env1 remains live on heap.
+	rt.AdvanceEpoch(2)
+	if rt.Epoch() != 2 || rt.IsEpochPoisoned() {
+		t.Fatalf("unexpected epoch state after AdvanceEpoch: epoch=%d poisoned=%v", rt.Epoch(), rt.IsEpochPoisoned())
+	}
+	if _, status := env1.ValidateForwarding(); status != EnvelopeMissingCookie {
+		t.Fatalf("stale epoch 1 envelope got %s, want %s", status, EnvelopeMissingCookie)
+	}
+
+	// Same socket cookie sending in epoch 2 allocates a fresh slot cleanly.
+	if _, reason := rt.EnrichActor(key, ev, mat); reason != ReasonValidated {
+		t.Fatalf("EnrichActor epoch 2: %s", reason)
+	}
+	fragA := rt.Acquire(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie, Serial: 2}})
+	fragA.SetAcquireCost(800 * time.Nanosecond)
+	fragB := rt.Acquire(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie, Serial: 3}})
+	fragB.SetAcquireCost(700 * time.Nanosecond)
+
+	merged, ok := fragA.MergeNetSwitchProvenance(fragB).(*ProvenanceEnvelope)
+	if !ok || merged == nil {
+		t.Fatalf("MergeNetSwitchProvenance returned %T", merged)
+	}
+	if owner, status := merged.ValidateForwarding(); status != EnvelopeKnown || owner.AppID != "/usr/bin/DirectSender" {
+		t.Fatalf("merged epoch 2 ValidateForwarding: status=%s owner=%+v", status, owner)
+	}
+	if cost := merged.ProvenanceLookupCost(); cost != 1500*time.Nanosecond {
+		t.Fatalf("ProvenanceLookupCost = %v, want 1500ns", cost)
+	}
+	if second := merged.ProvenanceLookupCost(); second != 0 {
+		t.Fatalf("second ProvenanceLookupCost claim = %v, want 0", second)
+	}
+}
+
+func TestParseProcMapsExeIdentityAndAppImageEnviron(t *testing.T) {
+	mapsText := strings.Join([]string{
+		"55a000000000-55a000002000 r--p 00000000 00:30 42 /tmp/.mount_NsToolAbCdEf/usr/bin/nstool",
+		"55a000002000-55a000020000 r-xp 00002000 00:30 42 /tmp/.mount_NsToolAbCdEf/usr/bin/nstool",
+		"7f1000000000-7f1000020000 r-xp 00000000 08:01 999 /lib/x86_64-linux-gnu/libc.so.6",
+	}, "\n") + "\n"
+	dev, ino, ok := parseProcMapsExeIdentity(mapsText, "/tmp/.mount_NsToolAbCdEf/usr/bin/nstool")
+	if !ok || dev != EncodeKernelDev(0, 0x30) || ino != 42 {
+		t.Fatalf("parseProcMapsExeIdentity squashfuse got dev=%#x ino=%d ok=%v", dev, ino, ok)
+	}
+
+	// Deleted executable with spaces and escaped backslash/newline in /proc/<pid>/maps.
+	escapedMaps := "55b000000000-55b000010000 r-xp 00000000 08:11 7654 /opt/My App\\134Dir\\012Line/runner (deleted)\n"
+	wantExe := "/opt/My App\\Dir\nLine/runner (deleted)"
+	devDel, inoDel, okDel := parseProcMapsExeIdentity(escapedMaps, wantExe)
+	if !okDel || devDel != EncodeKernelDev(0x08, 0x11) || inoDel != 7654 {
+		t.Fatalf("parseProcMapsExeIdentity escaped/deleted got dev=%#x ino=%d ok=%v", devDel, inoDel, okDel)
+	}
+
+	// Non-executable mapping alone must fail closed.
+	roMaps := "55c000000000-55c000004000 r--p 00000000 00:30 42 /tmp/.mount_NsToolAbCdEf/usr/bin/nstool\n"
+	if _, _, okRO := parseProcMapsExeIdentity(roMaps, "/tmp/.mount_NsToolAbCdEf/usr/bin/nstool"); okRO {
+		t.Fatal("expected non-executable VMA to be rejected")
+	}
+
+	// Conflicting (dev, ino) across matching VMAs must fail closed.
+	conflictMaps := strings.Join([]string{
+		"55d000000000-55d000004000 r-xp 00000000 00:30 42 /tmp/.mount_NsToolAbCdEf/usr/bin/nstool",
+		"55d000004000-55d000008000 r-xp 00004000 00:30 43 /tmp/.mount_NsToolAbCdEf/usr/bin/nstool",
+	}, "\n")
+	if _, _, okConf := parseProcMapsExeIdentity(conflictMaps, "/tmp/.mount_NsToolAbCdEf/usr/bin/nstool"); okConf {
+		t.Fatal("expected conflicting VMA inode to be rejected")
+	}
+
+	// Streaming /proc/<pid>/environ past 64 KiB extracts APPIMAGE and APPDIR without truncation.
+	var envBuf bytes.Buffer
+	envBuf.WriteString("PAD=")
+	envBuf.WriteString(strings.Repeat("x", 100<<10))
+	envBuf.WriteByte(0)
+	envBuf.WriteString("APPIMAGE=/tmp/NsTool.AppImage")
+	envBuf.WriteByte(0)
+	envBuf.WriteString("APPDIR=/tmp/.mount_NsToolAbCdEf")
+	envBuf.WriteByte(0)
+	appImg, appDir, envOK := parseAppImageEnviron(bytes.NewReader(envBuf.Bytes()), 8<<20)
+	if !envOK || appImg != "/tmp/NsTool.AppImage" || appDir != "/tmp/.mount_NsToolAbCdEf" {
+		t.Fatalf("parseAppImageEnviron got appImg=%q appDir=%q ok=%v", appImg, appDir, envOK)
+	}
+	if _, _, overOK := parseAppImageEnviron(bytes.NewReader(envBuf.Bytes()), 1024); overOK {
+		t.Fatal("expected parseAppImageEnviron to reject stream exceeding maxBytes")
+	}
+}
+
+func TestProvenanceRuntimeAdvanceBridgeEpochAndCookieSweep(t *testing.T) {
+	rt := NewProvenanceRuntime(1, NewIdentityLedger(16, 4096), NewSocketSlotTable(16))
+	defer rt.Close()
+
+	key, ev, mat := validProcessFixture()
+	obsAt := time.Now().Add(-time.Second)
+	rt.SyncActors(func(l *IdentityLedger, track func(ActorKey, time.Time) bool) {
+		if !track(key, obsAt) {
+			t.Fatal("expected first ActorKey track to report true")
+		}
+		if track(key, obsAt) {
+			t.Fatal("expected duplicate ActorKey track to report false")
+		}
+		if _, reason := l.EnrichActor(key, ev, mat); reason != ReasonValidated {
+			t.Fatalf("EnrichActor: %s", reason)
+		}
+	})
+
+	env1 := rt.Acquire(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie, Serial: 1}})
+	if owner, status := env1.ValidateForwarding(); status != EnvelopeKnown || owner.AppID != "/usr/bin/DirectSender" {
+		t.Fatalf("epoch 1 ValidateForwarding: status=%s owner=%+v", status, owner)
+	}
+
+	// Bridge-only epoch reload invalidates env1 while preserving socket/actor state for epoch 2.
+	rt.AdvanceBridgeEpoch(2)
+	if _, status := env1.ValidateForwarding(); status != EnvelopeMissingCookie {
+		t.Fatalf("stale epoch 1 envelope after AdvanceBridgeEpoch got %s, want %s", status, EnvelopeMissingCookie)
+	}
+	env2 := rt.Acquire(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie, Serial: 2}})
+	if owner, status := env2.ValidateForwarding(); status != EnvelopeKnown || owner.AppID != "/usr/bin/DirectSender" {
+		t.Fatalf("epoch 2 ValidateForwarding without re-enriching failed: status=%s owner=%+v", status, owner)
+	}
+
+	// Streaming cookie sweep marks live cookies and collects only unmarked older cookies.
+	keyDead := key
+	keyDead.Cookie = 202
+	rt.SyncActors(func(_ *IdentityLedger, track func(ActorKey, time.Time) bool) {
+		_ = track(keyDead, obsAt)
+	})
+	sweep := rt.BeginCookieLiveSweep()
+	rt.MarkCookiesLive([]uint64{key.Cookie, 999999}, sweep)
+	dead := rt.CollectDeadCookies(time.Now(), sweep)
+	if len(dead) != 1 || dead[0] != keyDead.Cookie {
+		t.Fatalf("CollectDeadCookies = %v, want [%d]", dead, keyDead.Cookie)
+	}
+	keys, unref := rt.RetireSocket(keyDead.Cookie)
+	if len(keys) != 1 || keys[0] != keyDead || len(unref) != 0 {
+		t.Fatalf("RetireSocket(dead) keys=%v unref=%v", keys, unref)
+	}
+	keys2, unref2 := rt.RetireSocket(key.Cookie)
+	if len(keys2) != 1 || len(unref2) != 1 {
+		t.Fatalf("RetireSocket(last) keys=%v unref=%v", keys2, unref2)
+	}
+
+	// AdvanceBridgeEpoch never clears an already-poisoned epoch.
+	rt.PoisonEpoch()
+	rt.AdvanceBridgeEpoch(3)
+	if !rt.IsEpochPoisoned() {
+		t.Fatal("AdvanceBridgeEpoch cleared epochPoisoned")
 	}
 }

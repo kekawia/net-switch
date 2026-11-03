@@ -180,7 +180,7 @@ func prepareNativeTunables(t *testing.T) func(*testing.T, *nativeClient) {
 			if ebpfCap.TunName != name || ebpfCap.TunTxQLen != 16384 || ebpfCap.NetNSInode == 0 {
 				t.Fatalf("unexpected installed engine TUN/netns metadata: %+v", ebpfCap)
 			}
-			if ebpfCap.PacketSlots < 32768 || ebpfCap.SocketSlots != 131072 {
+			if ebpfCap.PacketSlots < 32768 || ebpfCap.SocketSlots != 524288 {
 				t.Fatalf("unexpected production eBPF map sizing: %+v", ebpfCap)
 			}
 			if ebpfCap.CapturedActorEvents < 1 || ebpfCap.CapturedCookie == 0 || ebpfCap.CapturedTGID == 0 {
@@ -189,7 +189,7 @@ func prepareNativeTunables(t *testing.T) func(*testing.T, *nativeClient) {
 			if ebpfCap.PeerHitsBefore < 1 || ebpfCap.PeerHitsDuring <= ebpfCap.PeerHitsBefore || ebpfCap.PeerHitsAfter <= ebpfCap.PeerHitsDuring {
 				t.Fatalf("peer root-cgroup BPF_F_ALLOW_MULTI coexistence failed: %+v", ebpfCap)
 			}
-			if ebpfCap.BPFPerfFDsBefore != 0 || ebpfCap.BPFPerfFDsDuring < 20 || ebpfCap.BPFPerfFDsAfter != 0 {
+			if ebpfCap.BPFPerfFDsBefore < 20 || ebpfCap.BPFPerfFDsDuring < ebpfCap.BPFPerfFDsBefore+20 || ebpfCap.BPFPerfFDsAfter != ebpfCap.BPFPerfFDsBefore {
 				t.Fatalf("BPF/perf FD lifecycle leak or missing attachment: %+v", ebpfCap)
 			}
 			t.Logf("NATIVE_EBPF_CAPABILITY %+v", ebpfCap)

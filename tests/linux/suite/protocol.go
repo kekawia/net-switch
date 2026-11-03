@@ -236,7 +236,7 @@ func flowsPagination(e *Env) {
 		"each of bravo's %d held connections was listed exactly once, by its own tuple (once %d, more than once %d, missing %d, ids listed twice %d)", n, once, twice, n-len(matched), dupIDs)
 	e.T.Check(len(wrong) == 0, "every held connection has correct identified or unknown ownership, its required lane, revision %d, epoch %d and a point after the revision's (%d didn't: %s)",
 		loaded.N, s.Epoch(), len(wrong), strings.Join(upTo(wrong, 3), "; "))
-	e.T.ReleaseCheck(once-unknown >= n-1, "at least %d rows prove bravo's path, app id and PID (%d identified, %d unknown)", n-1, once-unknown, unknown)
+	e.T.Check(once-unknown >= n-1, "at least %d rows prove bravo's path, app id and PID (%d identified, %d unknown)", n-1, once-unknown, unknown)
 	stats, err := s.Stats(e.Ctx())
 	e.T.Require(err == nil, "stats while the paginated connections are held (%v)", err)
 	e.T.Check(int(stats.Unknown) == unknown && stats.LookupMisses == uint64(unknown), "unknown snapshot rows exactly match live admission and lookup misses (%d listed, %d live, %d misses)", unknown, stats.Unknown, stats.LookupMisses)
@@ -378,11 +378,20 @@ func predictKeepsCounter(e *Env) {
 }
 
 func lookupCounters(e *Env) {
-	r := e.shared(true, []string{"bravo", "charlie"})
+	e.StartEngine(e.DefaultConfig())
+	var seen string
+	if e.isEBPFBackend() {
+		u := e.sharedUDPOnRunningEngine([]string{"bravo", "charlie"})
+		e.T.Check(u.Err == "" && topo.LineOfText(u.InitialSeen) == "b", "bravo's initial send on the shared UDP socket took line b (%q, %s)", topo.LineOfText(u.InitialSeen), u.Err)
+		seen = u.Seen
+	} else {
+		r := e.sharedOnRunningEngine(true, []string{"bravo", "charlie"})
+		seen = r.Seen
+	}
 	_, s := e.v1()
 	after, err := s.Stats(e.Ctx())
 	e.T.Require(err == nil, "stats (%v)", err)
-	e.T.Check(topo.LineOfText(r.Seen) == "a", "the ambiguous socket went to the main line (%q)", topo.LineOfText(r.Seen))
+	e.T.Check(topo.LineOfText(seen) == "a", "the ambiguous socket went to the main line (%q)", topo.LineOfText(seen))
 	e.T.Check(after.LookupAmbiguous >= 1, "the ambiguous owner was counted (%d)", after.LookupAmbiguous)
 	e.T.Check(after.LookupCount >= 1 && after.LookupTime > 0, "lookup time is recorded (%d lookups, %v in total, mean %v)", after.LookupCount, after.LookupTime, after.LookupMean())
 }

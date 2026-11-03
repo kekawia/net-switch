@@ -1,300 +1,187 @@
 # Linux 1.0 release blockers
 
-PR #36 delivers the Linux platform and the fallback owner scanner. It does not
-qualify the engine for the 1.0 release. The design decision recorded in
-SYSTEM-DESIGN §5.6 on 20 October 2026 moves Linux attribution to eBPF
-initiation/send records, with the scanner as a
-fallback. See the [source-backed study](linux-owner-ebpf-study.md).
+**Status: closed (0 open release blockers, 0 pending gates).**
 
-Attribution assertions in all thirteen overload cases and flow pagination are
-deferred. Round 3 also declares the exact mixed-cap occupancy gate, and the
-design decision of 23 October 2026 adds the owner of the 50-destination UDP
-burst (`udp.fifty-destinations-one-session`), making **16 catalogue entries**.
-Each overload still requires **99.5% successful lookups** in its own
-non-injected window. Pagination still requires **299 identified rows out of 300**.
-The burst requires its one session to identify charlie.
-The real numerator, denominator and threshold result remain in the JSON, console
-log and summary. Every declaration carries `release-blocker` status, including
-when a sample meets its threshold. No retry or excluded natural miss changes it.
+All 16 Linux 1.0 attribution release blockers recorded under SYSTEM-DESIGN §5.6
+are closed following production eBPF packet/read-bound initiator and
+first-accepted-sender attribution integration (PRs
+[#109](https://github.com/kekawia/net-switch/pull/109),
+[#115](https://github.com/kekawia/net-switch/pull/115),
+[#116](https://github.com/kekawia/net-switch/pull/116), and
+[#117](https://github.com/kekawia/net-switch/pull/117)) and full four-runner
+qualification on commit `7c767ea5b9d9ab6c6fa584215a8e851fd479e030` in Acceptance
+run [41586785606](https://github.com/kekawia/net-switch/actions/runs/41586785606).
+Every formerly deferred attribution, held-capacity, pagination, and burst-owner
+assertion is now a mandatory `Check` on 1.0, and `nsaccept release-gate` runs on
+every Acceptance CI job in addition to its standalone `workflow_dispatch` gate.
+See the [source-backed study](linux-owner-ebpf-study.md),
+[hook manifest](linux-owner-provenance-hooks.json), and
+[lifetime audit](linux-owner-provenance-lifetime.md).
 
-The measurements below are from PR head `fb74394` (Go 1.27.3), Acceptance run
-[39565641409](https://github.com/AyoubAchour/net-switch/actions/runs/39565641409),
-on all four runners. Since then the branch was rebased onto main `9579039`;
-on its own side only a scanner test fixture, the report's CPU-model line, the
-workflow's failure-evidence step and this document changed. Each cell is natural misses /
-lookups in the case's own non-injected window (pagination: identified rows of
-300, 299 required). A threshold that a sample meets is still declared; a lucky
-run clears nothing.
+## Four-runner eBPF qualification (`7c767ea5`, run 41586785606)
+
+Acceptance run [41586785606](https://github.com/kekawia/net-switch/actions/runs/41586785606)
+qualified the default `ebpf` owner backend across all four hosted Linux runners
+(Go 1.27.3, kernel `7.0.0-1017-azure`) while the 16 declarations were still
+present (`jobFailed=false`, `releaseFailed=0` across all 34 `ReleaseCheck`
+assertions: 28 in `release` and 6 in `faults`):
+
+- **Ubuntu 24.04 x64:** job `125754513553`, artifact `13208304958`, `AMD EPYC 7763 64-Core Processor`
+- **Ubuntu 26.04 x64:** job `125754513514`, artifact `13209182896`, `AMD EPYC 9V74 80-Core Processor`
+- **Ubuntu 24.04 ARM64:** job `125754513538`, artifact `13209017042`, ARM64 `0xd49`
+- **Ubuntu 26.04 ARM64:** job `125754513459`, artifact `13208878330`, ARM64 `0xd49`
+
+Each overload cell below reports natural misses / non-injected lookups in the
+case's own window (99.5% required; deliberately injected fault misses are
+reported separately: `132 / 132` in `overload.udp-pending-bytes`, `3,000 / 3,000`
+in `overload.unknown-owner-limits`, and `131 / 131` in `overload.memory-at-limit`).
 
 | Case | Ubuntu 24 x64 | Ubuntu 26 x64 | Ubuntu 24 ARM64 | Ubuntu 26 ARM64 |
 | --- | ---: | ---: | ---: | ---: |
-| overload.udp-sessions-per-app | 26 / 10,004 | 8 / 10,004 | 0 / 10,004 | 0 / 10,004 |
-| overload.udp-sessions-total | 361 / 16,388 | 158 / 16,388 | 31 / 16,388 | 66 / 16,388 |
-| overload.tcp-connection-storm | 2,007 / 12,304 | 1,275 / 12,604 | 289 / 12,904 | 559 / 12,853 |
-| overload.tcp-handshakes-in-flight | 958 / 12,333 | 586 / 12,803 | 351 / 13,036 | 189 / 11,723 |
-| overload.tcp-flows-total | 23,767 / 80,101 | 16,694 / 80,101 | 4,164 / 67,652 | 5,904 / 69,392 |
-| overload.tcp-buffer-budget | 42 / 64 | 17 / 64 | 0 / 64 | 2 / 64 |
-| overload.rejection-notices-per-app | 0 / 12,000 | 0 / 12,000 | 0 / 12,000 | 0 / 12,000 |
-| overload.rejection-notices-total | 793 / 25,600 | 276 / 25,600 | 90 / 25,600 | 170 / 25,600 |
-| overload.timewait-cap | 0 / 5,060 | 0 / 5,060 | 0 / 5,060 | 0 / 5,060 |
-| overload.udp-pending-bytes | 0 / 4 | 0 / 4 | 0 / 4 | 0 / 4 |
-| overload.unknown-owner-limits | 0 / 3 | 0 / 3 | 0 / 3 | 0 / 3 |
-| overload.tun-write-queue | 0 / 4 | 0 / 4 | 0 / 4 | 0 / 4 |
-| overload.memory-at-limit | 56 / 86 | 38 / 86 | 24 / 86 | 26 / 86 |
-| protocol.flows-pagination | 286 | 293 | 300 | 299 |
-| capacity.mixed-caps, held of 65,536 | 65,535 | 65,536 | 65,536 | 65,536 |
+| `overload.udp-sessions-per-app` | 0 / 10,004 | 0 / 10,004 | 0 / 10,004 | 0 / 10,004 |
+| `overload.udp-sessions-total` | 0 / 16,388 | 0 / 16,388 | 0 / 16,388 | 0 / 16,388 |
+| `overload.tcp-connection-storm` | 0 / 12,904 | 0 / 12,904 | 0 / 12,904 | 0 / 12,904 |
+| `overload.tcp-handshakes-in-flight` | 0 / 10,786 | 0 / 13,180 | 0 / 11,626 | 0 / 12,881 |
+| `overload.tcp-flows-total` (burst) | 0 / 65,536 | 15 / 65,536 (99.98%) | 0 / 65,536 | 0 / 65,536 |
+| `overload.tcp-flows-total` (held-load tail) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| `overload.tcp-buffer-budget` | 0 / 64 | 0 / 64 | 0 / 64 | 0 / 64 |
+| `overload.rejection-notices-per-app` | 0 / 12,000 | 0 / 12,000 | 0 / 12,000 | 0 / 12,000 |
+| `overload.rejection-notices-total` | 0 / 25,600 | 0 / 25,600 | 0 / 25,600 | 0 / 25,600 |
+| `overload.timewait-cap` | 0 / 5,060 | 0 / 5,060 | 0 / 5,060 | 0 / 5,060 |
+| `overload.udp-pending-bytes` | 0 / 4 | 0 / 4 | 0 / 4 | 0 / 4 |
+| `overload.unknown-owner-limits` | 0 / 3 | 0 / 3 | 0 / 3 | 0 / 3 |
+| `overload.tun-write-queue` | 0 / 4 | 0 / 4 | 0 / 4 | 0 / 4 |
+| `overload.memory-at-limit` | 0 / 86 | 0 / 86 | 0 / 86 | 0 / 86 |
+| `protocol.flows-pagination` (identified of 300) | 300 | 300 | 300 | 300 |
+| `capacity.mixed-caps` (burst misses) | 0 / 70,898 | 99 / 70,591 (99.86%) | 28 / 72,114 (99.96%) | 0 / 70,769 |
+| `capacity.mixed-caps` (held-load tail) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| `capacity.mixed-caps` (held UDP / total) | 16,384 / 65,536 | 16,384 / 65,536 | 16,384 / 65,536 | 16,384 / 65,536 |
+| `udp.fifty-destinations-one-session` | charlie on c | charlie on c | charlie on c | charlie on c |
+| `lookup.p95-measured` (all 4 phases p95 / mean) | <=100 µs / 26.1 µs | <=100 µs / 22.1 µs | <=100 µs / 24.2 µs | <=100 µs / 26.8 µs |
 
-Held exact caps on the same run: TCP total held 65,536 on both ARM64 runners,
-58,382 on Ubuntu 24 x64 and 65,455 on Ubuntu 26 x64. Those shortfalls (7,154
-and 81), and the 1 missing in mixed on Ubuntu 24 x64, were each wholly
-classified as unknown-overflow refusals. That is the only kind of shortfall
-the catalogue allows; any other would have failed the job. UDP total, mixed
-UDP, UDP per app and the TCP storm's identified 8,192 were exact on every
-runner. Each runner ran 85 cases: 70 passed and 15 declared release blockers,
-with no hard failures. The 50-destination burst was among the 70 on that run;
-it was declared afterwards (below), so a run of the current suite reports 69
-passes and 16 declared blockers when every threshold is met.
+Exact held capacities and memory budgets across all four runners on `7c767ea5`:
 
-## The 50-destination UDP burst (16th entry, declared 23 October 2026)
+- **Exact held caps:** `65,536` TCP flows in `overload.tcp-flows-total`, `16,384`
+  UDP sessions plus `49,152` TCP flows (`65,536` total) alongside `4,096`
+  retained `TIME_WAIT` endpoints in `capacity.mixed-caps`, `16,384` UDP sessions
+  in `overload.udp-sessions-total`, `8,192` identified UDP sessions per app in
+  `overload.udp-sessions-per-app`, and `8,192` identified TCP flows in
+  `overload.tcp-connection-storm` were reached exactly on all four runners.
+- **Forced-GC live heap (`<= 483,183,820 B` / `460.8 MiB` limit):**
+  `overload.tcp-flows-total` measured `436,499,736 B` (Ubuntu 24 x64),
+  `437,594,544 B` (Ubuntu 26 x64), `436,597,368 B` (Ubuntu 24 ARM64), and
+  `439,473,448 B` (Ubuntu 26 ARM64). `capacity.mixed-caps` measured
+  `399,655,752 B` (Ubuntu 24 x64), `397,844,136 B` (Ubuntu 26 x64),
+  `411,952,696 B` (Ubuntu 24 ARM64), and `397,189,496 B` (Ubuntu 26 ARM64).
+- **BPF map memory:** `111,454,832 B` (`106.29 MiB`) across `12` preallocated
+  maps (`bpfMapMeasured=1`), explicitly reported alongside `forcedGCHeapBytes`,
+  `runtimeBytes`, `rssBytes`, and `kernelSocketBytes`.
+- **Steady and recovery gates:** `lookup.gate-terminal`, `lookup.gate-app-scope`,
+  post-fault recovery probes, `TIME_WAIT` post-burst probes (`50` alpha + `10`
+  bravo), and held-session continuity sweeps passed with zero misses on every
+  runner.
 
-`udp.fifty-destinations-one-session` sends the first datagram to 50 servers at
-once from one charlie socket while another app holds 10,000 files open, which
-slows the fallback owner scan on purpose. On PR #85's CI (job 120593704124)
-the scan hit its deadline, so the engine admitted the session as unknown and
-pinned it to main line a. All 50 servers saw one public endpoint, but on
-line a, not charlie's line c. Pinning an unknown session is intended (a mapping
-must not move mid-session), so eBPF is the fix, and the owner check joins the
-catalogue. The old single assertion, "one public endpoint on line c", reported
-"1 different" for that run, which read like a port change. It is now split:
+## Same-host three-way backend overhead (`7c767ea5`, run 41586785606)
 
-- **Hard, on every engine:** all 50 datagrams are sent within 5 ms and each is
-  answered once from the server it went to; the servers saw exactly **one
-  public endpoint**; the engine lists **exactly one UDP session** for the
-  socket; the servers recorded 50 datagrams to 50 addresses from one source.
-- **Hard on 1.0:** the session is either this charlie process (path, app id and
-  PID) on line c, or fully unknown on main, nothing in between; and the line
-  the servers saw is the line the engine's own record says it decided. A
-  nonempty wrong identity, charlie routed off line c, or an unknown session
-  the servers saw on line c all fail PR CI.
-- **Release check:** the session identifies charlie. The message carries the
-  old combined verdict from the same sample ("original one-endpoint-on-line-c
-  check would pass: true/false"). When the owner is missing, the engine's
-  owner-lookup statistics are logged next to it.
-- **Baseline:** sing-box reports no identity or PID per session, so the
-  servers' line c stays the whole verdict and stays hard.
+Run [41586785606](https://github.com/kekawia/net-switch/actions/runs/41586785606)
+executed back-to-back comparisons on the same `ubuntu-24.04` (`AMD EPYC 7763`,
+job `125754513553`) and `ubuntu-26.04` (`AMD EPYC 9V74`, job `125754513514`)
+hosts across three modes on commit `7c767ea5`:
 
-Harness regressions in `tests/linux/suite` run the judgement through the real
-harness: the CI sample (unknown, one endpoint on main) is release-blocked and
-still fails the release gate; every wrong-owner, wrong-line, two-endpoint and
-two-session sample fails PR CI; and the correct sample is a met measurement,
-not a pass.
+1. `proc_disabled`: `--owner-backend proc-fallback` with no eBPF programs loaded.
+2. `proc_instrumented`: `--owner-backend proc-fallback` with the production eBPF
+   bridge and sender probe loaded and enabled in the kernel while userspace kept
+   the non-provenance TUN pump and `/proc` scanner.
+3. `ebpf_full`: `--owner-backend ebpf` (default production path).
 
-These checks stayed hard on every runner and passed:
-- **TIME_WAIT probes:** all 50 alpha and 10 bravo post-burst probes were
-  identified, with no misses in 5,060 lookups.
-- **Live heap:** the largest forced-GC live heap was 412,428,664 B, against
-  the 483,183,820 B limit.
-- **Held sessions (§5.9):** an echo through every held UDP session in the
-  per-app, total and mixed cases had a p99 of 1.9–10.1 ms (the limit is
-  250 ms). Each full sweep took 0.27–0.98 s (the limit is 30 s). Every
-  swept session kept its recorded engine flow ID, and no sweep admitted or
-  refused anything.
-The sweep also proves continuity: each swept session must still be the engine
-flow recorded with the held pool (same flow ID for the same app source, so a
-session recreated with the same outbound address and port fails), and the
-sweep must make no new admission or UDP refusal.
-The held-session check isn't an attribution check and isn't in the catalogue.
+`lookup.p95-measured` (`0 / 700` misses in every run; p95 bucket upper bounds for
+unscoped 1x / 10x and scoped 1x / 10x, plus mean lookup latency):
 
-## Known fallback-scanner regression on slow x64 hosts (follow-up: eBPF task)
+| Host | Mode | Unscoped 1x / 10x p95 | Scoped 1x / 10x p95 | Mean lookup |
+| --- | --- | ---: | ---: | ---: |
+| Ubuntu 24 x64 (`EPYC 7763`) | `proc_disabled` | 3.9 ms / 2.0 ms | 300 µs / 600 µs | 212.959 µs |
+| Ubuntu 24 x64 (`EPYC 7763`) | `proc_instrumented` | 4.0 ms / 2.2 ms | 400 µs / 700 µs | 222.769 µs |
+| Ubuntu 24 x64 (`EPYC 7763`) | `ebpf_full` | 100 µs / 100 µs | 100 µs / 100 µs | 34.153 µs |
+| Ubuntu 26 x64 (`EPYC 9V74`) | `proc_disabled` | 3.1 ms / 1.9 ms | 200 µs / 600 µs | 165.368 µs |
+| Ubuntu 26 x64 (`EPYC 9V74`) | `proc_instrumented` | 3.2 ms / 1.5 ms | 200 µs / 900 µs | 180.106 µs |
+| Ubuntu 26 x64 (`EPYC 9V74`) | `ebpf_full` | 100 µs / 100 µs | 100 µs / 100 µs | 29.754 µs |
 
-This is a regression in the `/proc` fallback scanner, tracked here on its own
-so the attribution blocker can't hide it. **The eBPF attribution task owns
-it:** it must settle it with a back-to-back A/B of the round-3 build
-(`7c6692a`) and the current build on the same machine, before the scanner
-becomes the fallback.
+`performance.two-cpu-and-dns` (engine pinned to 2 CPUs, `0 / 60` DNS probe drops
+in every run):
 
-- **What:** in `overload.tcp-flows-total`, alone, on Ubuntu 26 x64, the
-  round-3 code held 65,536 flows in 3 of 3 runs (15.6–17.2% misses on
-  slow-cluster hosts, 12.9% on a fast one). The current code holds 65,536 on
-  fast hosts; on slow-cluster hosts it misses 26–32% of lookups and holds
-  about 56,200–61,200.
-- **Where:** hosted x64 runners of one label land on different AMD CPUs, and
-  scan cost splits into two clusters, about 8.5–10 µs and 12–14.6 µs per
-  descriptor. The slow cluster was always seen on the EPYC 7763, and once on
-  an EPYC 9V74 (the rebased head's Ubuntu 24 x64 run: 14.6 µs, 32.3% misses,
-  56,185 TCP and 61,115 mixed held, all classified as unknown overflow), so
-  it is a host condition, not only one CPU model. ARM64 runners are not
-  affected.
-- **Fixed in round 6:** per-read scan stamps allocated 438 MB in that case,
-  27% of everything the engine allocated. Stamping only slow and running reads
-  cut scan cost on the slow hosts from 14.4 to about 13 µs per descriptor and
-  misses from 32.8% to 24–29%.
-- **Ruled out:** restoring round 3's raw `/proc` opens on top of that made no
-  difference (59,427 / 57,969 / 65,536 held). The descriptor-table
-  reservation means those opens never grow the table.
-- **Not explained:** CPU profiles of both builds show the same kernel
-  readlink/getdents work in the scan, through a byte-identical syscall path,
-  and less GC in the current build. No code path accounts for the remaining
-  ~10% scan cost on slow-cluster hosts. Because each miss leads to more lookups,
-  that small difference flips the held count there.
-- **Now logged:** each acceptance report records the runner's CPU model
-  (`cpu:` in the environment line), so every sample can be tied to hardware.
+| Host | Mode | 1-stream Mbit/s (ratio, CPU, managed) | 8-stream Mbit/s (ratio, CPU, managed) |
+| --- | --- | ---: | ---: |
+| Ubuntu 24 x64 (`EPYC 7763`) | `proc_disabled` | 5,024.57 (0.7622, 7.405 s, 54.4 MB) | 4,659.37 (0.4691, 9.163 s, 66.2 MB) |
+| Ubuntu 24 x64 (`EPYC 7763`) | `proc_instrumented` | 5,044.91 (0.6781, 9.785 s, 62.8 MB) | 4,684.09 (0.4692, 9.831 s, 65.1 MB) |
+| Ubuntu 24 x64 (`EPYC 7763`) | `ebpf_full` | 4,882.01 (0.6751, 8.398 s, 85.7 MB) | 4,475.39 (0.4513, 8.140 s, 96.6 MB) |
+| Ubuntu 26 x64 (`EPYC 9V74`) | `proc_disabled` | 6,543.53 (0.7968, 9.549 s, 67.3 MB) | 6,727.42 (0.5284, 12.147 s, 71.2 MB) |
+| Ubuntu 26 x64 (`EPYC 9V74`) | `proc_instrumented` | 6,396.10 (0.8063, 9.551 s, 63.8 MB) | 6,473.69 (0.4966, 11.073 s, 82.8 MB) |
+| Ubuntu 26 x64 (`EPYC 9V74`) | `ebpf_full` | 6,232.11 (0.6618, 10.381 s, 94.8 MB) | 6,183.52 (0.4761, 8.676 s, 108.7 MB) |
 
-**Evidence** (GitHub Actions; the numbers above come from these):
+## Fallback-scanner A/B settlement (`7c6692a` vs current `proc-fallback`)
 
-- **438 MB / 27%:** [run 39552484899](https://github.com/AyoubAchour/net-switch/actions/runs/39552484899),
-  artifact 12324389232, file
-  `release/cases/overload.tcp-flows-total/engine/profiles-3733791922/heap.pprof`.
-  This is the first TCP-total heap profile: 437,886,654 of 1,632,757,435
-  allocated bytes are under `descriptorTrace.begin` (26.8%).
-- **About 401 MB:** the focused baseline run 39561941930 shows the same
-  allocation at about 401 MB. It is a different sample, not the same figure, so
-  don't compare the two as if they were one measurement.
-- **Comparison jobs (job ids):**
-  - round 3: 119099278106, 119110362995, 119110378244;
-  - baseline: 119095038905;
-  - trace-out: 119095075114;
-  - fixed: 119106885411, 119106899233;
-  - raw-open: 119099228722, 119099246573, 119099265076;
-  - rebased EPYC 9V74: 119193991061.
+Run [41586785606](https://github.com/kekawia/net-switch/actions/runs/41586785606)
+also ran the required same-host back-to-back A/B on `overload.tcp-flows-total`
+comparing the round-3 build (`7c6692aa2b3526b9e3d176d0b41c6fa699eb665f`) against
+current `--owner-backend proc-fallback` (`7c767ea5`) and primary `ebpf`:
 
-## Catalogue rules and hard checks
+| Host | Build / Mode | Burst misses | Tail misses | Held flows (after tail) | Mean lookup |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Ubuntu 24 x64 (`EPYC 7763`, job `125754513553`) | `7c6692a` | 13,548 / 77,035 (17.59%) | 8 / 9 | 65,536 (`65,535` pre-tail) | 2.948 ms |
+| Ubuntu 24 x64 (`EPYC 7763`, job `125754513553`) | `7c767ea5` `proc-fallback` | 23,279 / 80,002 (29.10%) | 100 / 100 | 58,771 (`6,765` shortfall = unknown overflow) | 4.094 ms |
+| Ubuntu 24 x64 (`EPYC 7763`, job `125754513553`) | `7c767ea5` `ebpf` | 0 / 65,536 (0.00%) | 0 / 0 | 65,536 | 15.406 µs |
+| Ubuntu 26 x64 (`EPYC 9V74`, job `125754513514`) | `7c6692a` | 7,482 / 70,970 (10.54%) | 0 / 0 | 65,536 | 1.966 ms |
+| Ubuntu 26 x64 (`EPYC 9V74`, job `125754513514`) | `7c767ea5` `proc-fallback` | 12,768 / 76,256 (16.74%) | 0 / 0 | 65,536 | 2.721 ms |
+| Ubuntu 26 x64 (`EPYC 9V74`, job `125754513514`) | `7c767ea5` `ebpf` | 15 / 65,536 (0.023%) | 0 / 0 | 65,536 | 12.017 µs |
 
-Deliberately injected misses remain separately reported: 132/132 in pending
-bytes, 3,000/3,000 in unknown-owner limits and 131/131 in memory pressure.
+Inspection of `git diff 7c6692a..7c767ea5 -- internal/engine/linux/` accounts for
+the slow-cluster difference between `7c6692a` and current `proc-fallback`:
 
-The round 3 acceptance clarification separates actual admission limits from
-occupancy lost to the fallback scanner. All capacity bounds, memory and byte
-budgets, independent server observations, stream survival, correct lanes,
-cleanup and steady lookup gates remain mandatory. An ordinary
-failure in a deferred case still fails the job. Fault cases keep their separate
-build. The terminal/app-scope gates remain hard in both serial and ten-at-once
-phases.
+- Between `7c6692a` (PR #36) and `7c767ea5`, PRs #83, #96, and #98 added bounded
+  production scan diagnostics (`owner_trace_linux.go` atomic in-flight read
+  tracking and slow-batch ring, plus `diag_trace_linux.go` per-query stage
+  timestamps), strict wall-clock `lookupContextError` checks (`!time.Now().Before(deadline)`)
+  before entering `holders()` (`ExpiredBeforeHolderScan=59`,
+  `ExactRepliesAfterDeadline=55` on `EPYC 7763`; `23` and `22` on `EPYC 9V74`),
+  and native socket-destroy / line-slot lifecycle tracking (`sockets_destroy_linux.go`,
+  `line_slots_linux.go`).
+- Even `7c6692a` missed `17.59%` of burst lookups on `EPYC 7763` and `10.54%` on
+  `EPYC 9V74` (21–35x above the `<= 0.5%` 1.0 requirement), confirming `/proc`
+  scanning cannot meet 1.0 storm attribution on either build.
+- Current `proc-fallback` retains its bounded degraded-mode guarantees (`0` wrong
+  identities, `0` leaked or phantom flows, `100%` of the `EPYC 7763` occupancy
+  shortfall accounted for by `21,331` distinct unknown-overflow refusals, `65,536`
+  held on `EPYC 9V74`, and `<= 4.0 ms` p95 across all `lookup.p95-measured`
+  phases), while primary `ebpf` settles storm attribution on the same hosts at
+  `0.00%` and `0.023%` misses.
 
-Mixed identity/routing checks are split. Small TCP probes exchange one response
-with the existing stream server and keep the socket open for a flow snapshot;
-UDP probes keep their existing socket and datagrams open for the same inspection.
-Counts, sequential TCP admission and connection deadlines are retained. Every
-probe's own server observation must match its exact identified or unknown flow.
-Wrong nonempty identities and wrong lines still fail; unknown flows must use the
-main lane. Stream identities are captured before the load, and every answer,
-survival and silence limit remains mandatory afterward.
+## Historical pre-eBPF baseline (`fb74394`, run 39565641409)
 
-The probe owner-known condition during load is a release blocker. Stream
-identity is checked before load and is a hard requirement. Each split check
-also reports whether its result would pass the original all-on-the-pinned-line
-assertion. No server observation is discarded or silently retried.
+Prior to eBPF integration, PR #36 delivered the Linux platform and `/proc`
+fallback scanner (measured on `fb74394` in Acceptance run
+[39565641409](https://github.com/kekawia/net-switch/actions/runs/39565641409);
+heap profile evidence in run
+[39552484899](https://github.com/kekawia/net-switch/actions/runs/39552484899),
+earlier capacity sizing runs
+[39441805445](https://github.com/kekawia/net-switch/actions/runs/39441805445)
+and
+[39461404148](https://github.com/kekawia/net-switch/actions/runs/39461404148)),
+deferring the 16 load-attribution, pagination, mixed-cap, and 50-destination
+UDP burst assertions until eBPF landed. All hard capacity accounting, flow-table
+snapshot correlation, probe identity/route corroboration, refusal classification,
+and held-load tail checks introduced for that catalogue remain active as
+mandatory `Check` assertions on 1.0.
 
-Post-fault recovery is different: the three sequential probes after pending
-overload, unknown-owner overload and a stalled TUN writer must all identify
-bravo and use line b. Their identity and per-connection server checks are hard
-PR failures, even though the enclosing overload case retains its declaration.
-The sequential probes after the TIME_WAIT burst and handshake overload are hard too, as are other
-route-recovery probes. A regression runs an unknown recovery result inside a
-declared load case and requires the actual harness to fail the job.
-The DNS-change survival precondition now also requires zero discarded streams;
-its original no-retry verdict is an assertion, not only a diagnostic line.
+## Release gate enforcement
 
-The `capacity.mixed-caps` release target is 49,152 TCP flows and 16,384 UDP
-sessions, alongside 4,096 retained TIME_WAIT endpoints. Every capacity fixture
-requires live heap immediately after forced GC to stay at most 460.8 MiB
-(90% of the 512 MiB `GOMEMLIMIT`). The capture precedes profile serialization.
-Go-managed memory (`Sys - HeapReleased`), process RSS, kernel socket memory
-and GC CPU share are reported, without gates. The previous managed-memory
-verdict is also logged. Kernel socket pages use the kernel's aggregate
-sockstat accounting, not an engine-only attribution. Bounds,
-survival and each held TCP tuple's identity/route/server correlation are hard.
-It reports baseline, UDP-only, UDP-plus-TIME_WAIT and mixed memory samples, so
-the incremental cost per session, per flow and per retained endpoint is visible.
-
-The total TCP cap fixture offers ten apps' 8,000 attempts, with the same
-100 concurrent attempts per app, followed by a fixed 100-attempt sequential
-tail from kilo. The tail always runs, even if the burst filled every slot.
-It waits for pending admissions to drain. Kilo remains
-below 8,192 even if all its 8,100 attempts succeed. No failed attempt is retried.
-The burst-only held-cap and attribution verdicts are logged before the tail;
-The original pre-tail 99.5% formula remains a measured release check as well
-as the complete-case formula, so successful tail lookups cannot dilute it.
-
-**Exact occupancy is deferred only with refusal evidence.** Shared admission
-counters classify TCP and UDP decisions at the occupied budget under the
-admission lock: total, UDP total, handshakes, app, UDP app, unknown, unknown UDP,
-policy, or unexplained. A known app's refusal below all limits is unexplained.
-No limits, timeouts, demand or scanner behavior change with this classification.
-
-The hard checks require all offered attempts to be held or explicitly refused;
-all admitted flows to remain held; engine flow counts to equal independent
-client/server counts absolutely, not just as a delta: at the first sample the
-engine's TCP and UDP counts must equal what clients and servers already held
-(the survival stream, the settled burst, the held UDP pool), and at the second
-sample that baseline plus the newly held clients, in every scope (total,
-per-app, mixed, tail, TCP and UDP), so a phantom flow carried through both
-samples fails; no failed outbound TCP dial or native UDP open; every forwarding
-refusal to have the expected cap or unknown-pool reason; and every lookup miss
-to be an unknown admission or counted unknown-pool overflow. Handshake, policy,
-unexplained or unrelated app-cap refusals cannot waive an occupancy shortfall.
-In the mixed case an app holding both protocols can legitimately reach its
-8,192 combined cap before the total fills; that reason is also allowed, and
-is subtracted from unknown-overflow credit. Each cap reason must have a matching
-engine peak. Mixed per-app refusals additionally require a UDP-holding client
-app to hold exactly 8,192 identified TCP and UDP sockets, as independently
-observed by servers on that app's non-main pinned line. Unknown-owner sockets
-on the main line never contribute to that per-app proof. Engine peaks alone
-are not independent evidence. The TCP-only offer remains below every
-app's cap and therefore accepts no per-app refusal.
-
-Decision counters include repeated SYNs. Therefore the proof subtracts **all
-allowed cap decisions** from the number of refused client attempts, even repeated
-ones. The remainder is a lower bound on distinct unknown-overflow refusals. Only
-when that lower bound covers the entire missing occupancy can the exact-count
-check be release-only. An unexplained remainder fails PR CI. The old exact-count
-verdict, real counts, reason counters, and lookup diagnostics are always logged.
-Per-app UDP checks additionally retain each app's original exact-count verdict.
-
-The tail runs while the large workload is still held. Its unknown lookup result
-is deferred only alongside the same hard refusal accounting. Its old zero-miss
-verdict stays visible. A timeout, failed dial, lost admission, or other refusal
-reason fails hard. This does not apply to the separate post-fault probes after
-the workload is removed.
-
-Run 39489577354 at `db38712`, Ubuntu 24 x64 job 118858841217, is the motivating
-failure: 19,673/80,001 burst lookup misses, 62,473 held TCP flows after the tail,
-and 65,535 mixed flows. The old exact checks failed. That old binary had no reason
-counters, so its failures cannot be retrospectively qualified by this rule.
-New runs must supply the classification evidence. Demand is not raised again.
-
-In the earlier x64 run
-[39441805445](https://github.com/AyoubAchour/net-switch/actions/runs/39441805445),
-the former 68,400 attempts produced 63,176 identified flows plus 2,048 unknown
-flows: only 65,224 live flows. That run correctly failed the unchanged exact
-65,536 cap/profile check. Increasing offered work lets the fixture exercise
-capacity despite the separately reported attribution defect. That historical
-offer increase is retained; resource, refusal, survival and cap bounds stay hard.
-
-The per-app TCP storm likewise offers 12,000 fixed attempts, still 300 at a time
-and without retries. Run [39461404148](https://github.com/AyoubAchour/net-switch/actions/runs/39461404148),
-Ubuntu 24 x64 job 118761521489, offered 9,000 and held 8,153 identified plus 847
-unknown flows, with no refusals. It correctly failed: it had exercised neither
-the exact 8,192 identified cap nor refusal at that cap. The larger offer exceeds
-the identified and unknown pools combined; both pool limits,
-the three-second refusal bound and stream survival remain mandatory. Reports
-state the offered count; the failed 9,000-attempt sample remains a failure.
-
-The scanner remains a bounded fallback, reported as `proc-fallback` in owner
-stats. Recent process observations can defer unrelated candidate scans for 5 ms
-after a live owner is found. They never supply identity or prove absence, and
-known positive hints always receive fresh validation. A previously unseen FD
-transfer to another process can remain undiscovered during that window; the
-fallback does not claim an exhaustive, simultaneous snapshot of all holders.
-
-The **Acceptance** workflow's manual `release_gate=true` mode runs the separate
-**Linux 1.0 release gate** check, with no engine workload:
+`nsaccept release-gate` inspects the complete source catalogue in
+`tests/linux/suite`, accepts no case filter, and fails if any `ReleaseBlocker` or
+`Pending` gate exists:
 
 ```text
 go run ./tests/linux/cmd/nsaccept release-gate
 ```
 
-It inspects the complete source catalogue, accepts no case filter, and fails while
-any declared release blocker or pending gate exists. It is separate from PR CI.
-Removing a declaration requires the eBPF implementation and its acceptance
-evidence; a green PR run or a lucky stress sample cannot clear it automatically.
+It runs automatically during `Build the harness` on every Linux Acceptance CI
+job as well as via `.github/workflows/linux-acceptance.yml`'s `release_gate=true`
+manual dispatch mode.

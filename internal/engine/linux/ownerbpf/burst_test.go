@@ -21,6 +21,9 @@ func TestBurstRejectsRecursionAndStaysPoisoned(t *testing.T) {
 		}
 		after := before
 		after[program].Misses++
+		if got := g.ChangedMask(after); got != (1 << program) {
+			t.Fatalf("program %d ChangedMask = %#b, want %#b", program, got, 1<<program)
+		}
 		if g.Certify(after, nil) {
 			t.Fatalf("program %d miss accepted", program)
 		}

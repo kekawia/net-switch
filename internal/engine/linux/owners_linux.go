@@ -54,12 +54,17 @@ type fdWindow struct {
 	identity   *ownerValidation
 }
 const (
+	OwnerBackendAuto         = "auto"
 	OwnerBackendProcFallback = "proc-fallback"
 	OwnerBackendEBPF         = "ebpf"
 )
 
 type Owners struct {
 	backend                 string
+	ebpfActive              atomic.Bool
+	autoFallback            bool
+	degradedFallback        bool
+	degradedReason          string
 	ebpf                    ebpfOwnerState
 	queries                 diagPool
 	batches                 descriptorBatches
@@ -108,6 +113,8 @@ type lookupStats struct {
 	UDPLateIdentityDiscarded                uint64
 	// This remains explicit while the eBPF initiator/sender backend is pending.
 	Backend                                                                              string
+	DegradedFallback                                                                     bool   `json:",omitempty"`
+	DegradedReason                                                                       string `json:",omitempty"`
 	Timeout, Missing, Ambiguous, Other                                                   uint64
 	CgroupHints, CgroupResolved, CgroupPopulated                                         uint64
 	LastError                                                                            string
@@ -138,7 +145,7 @@ type lookupStats struct {
 }
 
 func (o *Owners) isEBPFBackend() bool {
-	return o != nil && o.backend == OwnerBackendEBPF
+	return o != nil && o.ebpfActive.Load()
 }
 
 func (o *Owners) backendName() string {
@@ -164,6 +171,8 @@ func (o *Owners) Stats() any {
 		s.FDTableSizeError = err.Error()
 	}
 	o.mu.Lock()
+	s.DegradedFallback = o.degradedFallback
+	s.DegradedReason = o.degradedReason
 	if r := o.descriptors; r != nil {
 		s.FDReserveTarget, s.FDReserveBefore, s.FDReserveAfter, s.FDReserveLimit = r.Target, r.Before, r.After, r.Limit
 		if r.Err != nil {
@@ -292,33 +301,93 @@ func (o *Owners) Warm(ctx context.Context) error {
 }
 
 func NewOwners() *Owners {
-	return newOwners(OwnerBackendProcFallback)
+	return newOwners(OwnerBackendProcFallback, false)
 }
 
 func NewOwnersWithBackend(backend string) (*Owners, error) {
 	switch backend {
-	case "", OwnerBackendProcFallback:
-		return newOwners(OwnerBackendProcFallback), nil
+	case "", OwnerBackendAuto:
+		if !ebpfBackendSupported() {
+			o := newOwners(OwnerBackendProcFallback, true)
+			o.degradedFallback = true
+			o.degradedReason = "degraded_kernel_unsupported"
+			return o, nil
+		}
+		return newOwners(OwnerBackendEBPF, true), nil
+	case OwnerBackendProcFallback:
+		return newOwners(OwnerBackendProcFallback, false), nil
 	case OwnerBackendEBPF:
 		if !ebpfBackendSupported() {
 			return nil, errors.New("eBPF owner backend is only supported on linux/amd64 and linux/arm64")
 		}
-		return newOwners(OwnerBackendEBPF), nil
+		return newOwners(OwnerBackendEBPF, false), nil
 	default:
 		return nil, fmt.Errorf("unsupported owner backend %q", backend)
 	}
 }
 
-func newOwners(backend string) *Owners {
+func newOwners(backend string, autoFallback bool) *Owners {
 	// Inode hints and their subscribers share a shard, not the process-state
 	// lock. Small workloads need not retain and scan tens of MiB of empty
 	// index space, and a growing shard cannot stall every other lookup.
-	o := &Owners{backend: backend, budget: flows.Defaults(), cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), windows: make(map[uint32]fdWindow, 256), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
+	o := &Owners{backend: backend, autoFallback: autoFallback, budget: flows.Defaults(), cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), windows: make(map[uint32]fdWindow, 256), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
+	o.ebpfActive.Store(backend == OwnerBackendEBPF)
 	for i := range o.index {
 		o.index[i].inodes = make(map[uint32]inodeHolders, 16)
 		o.index[i].waiters = make(map[uint32]*inodeWaiter, 16)
 	}
 	return o
+}
+
+// ReadSelfBPFMapMemlockBytes sums deduplicated BPF map memlock bytes reported
+// by /proc/self/fdinfo/* across all open BPF maps in the current process.
+func ReadSelfBPFMapMemlockBytes() (totalBytes uint64, mapCount int, err error) {
+	entries, err := os.ReadDir("/proc/self/fdinfo")
+	if err != nil {
+		return 0, 0, err
+	}
+	seen := make(map[uint64]struct{}, 16)
+	for _, entry := range entries {
+		raw, rErr := os.ReadFile(filepath.Join("/proc/self/fdinfo", entry.Name()))
+		if rErr != nil {
+			continue
+		}
+		text := string(raw)
+		if !strings.Contains(text, "map_type:") {
+			continue
+		}
+		var (
+			mapID      uint64
+			memlock    uint64
+			hasMapID   bool
+			hasMemlock bool
+		)
+		for _, line := range strings.Split(text, "\n") {
+			if v, ok := strings.CutPrefix(line, "map_id:"); ok {
+				if parsed, pErr := strconv.ParseUint(strings.TrimSpace(v), 10, 64); pErr == nil {
+					mapID = parsed
+					hasMapID = true
+				}
+			} else if v, ok := strings.CutPrefix(line, "memlock:"); ok {
+				if parsed, pErr := strconv.ParseUint(strings.TrimSpace(v), 10, 64); pErr == nil {
+					memlock = parsed
+					hasMemlock = true
+				}
+			}
+		}
+		if !hasMemlock {
+			continue
+		}
+		if hasMapID && mapID != 0 {
+			if _, dup := seen[mapID]; dup {
+				continue
+			}
+			seen[mapID] = struct{}{}
+		}
+		totalBytes += memlock
+		mapCount++
+	}
+	return totalBytes, mapCount, nil
 }
 
 func (o *Owners) Close() {

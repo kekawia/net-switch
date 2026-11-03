@@ -98,6 +98,9 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 			env.Logf("engine process restricted to CPUs %s, GOMAXPROCS=%d", strings.Join(cpus, ","), env.CPUs)
 		}
 	}
+	if ownerBackend := os.Getenv("NSACCEPT_OWNER_BACKEND"); ownerBackend != "" {
+		p.cmd.Args = append(p.cmd.Args, "--owner-backend", ownerBackend)
+	}
 	p.cmd.Args = append(p.cmd.Args, "--profile-dir", p.profiles)
 	if os.Getenv("NSACCEPT_PROFILE") == "true" {
 		p.cmd.Args = append(p.cmd.Args, "--cpu-profile", "--trace-profile")
@@ -206,16 +209,30 @@ func (d *Driver) CaptureProfiles(ctx context.Context) error {
 				goruntime.MemStats
 				RSS, KernelSocketBytes      uint64
 				RSSValid, KernelSocketValid bool
+				BPFMapBytes                 uint64
+				BPFMapCount                 int
+				BPFMapValid                 bool
 			}
 			if err := json.Unmarshal(data, &sample); err != nil {
 				return err
 			}
-			d.process.memory = map[string]uint64{"forcedGCHeapBytes": sample.HeapAlloc, "forcedGCManagedBytes": sample.Sys - sample.HeapReleased, "forcedGCStackBytes": sample.StackInuse, "rssBytes": sample.RSS, "kernelSocketBytes": sample.KernelSocketBytes}
+			d.process.memory = map[string]uint64{
+				"forcedGCHeapBytes":    sample.HeapAlloc,
+				"forcedGCManagedBytes": sample.Sys - sample.HeapReleased,
+				"forcedGCStackBytes":   sample.StackInuse,
+				"rssBytes":             sample.RSS,
+				"kernelSocketBytes":    sample.KernelSocketBytes,
+				"bpfMapBytes":          sample.BPFMapBytes,
+				"bpfMapCount":          uint64(sample.BPFMapCount),
+			}
 			if sample.RSSValid {
 				d.process.memory["rssMeasured"] = 1
 			}
 			if sample.KernelSocketValid {
 				d.process.memory["kernelSocketMeasured"] = 1
+			}
+			if sample.BPFMapValid {
+				d.process.memory["bpfMapMeasured"] = 1
 			}
 			return nil
 		}

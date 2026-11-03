@@ -121,8 +121,8 @@ func (t *descriptorTrace) read(fd int64, started time.Time) {
 func (t *descriptorTrace) finish(fd int64, started, finished time.Time) {
 	t.runningNS.Store(0)
 	took := finished.Sub(started)
-	t.descriptorReads.Add(1)
-	t.descriptorReadNS.Add(int64(took))
+	t.descriptorReads.Store(t.descriptorReads.Load() + 1)
+	t.descriptorReadNS.Store(t.descriptorReadNS.Load() + int64(took))
 	if took < descriptorSlowRead {
 		return
 	}

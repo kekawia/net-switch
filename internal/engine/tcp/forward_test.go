@@ -298,3 +298,61 @@ func TestRemoteErrorResetsAppAndReleases(t *testing.T) {
 		t.Fatal("flow reservation leaked")
 	}
 }
+
+type tupleRejectProbe struct {
+	*testfake.Controller
+	mu     sync.Mutex
+	seen   []platform.Tuple
+	apps   []string
+	allowN int
+}
+
+func (p *tupleRejectProbe) AllowReject(string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seen = append(p.seen, platform.Tuple{})
+	return true
+}
+
+func (p *tupleRejectProbe) AllowRejectTuple(app string, tuple platform.Tuple) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.seen = append(p.seen, tuple)
+	p.apps = append(p.apps, app)
+	return len(p.seen) >= p.allowN
+}
+
+func TestRejectPassesTupleAcrossSilentDropAndRetransmit(t *testing.T) {
+	for _, where := range []string{"admission", "policy"} {
+		t.Run(where, func(t *testing.T) {
+			base := &testfake.Controller{}
+			bad := errors.New("denied")
+			if where == "admission" {
+				base.Err = bad
+			} else {
+				base.ResolveErr = bad
+			}
+			probe := &tupleRejectProbe{Controller: base, allowN: 2}
+			_, dial := harness(t, probe, testfake.Dialer{})
+			app, err := dial()
+			if app != nil {
+				app.Close()
+			}
+			if err == nil {
+				t.Fatal("expected dial refusal")
+			}
+			probe.mu.Lock()
+			defer probe.mu.Unlock()
+			if len(probe.seen) < 2 {
+				t.Fatalf("expected initial SYN drop + retransmit, saw %d calls", len(probe.seen))
+			}
+			first := probe.seen[0]
+			if !first.Source.IsValid() || first.Source.Addr() != netip.MustParseAddr("198.18.0.2") || first.Destination != netip.MustParseAddrPort("203.0.113.7:443") {
+				t.Fatalf("unexpected tuple %+v", first)
+			}
+			if probe.seen[1] != first {
+				t.Fatalf("retransmit tuple %+v did not match initial tuple %+v", probe.seen[1], first)
+			}
+		})
+	}
+}

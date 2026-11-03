@@ -30,13 +30,6 @@
       "reason": "Historical architecture and retirement documentation"
     },
     {
-      "path": "docs/linux-release-blockers.md",
-      "sha256": "8d2fd87263de3a8f40c3b224bf1cbf54934e949cc9cbaf6900b5848929afd2bd",
-      "matches": 1,
-      "category": "historical-doc",
-      "reason": "Historical architecture and retirement documentation"
-    },
-    {
       "path": "docs/m4-native-goldens.md",
       "sha256": "5915d88319da19f7bf96c729a0f8321ffd3fcdf4ed4998eb5ca9ad415275838b",
       "matches": 2,

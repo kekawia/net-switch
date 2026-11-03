@@ -75,7 +75,7 @@ type Env struct {
 	nextPort                        int    // the next source port ports hands out
 	ownerFaultStart                 *engine.Stats
 	injectedLookups, injectedMisses uint64
-	deferAttribution                bool
+	inspectLoad                     bool
 	streamFlows                     map[string]engine.Flow
 	engineCPUs                      int
 }
@@ -98,42 +98,13 @@ type registry struct {
 	cases []*harness.Case
 }
 
-// SYSTEM-DESIGN 5.6 defers attribution under load until eBPF lands. This
-// explicit 16-entry catalogue excludes the steady lookup gates and all other cases.
-// Capacity bounds, refusal causes, survival and routing remain mandatory.
-// Exact held occupancy is deferred only after distinct unknown-overflow
-// refusals account for its whole shortfall (round 3 acceptance clarification).
-func loadAttributionBlocker(id string) string {
-	switch id {
-	case "overload.udp-sessions-per-app", "overload.udp-sessions-total",
-		"overload.tcp-connection-storm", "overload.tcp-flows-total", "capacity.mixed-caps":
-		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: original 99.5% owner gate and exact held caps; only a fully accounted unknown-overflow shortfall is deferred; capacity bounds, refusal classification, memory, survival, identified routing and post-fault recovery stay hard"
-	case "overload.tcp-handshakes-in-flight",
-		"overload.tcp-buffer-budget", "overload.rejection-notices-per-app", "overload.rejection-notices-total",
-		"overload.timewait-cap", "overload.udp-pending-bytes", "overload.unknown-owner-limits",
-		"overload.tun-write-queue", "overload.memory-at-limit":
-		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: at least 99.5% natural lookups; identified under-load probe and stream owners; post-fault recovery stays hard"
-	case "protocol.flows-pagination":
-		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: at least 299 of 300 rows identify the app path, app id and PID"
-	case "udp.fifty-destinations-one-session":
-		// Added 2026-10-23 (SYSTEM-DESIGN 5.6): on PR #85's CI, job
-		// 120593704124, the proc fallback's holder scan hit its deadline behind
-		// 10,000 open files, so the burst's one session was admitted unknown
-		// and pinned to main line a. Pinning an unknown session is intended.
-		return "Linux eBPF attribution pending under SYSTEM-DESIGN 5.6: the burst's one UDP session identifies charlie (this process) while 10,000 files are open; one public endpoint, the servers corroborating the engine's own route, exactly one held session, and any nonempty wrong identity or wrong line stay hard"
-	default:
-		return ""
-	}
-}
-
 func (r *registry) add(id, title string, label harness.Label, spec string, timeout time.Duration, fn caseFunc) {
 	r.cases = append(r.cases, &harness.Case{
 		ID: id, Title: title, Label: label, Spec: spec, Timeout: timeout,
-		ReleaseBlocker: loadAttributionBlocker(id),
 		Run: func(t *harness.T) {
 			e := r.setup(t)
 			_, v10 := e.Eng.(engine.V1)
-			e.deferAttribution = v10 && loadAttributionBlocker(id) != ""
+			e.inspectLoad = v10 && strings.HasPrefix(id, "overload.")
 			fn(e)
 			if strings.HasPrefix(id, "overload.") {
 				if v, ok := e.Eng.(engine.V1); ok && v.Session() != nil {
@@ -142,7 +113,7 @@ func (r *registry) add(id, title string, label harness.Label, spec string, timeo
 					t.Require(e.ownerFaultStart == nil && st.LookupCount >= e.injectedLookups && st.LookupMisses >= e.injectedMisses, "every injected owner-fault window ended and its counters are accounted for")
 					count, misses := st.LookupCount-e.injectedLookups, st.LookupMisses-e.injectedMisses
 					t.Require(count > 0, "the overload window contains measured non-injected lookups (%d)", count)
-					t.ReleaseCheck(count > 0 && misses*200 <= count, "this overload window identifies at least 99.5%% of non-injected lookups (%d misses of %d; deliberately injected %d misses of %d reported separately)", misses, count, e.injectedMisses, e.injectedLookups)
+					t.Check(count > 0 && misses*200 <= count, "this overload window identifies at least 99.5%% of non-injected lookups (%d misses of %d; deliberately injected %d misses of %d reported separately)", misses, count, e.injectedMisses, e.injectedLookups)
 				}
 			}
 		},
@@ -667,7 +638,7 @@ func Describe(m map[engine.LineID]int) string {
 
 // ExpectTCP checks that n whoami connections from an app all leave on line want.
 func (e *Env) ExpectTCP(label, name string, user User, want engine.LineID, dst netip.Addr, n int) app.TCPResult {
-	if e.deferAttribution {
+	if e.inspectLoad {
 		return e.expectLoadTCP(label, name, user, want, dst, n)
 	}
 	r := e.TCP(name, user, "--to", To(dst, wire.PortWhoami), "--count", strconv.Itoa(n), "--timeout", "5000")
@@ -686,7 +657,7 @@ func (e *Env) UDP(name string, user User, args ...string) app.UDPResult {
 
 // ExpectUDP checks that an app's datagrams are all answered and all left on want.
 func (e *Env) ExpectUDP(label, name string, user User, want engine.LineID, dst netip.Addr, count int) app.UDPResult {
-	if e.deferAttribution {
+	if e.inspectLoad {
 		return e.expectLoadUDP(label, name, user, want, dst, count)
 	}
 	r := e.UDP(name, user, "--to", To(dst, wire.PortUDPEcho), "--count", strconv.Itoa(count))
@@ -754,7 +725,7 @@ func (e *Env) StartStream(name string, user User, duration time.Duration, extra 
 	args := append([]string{"stream", "--to", To(topo.Server4, wire.PortStream), "--duration", strconv.Itoa(int(duration.Milliseconds())), "--interval", "100",
 		"--local-port", strconv.Itoa(port)}, extra...)
 	bg := e.Start(Run{App: name, User: user, Args: args})
-	if e.deferAttribution {
+	if e.inspectLoad {
 		e.observeLoadStream(name, bg, uint16(port))
 	}
 	return bg
@@ -765,10 +736,6 @@ func StreamLines(s Stream) map[engine.LineID]int { return Lines(s.Seen) }
 
 // CheckStreamSurvived checks a stream stayed open and kept answering on one line.
 func (e *Env) CheckStreamSurvived(label string, s Stream, want engine.LineID) bool {
-	if e.deferAttribution {
-		e.T.Logf("%s: original survival-and-all-on-%s check would pass: %t", label, want,
-			s.Connected && s.ClosedAt == 0 && s.MaxGapMS < 2000 && StreamLines(s)[want] == s.Pongs && s.Pongs > 0)
-	}
 	want = e.streamLine(s, want)
 	lines := StreamLines(s)
 	return e.T.Check(s.Connected && s.ClosedAt == 0 && s.MaxGapMS < 2000 && lines[want] == s.Pongs && s.Pongs > 0,

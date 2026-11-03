@@ -93,6 +93,22 @@ type ProvenanceDatagramValidator interface {
 	ValidateUDPDatagram(sessionOwner Owner, provenance any) DatagramValidation
 }
 
+// ProvenanceLookupCostProvider optionally reports packet-provenance acquisition
+// latency accrued before forwarding admission (such as TUN bridge read, actor
+// enrichment drain, and envelope construction) so flow lookup histograms and
+// counters record end-to-end attribution latency rather than only in-memory
+// slot validation.
+type ProvenanceLookupCostProvider interface {
+	ProvenanceLookupCost() time.Duration
+}
+
+func ProvenanceLookupDuration(provenance any) time.Duration {
+	if p, ok := provenance.(ProvenanceLookupCostProvider); ok && p != nil {
+		return p.ProvenanceLookupCost()
+	}
+	return 0
+}
+
 type Tuple struct {
 	Source      netip.AddrPort `json:"source"`
 	Destination netip.AddrPort `json:"destination"`

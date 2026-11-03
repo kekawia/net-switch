@@ -90,9 +90,14 @@ var (
 // connect4/connect6/sendmsg4/sendmsg6/sock_ops and accepted-send PMU kprobes.
 type AcceptedSenderProbe struct {
 	*Probe
+	auxLinks            []link.Link
 	auxPrograms         []*ebpf.Program
+	auxMaps             []*ebpf.Map
 	countersMem         []byte
 	countersView        *[7]uint64
+	uringCreatesMem     []byte
+	uringCreatesView    *uint64
+	zeroInitialIOUring  bool
 	syncedNewActors     atomic.Uint64
 	syncedQueueOverflow atomic.Uint64
 	drainMu             sync.Mutex
@@ -103,6 +108,15 @@ func (ap *AcceptedSenderProbe) Close() error {
 		return nil
 	}
 	var errs []error
+	for i := len(ap.auxLinks) - 1; i >= 0; i-- {
+		errs = append(errs, ap.auxLinks[i].Close())
+	}
+	ap.auxLinks = nil
+	if ap.uringCreatesMem != nil {
+		errs = append(errs, unix.Munmap(ap.uringCreatesMem))
+		ap.uringCreatesMem = nil
+		ap.uringCreatesView = nil
+	}
 	if ap.countersMem != nil {
 		errs = append(errs, unix.Munmap(ap.countersMem))
 		ap.countersMem = nil
@@ -115,6 +129,10 @@ func (ap *AcceptedSenderProbe) Close() error {
 		errs = append(errs, ap.auxPrograms[i].Close())
 	}
 	ap.auxPrograms = nil
+	for i := len(ap.auxMaps) - 1; i >= 0; i-- {
+		errs = append(errs, ap.auxMaps[i].Close())
+	}
+	ap.auxMaps = nil
 	return errors.Join(errs...)
 }
 
@@ -350,7 +368,81 @@ func LoadEngineSenderProbe(cgroupRoot string, maxActors, queueEntries uint32) (_
 			return nil, err
 		}
 	}
+	ap.attachOptionalIOUringWatch()
 	return ap, nil
+}
+
+// attachOptionalIOUringWatch attaches a tracefs-free raw_tracepoint on
+// io_uring_create before scanning /proc in the root PID namespace. If the
+// kernel disables CONFIG_IO_URING or attachment fails, fast-skip stays disabled
+// and warm-actor checks fall back to /proc inspection.
+func (ap *AcceptedSenderProbe) attachOptionalIOUringWatch() {
+	uringMap, err := ebpf.NewMap(&ebpf.MapSpec{
+		Name:       "ns_uring_cnt",
+		Type:       ebpf.Array,
+		KeySize:    4,
+		ValueSize:  8,
+		MaxEntries: 1,
+		Flags:      unix.BPF_F_MMAPABLE,
+	})
+	if err != nil {
+		return
+	}
+	mem, err := unix.Mmap(uringMap.FD(), 0, os.Getpagesize(), unix.PROT_READ, unix.MAP_SHARED)
+	if err != nil {
+		_ = uringMap.Close()
+		return
+	}
+	prog, err := ebpf.NewProgram(&ebpf.ProgramSpec{
+		Name:    "tp_uring_create",
+		Type:    ebpf.RawTracepoint,
+		License: "Dual MIT/GPL",
+		Instructions: asm.Instructions{
+			asm.Mov.Imm(asm.R1, 0),
+			asm.StoreMem(asm.RFP, -4, asm.R1, asm.Word),
+			asm.LoadMapPtr(asm.R1, uringMap.FD()),
+			asm.Mov.Reg(asm.R2, asm.RFP),
+			asm.Add.Imm(asm.R2, -4),
+			asm.FnMapLookupElem.Call(),
+			asm.JEq.Imm(asm.R0, 0, "done"),
+			asm.Mov.Imm(asm.R1, 1),
+			asm.StoreXAdd(asm.R0, asm.R1, asm.DWord),
+			asm.Mov.Imm(asm.R0, 0).WithSymbol("done"),
+			asm.Return(),
+		},
+	})
+	if err != nil {
+		_ = unix.Munmap(mem)
+		_ = uringMap.Close()
+		return
+	}
+	tpLink, err := link.AttachRawTracepoint(link.RawTracepointOptions{
+		Name:    "io_uring_create",
+		Program: prog,
+	})
+	if err != nil {
+		_ = prog.Close()
+		_ = unix.Munmap(mem)
+		_ = uringMap.Close()
+		return
+	}
+	ap.auxMaps = append(ap.auxMaps, uringMap)
+	ap.auxPrograms = append(ap.auxPrograms, prog)
+	ap.auxLinks = append(ap.auxLinks, tpLink)
+	ap.uringCreatesMem = mem
+	ap.uringCreatesView = (*uint64)(unsafe.Pointer(&mem[0]))
+	// Scan /proc strictly AFTER raw_tracepoint/io_uring_create is live so any
+	// concurrent io_uring_setup either appears in /proc or increments uringCreatesView.
+	ap.zeroInitialIOUring = procRootHasZeroAsyncSubmitters()
+}
+
+// NoIOUringActive reports whether zero io_uring instances existed at probe
+// startup and zero io_uring_create events have occurred since.
+func (ap *AcceptedSenderProbe) NoIOUringActive() bool {
+	if ap == nil || !ap.zeroInitialIOUring || ap.uringCreatesView == nil {
+		return false
+	}
+	return atomic.LoadUint64(ap.uringCreatesView) == 0
 }
 
 func (ap *AcceptedSenderProbe) Enable() error {

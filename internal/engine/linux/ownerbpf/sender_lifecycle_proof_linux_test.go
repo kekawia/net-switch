@@ -1972,11 +1972,92 @@ func TestSenderEngineSpecLoad(t *testing.T) {
 	if err := engBridge.Stop(); err != nil {
 		t.Fatalf("engBridge.Stop: %v", err)
 	}
-	_ = unix.Close(tunFD)
-	tunFD = -1
 	if err := engReader.Close(); err != nil {
 		t.Fatalf("engReader.Close: %v", err)
 	}
 	engReader = nil
-	t.Logf("ENGINE_SPEC_KERNEL_PROOF cookie=%d packet_slots=%d queued_events=%d", cookie, engBridge.PacketSlots(), len(events))
+
+	// Prove standby bridge pre-load, unattached guardrails, sub-ms epoch swap,
+	// and live 2->1 tracepoint retirement of engBridge while standby is active.
+	standby, err := LoadEngineBridgeStandby(uint32(nlLink.Attrs().Index), uint32(nsSt.Ino), 500)
+	if err != nil {
+		t.Fatalf("LoadEngineBridgeStandby: %v", err)
+	}
+	defer func() {
+		if standby != nil {
+			if err := standby.Close(); err != nil {
+				t.Errorf("standby.Close: %v", err)
+			}
+		}
+	}()
+	if _, err := standby.Register(); err == nil {
+		t.Fatal("unactivated standby bridge permitted Register")
+	}
+	if err := standby.Enable(500); err == nil {
+		t.Fatal("unactivated standby bridge permitted Enable")
+	}
+	nextEpoch := epoch + 1
+	if err := standby.ActivateStandby(nextEpoch); err != nil {
+		t.Fatalf("standby.ActivateStandby: %v", err)
+	}
+	standbyReader, err := standby.Register()
+	if err != nil {
+		t.Fatalf("standby.Register: %v", err)
+	}
+	defer func() {
+		if standbyReader != nil {
+			if err := standbyReader.Close(); err != nil {
+				t.Errorf("standbyReader.Close: %v", err)
+			}
+		}
+	}()
+	if err := standby.Enable(500); err != nil {
+		t.Fatalf("standby.Enable: %v", err)
+	}
+
+	// Retire old engBridge while standby is live (2->1 tracepoint transition),
+	// then verify standby still captures and certifies TUN packets in nextEpoch.
+	if err := engBridge.Close(); err != nil {
+		t.Fatalf("engBridge.Close during live standby transition: %v", err)
+	}
+	sock2, err := dialBridgeUDPSocket(46099)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.Write(sock2, []byte("standby-epoch-ok")); err != nil {
+		_ = unix.Close(sock2)
+		t.Fatal(err)
+	}
+	cookie2, err := unix.GetsockoptUint64(sock2, unix.SOL_SOCKET, unix.SO_COOKIE)
+	_ = unix.Close(sock2)
+	if err != nil || cookie2 == 0 {
+		t.Fatalf("GetsockoptUint64 sock2 SO_COOKIE: cookie=%d err=%v", cookie2, err)
+	}
+
+	gotCount = 0
+	deadline = time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		n, rErr := standbyReader.ReadBurstInto(tunFD, rawBufs, sizes, decisions)
+		if rErr != nil {
+			t.Fatalf("standby ReadBurstInto: %v", rErr)
+		}
+		if n > 0 {
+			gotCount = n
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if gotCount != 1 || decisions[0].Status != ReadCookie || decisions[0].Packet.Cookie != cookie2 || decisions[0].Packet.Epoch != nextEpoch {
+		t.Fatalf("standby ReadBurstInto got count=%d decision=%+v, want cookie=%d epoch=%d", gotCount, decisions[0], cookie2, nextEpoch)
+	}
+	if err := standby.Stop(); err != nil {
+		t.Fatalf("standby.Stop: %v", err)
+	}
+	_ = unix.Close(tunFD)
+	tunFD = -1
+	if err := standbyReader.Close(); err != nil {
+		t.Fatalf("standbyReader.Close: %v", err)
+	}
+	standbyReader = nil
+	t.Logf("ENGINE_SPEC_KERNEL_PROOF cookie=%d standby_cookie=%d packet_slots=%d queued_events=%d", cookie, cookie2, engBridge.PacketSlots(), len(events))
 }

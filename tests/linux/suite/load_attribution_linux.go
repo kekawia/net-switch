@@ -15,8 +15,8 @@ import (
 	"github.com/AyoubAchour/net-switch/tests/linux/wire"
 )
 
-// An unknown owner may use the main lane, but a wrong identity or wrong route
-// is never an attribution deferral. Callers also compare the independent server
+// An unknown owner may use the main lane, while any nonempty wrong identity or
+// wrong route is invalid. Callers also compare the independent server
 // observation with this exact flow, so two incorrectly swapped routes cannot
 // cancel one another in aggregate counts.
 func loadFlowLine(f engine.Flow, path string, pid int, want engine.LineID) (engine.LineID, bool, error) {
@@ -46,9 +46,6 @@ func (e *Env) loadLine(name string) engine.LineID {
 }
 
 func (e *Env) checkLoadIdentity(ok bool, format string, args ...any) bool {
-	if e.deferAttribution {
-		return e.T.ReleaseCheck(ok, format, args...)
-	}
 	return e.T.Check(ok, format, args...)
 }
 
@@ -117,22 +114,13 @@ func (e *Env) expectLoadTCP(label, name string, user User, want engine.LineID, d
 	return app.TCPResult{Count: n, OK: result.Established, Errors: result.Errors, Seen: seen, Connect: result.Connect, FailedMS: result.FailedMS, Attempts: attempts}
 }
 
-// A load declaration never covers recovery after that load has ended.
+// Recovery probes verify steady-state attribution and routing after load ends.
 func (e *Env) expectRecoveryTCP(label string) {
 	e.expectSteadyTCP(label, "bravo", "b", topo.Server4, 3)
 }
 
-func (e *Env) withSteadyAttribution(check func()) {
-	deferred := e.deferAttribution
-	e.deferAttribution = false
-	defer func() { e.deferAttribution = deferred }()
-	check()
-}
-
 func (e *Env) expectSteadyTCP(label, name string, want engine.LineID, dst netip.Addr, count int, burstEnd ...int64) {
-	e.withSteadyAttribution(func() {
-		e.expectLoadTCP(label, name, AsUser, want, dst, count, burstEnd...)
-	})
+	e.expectLoadTCP(label, name, AsUser, want, dst, count, burstEnd...)
 }
 
 // Correlate each client's own local/remote tuple, its engine row, the source
@@ -197,7 +185,7 @@ func (e *Env) expectLoadUDP(label, name string, user User, want engine.LineID, d
 	records := Select(e.Records(), Tagged("udp", result.Token))
 	e.T.Check(result.Received == result.Sent && result.Sent == count && Lines(result.Seen)[line] == count && len(records) == count && RecordLines(records)[line] == count,
 		"%s: all %d datagrams answered on required line %s, also observed by the server (%d sent, %d answered, %s)", label, count, line, result.Sent, result.Received, Describe(RecordLines(records)))
-	e.T.ReleaseCheck(known, "%s: UDP owner is identified (%t); original all-on-%s check would pass: %t", label, known, want, result.Received == count && Lines(result.Seen)[want] == count)
+	e.T.Check(known, "%s: UDP owner is identified (%t); original all-on-%s check would pass: %t", label, known, want, result.Received == count && Lines(result.Seen)[want] == count)
 	release.Open(e)
 	var final app.UDPResult
 	bg.WaitJSON(e, time.Minute, &final)
@@ -220,13 +208,10 @@ func (e *Env) observeLoadStream(name string, bg *Bg, port uint16) {
 }
 
 func (e *Env) streamLine(s Stream, want engine.LineID) engine.LineID {
-	if !e.deferAttribution {
+	if !e.inspectLoad {
 		return want
 	}
-	f, ok := e.streamFlows[s.LocalAddr]
+	_, ok := e.streamFlows[s.LocalAddr]
 	e.T.Check(ok, "the stream result matches its previously inspected live tuple (%s)", s.LocalAddr)
-	if ok && f.App == "" {
-		return "a"
-	}
 	return want
 }

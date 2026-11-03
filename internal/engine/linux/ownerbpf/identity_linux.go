@@ -19,8 +19,12 @@ import (
 )
 
 const (
-	pfKthread       = 0x00200000
-	maxProcReadSize = 64 << 10
+	pfKthread             = 0x00200000
+	maxProcReadSize       = 64 << 10
+	maxMapsFallbackBytes  = 4 << 20
+	maxEnvironStreamBytes = 8 << 20
+	maxAsyncFDScan        = 262144
+	procPIDInitIno        = 0xEFFFFFFC
 )
 
 func readBoundedFD(fd int, maxBytes int) ([]byte, error) {
@@ -101,14 +105,61 @@ func parseProcStatusCreds(raw string) (uid, gid uint32, err error) {
 // HasAsyncSubmitter reports whether the target process currently holds an
 // open io_uring instance or runs an io_uring sqpoll/io-wq worker thread.
 func HasAsyncSubmitter(tgid uint32) bool {
+	has, _ := probeAsyncSubmitter(tgid, false)
+	return has
+}
+
+func probeAsyncSubmitter(tgid uint32, strictAccess bool) (has bool, uncertain bool) {
 	pidStr := strconv.FormatUint(uint64(tgid), 10)
-	if mapsFD, err := unix.Open(filepath.Join("/proc", pidStr, "maps"), unix.O_RDONLY|unix.O_CLOEXEC, 0); err == nil {
-		raw, readErr := readBoundedFD(mapsFD, maxProcReadSize)
-		_ = unix.Close(mapsFD)
-		if readErr == nil && bytes.Contains(raw, []byte("[io_uring]")) {
-			return true
+	if strictAccess {
+		statBytes, statErr := os.ReadFile(filepath.Join("/proc", pidStr, "stat"))
+		if statErr != nil {
+			if os.IsNotExist(statErr) || errors.Is(statErr, unix.ENOENT) || errors.Is(statErr, unix.ESRCH) {
+				return false, false
+			}
+			return false, true
+		}
+		_, kthread, parseErr := parseProcStat(string(statBytes))
+		if parseErr != nil {
+			return false, true
+		}
+		if kthread {
+			taskEntries, tErr := os.ReadDir(filepath.Join("/proc", pidStr, "task"))
+			if tErr != nil {
+				if os.IsNotExist(tErr) || errors.Is(tErr, unix.ENOENT) || errors.Is(tErr, unix.ESRCH) {
+					return false, false
+				}
+				return false, true
+			}
+			for _, entry := range taskEntries {
+				commBytes, commErr := os.ReadFile(filepath.Join("/proc", pidStr, "task", entry.Name(), "comm"))
+				if commErr != nil {
+					continue
+				}
+				comm := strings.TrimSpace(string(commBytes))
+				if strings.HasPrefix(comm, "iou-sqp") || strings.HasPrefix(comm, "iou-wrk") {
+					return true, false
+				}
+			}
+			return false, false
 		}
 	}
+
+	mapsFD, err := unix.Open(filepath.Join("/proc", pidStr, "maps"), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if err == nil {
+		mapsFile := os.NewFile(uintptr(mapsFD), "proc-maps")
+		found, readErr := readerContainsToken(mapsFile, []byte("[io_uring]"), 32<<10, maxAsyncMapsStreamBytes)
+		_ = mapsFile.Close()
+		if readErr == nil && found {
+			return true, false
+		}
+		if strictAccess && readErr != nil && !errors.Is(readErr, unix.ENOENT) && !errors.Is(readErr, unix.ESRCH) {
+			return false, true
+		}
+	} else if strictAccess && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ESRCH) {
+		return false, true
+	}
+
 	taskEntries, err := os.ReadDir(filepath.Join("/proc", pidStr, "task"))
 	if err == nil {
 		for _, entry := range taskEntries {
@@ -118,10 +169,13 @@ func HasAsyncSubmitter(tgid uint32) bool {
 			}
 			comm := strings.TrimSpace(string(commBytes))
 			if strings.HasPrefix(comm, "iou-sqp") || strings.HasPrefix(comm, "iou-wrk") {
-				return true
+				return true, false
 			}
 		}
+	} else if strictAccess && !os.IsNotExist(err) && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ESRCH) {
+		return false, true
 	}
+
 	fdDir, err := unix.Open(filepath.Join("/proc", pidStr, "fd"), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err == nil {
 		dirFile := os.NewFile(uintptr(fdDir), "proc-fd")
@@ -132,21 +186,89 @@ func HasAsyncSubmitter(tgid uint32) bool {
 			names, readErr := dirFile.Readdirnames(512)
 			for _, name := range names {
 				scanned++
-				if scanned > 8192 {
+				if scanned > maxAsyncFDScan {
 					// Fail closed on extreme high-FD processes rather than scanning unboundedly.
-					return true
+					return true, false
 				}
 				n, linkErr := unix.Readlinkat(int(dirFile.Fd()), name, linkBuf[:])
 				if linkErr == nil && n > 0 && bytes.Contains(linkBuf[:n], []byte("[io_uring]")) {
-					return true
+					return true, false
 				}
 			}
-			if errors.Is(readErr, io.EOF) || readErr != nil || len(names) == 0 {
+			if errors.Is(readErr, io.EOF) || len(names) == 0 {
+				break
+			}
+			if readErr != nil {
+				if strictAccess && !errors.Is(readErr, unix.ENOENT) && !errors.Is(readErr, unix.ESRCH) {
+					return false, true
+				}
 				break
 			}
 		}
+	} else if strictAccess && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.ESRCH) {
+		return false, true
 	}
-	return false
+	return false, false
+}
+
+// procRootHasZeroAsyncSubmitters verifies that /proc belongs to the root PID
+// namespace (PROC_PID_INIT_INO) and that across two consecutive full /proc
+// sweeps zero processes or kernel worker threads hold an io_uring instance.
+func procRootHasZeroAsyncSubmitters() bool {
+	var pidNS unix.Stat_t
+	if err := unix.Stat("/proc/self/ns/pid", &pidNS); err != nil || pidNS.Ino != procPIDInitIno {
+		return false
+	}
+	for range 2 {
+		entries, err := os.ReadDir("/proc")
+		if err != nil {
+			return false
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			pid64, parseErr := strconv.ParseUint(entry.Name(), 10, 32)
+			if parseErr != nil || pid64 == 0 {
+				continue
+			}
+			has, uncertain := probeAsyncSubmitter(uint32(pid64), true)
+			if has || uncertain {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func statExeIdentity(pidStr string) (dev, ino uint64, err error) {
+	var exeSt unix.Stat_t
+	err = unix.Stat(filepath.Join("/proc", pidStr, "exe"), &exeSt)
+	if err == nil {
+		return EncodeKernelDev(unix.Major(uint64(exeSt.Dev)), unix.Minor(uint64(exeSt.Dev))), exeSt.Ino, nil
+	}
+	if !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EPERM) {
+		return 0, 0, err
+	}
+	rawExeLink, linkErr := os.Readlink(filepath.Join("/proc", pidStr, "exe"))
+	if linkErr != nil {
+		return 0, 0, err
+	}
+	mapsFD, openErr := unix.Open(filepath.Join("/proc", pidStr, "maps"), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if openErr != nil {
+		return 0, 0, err
+	}
+	mapsFile := os.NewFile(uintptr(mapsFD), "proc-maps-exe")
+	rawMaps, readErr := io.ReadAll(io.LimitReader(mapsFile, maxMapsFallbackBytes+1))
+	_ = mapsFile.Close()
+	if readErr != nil || len(rawMaps) > maxMapsFallbackBytes {
+		return 0, 0, err
+	}
+	mappedDev, mappedIno, ok := parseProcMapsExeIdentity(string(rawMaps), rawExeLink)
+	if !ok {
+		return 0, 0, err
+	}
+	return mappedDev, mappedIno, nil
 }
 
 // IsActorIncarnationAlive reports whether ctx still matches the live, non-zombie
@@ -173,12 +295,11 @@ func IsActorIncarnationAlive(ctx ExecutionContext) bool {
 	if ctx.KernelThread {
 		return true
 	}
-	var exeSt unix.Stat_t
-	if err := unix.Stat(filepath.Join("/proc", pidStr, "exe"), &exeSt); err != nil {
+	dev, ino, err := statExeIdentity(pidStr)
+	if err != nil {
 		return false
 	}
-	dev := EncodeKernelDev(unix.Major(uint64(exeSt.Dev)), unix.Minor(uint64(exeSt.Dev)))
-	return dev == ctx.ExeDev && exeSt.Ino == ctx.ExeIno
+	return dev == ctx.ExeDev && ino == ctx.ExeIno
 }
 
 // SampleExecutionContext reads one execution-context point sample from /proc/<tgid>.
@@ -214,12 +335,12 @@ func SampleExecutionContext(tgid uint32, startBoottime, execID uint64) (Executio
 	ctx.UID = uid
 	ctx.GID = gid
 
-	var exeSt unix.Stat_t
-	if err := unix.Stat(filepath.Join("/proc", pidStr, "exe"), &exeSt); err != nil {
+	exeDev, exeIno, err := statExeIdentity(pidStr)
+	if err != nil {
 		return ExecutionContext{}, nil, err
 	}
-	ctx.ExeDev = EncodeKernelDev(unix.Major(uint64(exeSt.Dev)), unix.Minor(uint64(exeSt.Dev)))
-	ctx.ExeIno = exeSt.Ino
+	ctx.ExeDev = exeDev
+	ctx.ExeIno = exeIno
 
 	var mntSt, netSt, pidSt unix.Stat_t
 	if err := unix.Stat(filepath.Join("/proc", pidStr, "ns", "mnt"), &mntSt); err != nil {
@@ -292,18 +413,11 @@ func readAppImageEnvAndBacking(tgid uint32) (appImageEnv, appDirEnv string, back
 	if err != nil {
 		return "", "", nil
 	}
-	raw, readErr := readBoundedFD(envFD, maxProcReadSize)
-	_ = unix.Close(envFD)
-	if readErr != nil || len(raw) == 0 {
+	envFile := os.NewFile(uintptr(envFD), "proc-environ")
+	appImageEnv, appDirEnv, ok := parseAppImageEnviron(envFile, maxEnvironStreamBytes)
+	_ = envFile.Close()
+	if !ok || (appImageEnv == "" && appDirEnv == "") {
 		return "", "", nil
-	}
-	for _, entry := range bytes.Split(raw, []byte{0}) {
-		s := string(entry)
-		if strings.HasPrefix(s, "APPIMAGE=") {
-			appImageEnv = strings.TrimPrefix(s, "APPIMAGE=")
-		} else if strings.HasPrefix(s, "APPDIR=") {
-			appDirEnv = strings.TrimPrefix(s, "APPDIR=")
-		}
 	}
 	cleanImg := path.Clean(strings.TrimSpace(appImageEnv))
 	if !strings.HasPrefix(cleanImg, "/") {
@@ -437,6 +551,14 @@ func (l *IdentityLedger) SyncActorRecords(records map[ActorKey]ActorEvidence, pr
 // socket-to-actor references for bounded retirement on SOCK_DESTROY and
 // memoizing async-submitter probes per TGID within the batch.
 func (rt *ProvenanceRuntime) SyncQueuedActors(events []QueuedActorEvent) {
+	rt.SyncQueuedActorsWithOptions(events, false)
+}
+
+// SyncQueuedActorsWithOptions processes newly popped O(1) BPF actor-send events.
+// When skipWarmAsyncCheck is true (proven by zero initial io_uring instances in
+// the root PID namespace and zero raw_tracepoint/io_uring_create invocations),
+// warm-actor async-submitter /proc scans are skipped in O(1).
+func (rt *ProvenanceRuntime) SyncQueuedActorsWithOptions(events []QueuedActorEvent, skipWarmAsyncCheck bool) {
 	if rt == nil || len(events) == 0 {
 		return
 	}
@@ -465,8 +587,14 @@ func (rt *ProvenanceRuntime) SyncQueuedActors(events []QueuedActorEvent) {
 		}
 	}
 
-	asyncByTGID := make(map[uint32]bool)
+	var asyncByTGID map[uint32]bool
 	hasAsync := func(tgid uint32) bool {
+		if skipWarmAsyncCheck {
+			return false
+		}
+		if asyncByTGID == nil {
+			asyncByTGID = make(map[uint32]bool)
+		}
 		if v, ok := asyncByTGID[tgid]; ok {
 			return v
 		}
@@ -479,16 +607,14 @@ func (rt *ProvenanceRuntime) SyncQueuedActors(events []QueuedActorEvent) {
 		rt.ReapExitedUnreferencedActors()
 	}
 
-	rt.SyncActors(func(l *IdentityLedger, processed map[ActorKey]bool, track func(ActorKey, ActorIdentityKey, time.Time)) {
+	rt.SyncActors(func(l *IdentityLedger, track func(ActorKey, time.Time) bool) {
 		for _, item := range sorted {
 			k := item.Key
 			ev := item.Evidence
-			if processed[k] {
+			if !track(k, observedAt) {
 				continue
 			}
-			processed[k] = true
 			actorKey := ActorIdentityKey{TGID: k.TGID, StartBoottime: k.Start, ExecID: k.Exec}
-			track(k, actorKey, observedAt)
 			if _, ok := l.actors[actorKey]; ok {
 				if hasAsync(k.TGID) {
 					l.ObserveUnobservableSubmitter(k.Cookie)

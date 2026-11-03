@@ -336,6 +336,149 @@ func diagDump(ctx context.Context, family, protocol int, local netip.AddrPort) (
 	}
 	return nil, errDiagInterrupted
 }
+
+// parseNetlinkDiagCookies parses a raw NETLINK_SOCK_DIAG frame in-place without
+// allocating NetlinkMessage or socketRow slices, invoking onCookie for each
+// non-zero inet_diag cookie and reporting done when NLMSG_DONE is reached.
+func parseNetlinkDiagCookies(raw []byte, sequence uint32, onCookie func(uint64)) (done bool, err error) {
+	b := raw
+	for len(b) > 0 {
+		if len(b) < unix.NLMSG_HDRLEN {
+			return false, unix.EINVAL
+		}
+		msgLen := int(binary.NativeEndian.Uint32(b[0:4]))
+		if msgLen < unix.NLMSG_HDRLEN || msgLen > len(b) {
+			return false, unix.EINVAL
+		}
+		msgType := binary.NativeEndian.Uint16(b[4:6])
+		msgFlags := binary.NativeEndian.Uint16(b[6:8])
+		msgSeq := binary.NativeEndian.Uint32(b[8:12])
+		if msgSeq != sequence {
+			return false, errors.New("unexpected sock_diag sequence")
+		}
+		if msgFlags&unix.NLM_F_DUMP_INTR != 0 {
+			return false, errDiagInterrupted
+		}
+		payload := b[unix.NLMSG_HDRLEN:msgLen]
+		switch msgType {
+		case unix.NLMSG_DONE:
+			if len(payload) >= 4 && binary.NativeEndian.Uint32(payload) != 0 {
+				return false, syscall.Errno(-int32(binary.NativeEndian.Uint32(payload)))
+			}
+			return true, nil
+		case unix.NLMSG_ERROR:
+			if len(payload) < 4 {
+				return false, errors.New("short sock_diag error")
+			}
+			if code := int32(binary.NativeEndian.Uint32(payload)); code != 0 {
+				return false, syscall.Errno(-code)
+			}
+		case 20:
+			if len(payload) < 72 {
+				return false, errors.New("short inet_diag message")
+			}
+			if payload[0] != unix.AF_INET && payload[0] != unix.AF_INET6 {
+				return false, errors.New("unknown inet_diag family")
+			}
+			for off := 72; off+4 <= len(payload); {
+				n := int(binary.NativeEndian.Uint16(payload[off:]))
+				if n < 4 || off+n > len(payload) {
+					return false, errors.New("invalid inet_diag attribute")
+				}
+				off += (n + 3) &^ 3
+			}
+			cookie := uint64(binary.NativeEndian.Uint32(payload[44:48])) | uint64(binary.NativeEndian.Uint32(payload[48:52]))<<32
+			if cookie != 0 && onCookie != nil {
+				onCookie(cookie)
+			}
+		case unix.NLMSG_OVERRUN:
+			return false, unix.ENOBUFS
+		}
+		aligned := (msgLen + unix.NLMSG_ALIGNTO - 1) &^ (unix.NLMSG_ALIGNTO - 1)
+		if aligned >= len(b) {
+			b = nil
+		} else {
+			b = b[aligned:]
+		}
+	}
+	return false, nil
+}
+
+func diagStreamCookiesOne(ctx context.Context, family, protocol int, onCookie func(uint64)) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK, unix.NETLINK_SOCK_DIAG)
+	if err != nil {
+		return err
+	}
+	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		_ = unix.Close(fd)
+		return err
+	}
+	f := os.NewFile(uintptr(fd), "sock_diag_cookies")
+	canceled := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		_ = f.SetReadDeadline(time.Now())
+		close(canceled)
+	})
+	defer func() {
+		if !stop() {
+			<-canceled
+		}
+		_ = f.Close()
+	}()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = f.SetReadDeadline(deadline)
+	}
+
+	var req [72]byte
+	binary.NativeEndian.PutUint32(req[0:4], uint32(len(req)))
+	binary.NativeEndian.PutUint16(req[4:6], 20)
+	binary.NativeEndian.PutUint16(req[6:8], uint16(unix.NLM_F_REQUEST|unix.NLM_F_DUMP))
+	sequence := diagSequence.Add(1)
+	binary.NativeEndian.PutUint32(req[8:12], sequence)
+	req[16] = byte(family)
+	req[17] = byte(protocol)
+	binary.NativeEndian.PutUint32(req[20:24], ^uint32(0))
+	for i := 64; i < 72; i++ {
+		req[i] = 255
+	}
+	if err := unix.Sendto(fd, req[:], 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		return err
+	}
+
+	pooled := diagDumpBuffers.Get().(*[]byte)
+	defer diagDumpBuffers.Put(pooled)
+	buf := *pooled
+
+	for {
+		n, readErr := readNetlink(f, buf)
+		if readErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return readErr
+		}
+		done, parseErr := parseNetlinkDiagCookies(buf[:n], sequence, onCookie)
+		if parseErr != nil {
+			return parseErr
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+func diagStreamCookies(ctx context.Context, family, protocol int, onCookie func(uint64)) error {
+	for i := 0; i < 3; i++ {
+		err := diagStreamCookiesOne(ctx, family, protocol, onCookie)
+		if !errors.Is(err, errDiagInterrupted) {
+			return err
+		}
+	}
+	return errDiagInterrupted
+}
 func familyOf(a netip.Addr) int {
 	if a.Is6() {
 		return unix.AF_INET6

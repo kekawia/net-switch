@@ -13,18 +13,19 @@ const (
 	bpfMapFlagMmapable = 0x400
 
 	// DefaultEngineMaxActors and DefaultEngineMaxSocketSlots size the production
-	// eBPF actor map and mmap socket-slot table to cover simultaneous 65,536 TCP
-	// flows + 16,384 UDP sessions + burst refusal headroom within the attribution
-	// memory budget.
-	DefaultEngineMaxActors      uint32 = 131072
-	DefaultEngineMaxSocketSlots int    = 131072
+	// eBPF actor map and mmap socket-slot table to cover host-wide sockets across
+	// client, engine-relay, refused, and peer namespaces (~200k simultaneous burst
+	// sockets in mixed-caps/overload fixtures) without map/slot poisoning while
+	// keeping userspace Go heap metadata compact (~10 MiB).
+	DefaultEngineMaxActors      uint32 = 524288
+	DefaultEngineMaxSocketSlots int    = 524288
 	DefaultEngineMaxSnapshots   int    = 16384
 	DefaultEngineMaxBlobBytes   int    = 1 << 20
 
 	// DefaultEngineActorEventQueue sizes the lockless-signaled new-actor BPF
 	// queue drained per burst; if a burst ever exceeds it, counters[6] triggers
 	// a full actors-map catchup without losing any retained actor record.
-	DefaultEngineActorEventQueue uint32 = 16384
+	DefaultEngineActorEventQueue uint32 = 65536
 
 	MaxEnginePacketSlots uint64 = 1 << 20
 )
@@ -93,7 +94,140 @@ func PrepareEngineBridgeSpec(actualQueue, cpus, readers uint64) (*ebpf.Collectio
 
 	delete(spec.Programs, "perf_consume")
 	spec.Maps["packets"].MaxEntries = uint32(packetSlots)
+	for _, progName := range []string{"consume", "freed"} {
+		if err := stripUnusedBridgeTerminalCPUStats(progName, spec.Programs[progName]); err != nil {
+			return nil, 0, err
+		}
+	}
 	return spec, packetSlots, nil
+}
+
+// stripUnusedBridgeTerminalCPUStats removes the fixture-only cpu_state.consumes
+// and cpu_state.frees skb->dev/ifindex/netns inspection block (insns[16..58] and
+// its out-of-line counter increment insns[190..195]) from production consume and
+// freed programs. Without this, every consume_skb and kfree_skb across the host
+// executes four bpf_probe_read_kernel calls before checking Maps["packets"],
+// inflating the raw_tracepoint prog->active window by ~40x under plain process
+// context where softirqs and (on Linux 7.0+) task preemption remain enabled.
+func stripUnusedBridgeTerminalCPUStats(name string, prog *ebpf.ProgramSpec) error {
+	if prog == nil {
+		return fmt.Errorf("embedded bridge %s program missing", name)
+	}
+	insns := prog.Instructions
+	if len(insns) != 279 {
+		return fmt.Errorf("embedded bridge %s instruction count = %d, want 279", name, len(insns))
+	}
+	wantAtomicOffset := int16(56)
+	if name == "freed" {
+		wantAtomicOffset = 64
+	}
+	if insns[0].OpCode != asm.LoadMemOp(asm.DWord) || insns[0].Dst != asm.R7 || insns[0].Src != asm.R1 || insns[0].Offset != 0 ||
+		insns[3].OpCode != asm.StoreMemOp(asm.DWord) || insns[3].Dst != asm.RFP || insns[3].Src != asm.R7 || insns[3].Offset != -16 ||
+		!insns[6].IsLoadFromMap() || insns[6].Reference() != "config" ||
+		!insns[10].IsLoadFromMap() || insns[10].Reference() != "cpu_state" ||
+		insns[13].OpCode != asm.JEq.Op(asm.ImmSource) || insns[13].Dst != asm.R6 || insns[13].Constant != 0 ||
+		insns[14].OpCode != asm.JEq.Op(asm.ImmSource) || insns[14].Dst != asm.R0 || insns[14].Constant != 0 ||
+		insns[15].OpCode != asm.Mov.Op(asm.RegSource) || insns[15].Dst != asm.R8 || insns[15].Src != asm.R0 ||
+		insns[16].OpCode != asm.Mov.Op(asm.ImmSource) || insns[16].Dst != asm.R9 || insns[16].Constant != 0 ||
+		insns[58].OpCode != asm.JEq.Op(asm.RegSource) || insns[58].Dst != asm.R2 || insns[58].Src != asm.R1 || insns[58].Offset != 137 ||
+		insns[59].OpCode != asm.Mov.Op(asm.RegSource) || insns[59].Dst != asm.R2 || insns[59].Src != asm.RFP ||
+		insns[60].OpCode != asm.Add.Op(asm.ImmSource) || insns[60].Dst != asm.R2 || insns[60].Constant != -16 ||
+		!insns[61].IsLoadFromMap() || insns[61].Reference() != "packets" ||
+		insns[62].OpCode != asm.Call.Op(asm.ImmSource) || insns[62].Constant != int64(asm.FnMapLookupElem) ||
+		insns[63].OpCode != asm.JEq.Op(asm.ImmSource) || insns[63].Dst != asm.R0 || insns[63].Constant != 0 {
+		return fmt.Errorf("embedded bridge %s pre-lookup fast-path signature mismatch", name)
+	}
+	for _, callIdx := range []int{24, 37, 45, 54} {
+		if insns[callIdx].OpCode != asm.Call.Op(asm.ImmSource) || insns[callIdx].Constant != int64(asm.FnProbeReadKernel) {
+			return fmt.Errorf("embedded bridge %s expected probe_read_kernel at insn %d", name, callIdx)
+		}
+	}
+	if insns[189].OpCode != asm.Ja.Op(asm.ImmSource) || insns[189].Offset != 84 ||
+		insns[190].OpCode != asm.LoadMemOp(asm.Word) || insns[190].Dst != asm.R1 || insns[190].Src != asm.R6 || insns[190].Offset != 20 ||
+		insns[191].OpCode != asm.LoadMemOp(asm.Word) || insns[191].Dst != asm.R2 || insns[191].Src != asm.RFP || insns[191].Offset != -128 ||
+		insns[192].OpCode != asm.JNE.Op(asm.RegSource) || insns[192].Dst != asm.R2 || insns[192].Src != asm.R1 || insns[192].Offset != -140 ||
+		insns[193].OpCode != asm.Mov.Op(asm.ImmSource) || insns[193].Dst != asm.R1 || insns[193].Constant != 1 ||
+		insns[194].Dst != asm.R8 || insns[194].Src != asm.R1 || insns[194].Offset != wantAtomicOffset ||
+		insns[195].OpCode != asm.Ja.Op(asm.ImmSource) || insns[195].Offset != -143 {
+		return fmt.Errorf("embedded bridge %s cpu_state counter tail signature mismatch", name)
+	}
+
+	removed := func(idx int) bool {
+		return (idx >= 16 && idx <= 58) || (idx >= 190 && idx <= 195)
+	}
+	patched, err := exciseInstructionsPreservingJumps(insns, removed)
+	if err != nil {
+		return fmt.Errorf("embedded bridge %s excise cpu_state block: %w", name, err)
+	}
+	prog.Instructions = patched
+	return nil
+}
+
+func isPCRelativeJump(ins asm.Instruction) bool {
+	if !ins.OpCode.Class().IsJump() {
+		return false
+	}
+	jop := ins.OpCode.JumpOp()
+	return jop != asm.Call && jop != asm.Exit
+}
+
+func exciseInstructionsPreservingJumps(insns asm.Instructions, remove func(idx int) bool) (asm.Instructions, error) {
+	oldSlot := make([]int, len(insns))
+	slotToOldIdx := make(map[int]int, len(insns))
+	raw := 0
+	for i, ins := range insns {
+		oldSlot[i] = raw
+		slotToOldIdx[raw] = i
+		raw += int(ins.Size() / asm.InstructionSize)
+	}
+
+	jumpTargetOldIdx := make(map[int]int)
+	oldToNewIdx := make([]int, len(insns))
+	out := make(asm.Instructions, 0, len(insns))
+	for i, ins := range insns {
+		if remove(i) {
+			oldToNewIdx[i] = -1
+			continue
+		}
+		if ins.IsFunctionReference() {
+			return nil, fmt.Errorf("unexpected bpf-to-bpf function reference at insn %d", i)
+		}
+		if isPCRelativeJump(ins) && ins.Reference() == "" {
+			if ins.OpCode.Class() == asm.Jump32Class {
+				return nil, fmt.Errorf("unexpected jump32 at insn %d", i)
+			}
+			width := int(ins.Size() / asm.InstructionSize)
+			targetSlot := oldSlot[i] + width + int(ins.Offset)
+			targetIdx, ok := slotToOldIdx[targetSlot]
+			if !ok {
+				return nil, fmt.Errorf("jump at insn %d targets non-boundary raw slot %d", i, targetSlot)
+			}
+			jumpTargetOldIdx[len(out)] = targetIdx
+		}
+		oldToNewIdx[i] = len(out)
+		out = append(out, ins)
+	}
+
+	newSlot := make([]int, len(out))
+	raw = 0
+	for i, ins := range out {
+		newSlot[i] = raw
+		raw += int(ins.Size() / asm.InstructionSize)
+	}
+
+	for newIdx, oldTarget := range jumpTargetOldIdx {
+		newTarget := oldToNewIdx[oldTarget]
+		if newTarget < 0 {
+			return nil, fmt.Errorf("surviving jump at new insn %d targets excised old insn %d", newIdx, oldTarget)
+		}
+		width := int(out[newIdx].Size() / asm.InstructionSize)
+		delta := newSlot[newTarget] - (newSlot[newIdx] + width)
+		if delta < -32768 || delta > 32767 {
+			return nil, fmt.Errorf("recomputed jump delta %d overflows int16 at new insn %d", delta, newIdx)
+		}
+		out[newIdx].Offset = int16(delta)
+	}
+	return out, nil
 }
 
 // PrepareEngineSenderSpec loads the embedded sender proof ELF spec for arch,

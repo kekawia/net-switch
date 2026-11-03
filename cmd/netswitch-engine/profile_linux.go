@@ -17,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/linux"
 )
 
 // Opt-in diagnostics use the production binary and add no hooks to lookup or
@@ -176,11 +178,15 @@ func writeProfiles(dir string) error {
 		return err
 	}
 	rss, socketBytes, rssValid, socketsValid := profileOSMemory()
+	bpfMapBytes, bpfMapCount, bpfErr := linux.ReadSelfBPFMapMemlockBytes()
 	return errors.Join(json.NewEncoder(f).Encode(struct {
 		runtime.MemStats
 		RSS, KernelSocketBytes      uint64
 		RSSValid, KernelSocketValid bool
-	}{stats, rss, socketBytes, rssValid, socketsValid}), f.Close())
+		BPFMapBytes                 uint64
+		BPFMapCount                 int
+		BPFMapValid                 bool
+	}{stats, rss, socketBytes, rssValid, socketsValid, bpfMapBytes, bpfMapCount, bpfErr == nil}), f.Close())
 }
 
 func profileOSMemory() (rss, sockets uint64, rssValid, socketsValid bool) {

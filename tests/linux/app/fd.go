@@ -13,10 +13,13 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/AyoubAchour/net-switch/tests/linux/wire"
 )
 
 // The modes below hand sockets between processes. Each one that holds a
@@ -30,12 +33,13 @@ import (
 
 // FDResult is the answer of the modes that connect a socket made elsewhere.
 type FDResult struct {
-	Seen      string  `json:"seen,omitempty"`
-	Err       string  `json:"err,omitempty"`
-	ConnectMS float64 `json:"connectMs"`
-	Pid       int     `json:"pid"`
-	Uid       int     `json:"uid"`
-	Inode     uint64  `json:"inode"`
+	InitialSeen string  `json:"initialSeen,omitempty"`
+	Seen        string  `json:"seen,omitempty"`
+	Err         string  `json:"err,omitempty"`
+	ConnectMS   float64 `json:"connectMs"`
+	Pid         int     `json:"pid"`
+	Uid         int     `json:"uid"`
+	Inode       uint64  `json:"inode"`
 }
 
 func tcpSocket(v6 bool) (int, error) {
@@ -305,6 +309,168 @@ func runShareExec(args []string) (any, error) {
 func lastLine(b []byte) []byte {
 	lines := bytes.Split(bytes.TrimSpace(b), []byte("\n"))
 	return bytes.TrimSpace(lines[len(lines)-1])
+}
+
+func udpRawSocket(v6 bool) (int, error) {
+	family := syscall.AF_INET
+	var sa syscall.Sockaddr = &syscall.SockaddrInet4{}
+	if v6 {
+		family = syscall.AF_INET6
+		sa = &syscall.SockaddrInet6{}
+	}
+	fd, err := syscall.Socket(family, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	if err := syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1); err != nil {
+		syscall.Close(fd)
+		return -1, err
+	}
+	if err := syscall.Bind(fd, sa); err != nil {
+		syscall.Close(fd)
+		return -1, err
+	}
+	return fd, nil
+}
+
+func sendUDPProbeOnce(conn *net.UDPConn, target netip.AddrPort, timeout time.Duration) (string, string) {
+	tok := token()
+	buf := make([]byte, 2048)
+	deadline := time.Now().Add(timeout)
+	for attempt := 0; attempt < 12 && time.Now().Before(deadline); attempt++ {
+		msg := payload(tok, 0, attempt, 0)
+		if _, err := conn.WriteToUDPAddrPort(msg, target); err != nil {
+			return "", Code(err)
+		}
+		stepEnd := time.Now().Add(80 * time.Millisecond)
+		if stepEnd.After(deadline) {
+			stepEnd = deadline
+		}
+		_ = conn.SetReadDeadline(stepEnd)
+		for time.Now().Before(stepEnd) {
+			n, _, err := conn.ReadFromUDPAddrPort(buf)
+			if err != nil {
+				break
+			}
+			seen, body, pErr := wire.ParseEchoReply(buf[:n])
+			if pErr == nil && strings.HasPrefix(string(body), "T:"+tok+":") {
+				return seen.String(), ""
+			}
+		}
+	}
+	return "", "TIMEOUT"
+}
+
+func runShareUDP(args []string) (any, error) {
+	fs := flag.NewFlagSet("share-udp", flag.ContinueOnError)
+	to := fs.String("to", "", "echo server ip:port")
+	child := fs.String("child", "", "program to start; run as <child> app send-udp-fd")
+	wait := fs.String("wait-file", "", "send once this file exists")
+	timeout := fs.Int("timeout", 5000, "ms")
+	if err := parse(fs, args); err != nil {
+		return nil, err
+	}
+	list, err := targets(*to)
+	if err != nil {
+		return nil, err
+	}
+	if *child == "" || *wait == "" {
+		return nil, usageError{errors.New("--child and --wait-file are required")}
+	}
+	fd, err := udpRawSocket(list[0].Addr().Is6())
+	if err != nil {
+		return nil, err
+	}
+	ino := inode(fd)
+	sockFile := os.NewFile(uintptr(fd), "udp-socket")
+	pconn, err := net.FilePacketConn(sockFile)
+	if err != nil {
+		sockFile.Close()
+		return nil, err
+	}
+	udpConn := pconn.(*net.UDPConn)
+
+	pipeRead, pipeWrite, err := os.Pipe()
+	if err != nil {
+		udpConn.Close()
+		sockFile.Close()
+		return nil, err
+	}
+	cmd := exec.Command(*child, "app", "send-udp-fd", "--fd", "3", "--sync-fd", "4", "--to", list[0].String(), "--timeout", strconv.Itoa(*timeout))
+	cmd.ExtraFiles = []*os.File{sockFile, pipeRead}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		pipeRead.Close()
+		pipeWrite.Close()
+		udpConn.Close()
+		sockFile.Close()
+		return nil, err
+	}
+	pipeRead.Close()
+	fmt.Printf("ready socket:%d pid:%d child:%d keep:true\n", ino, os.Getpid(), cmd.Process.Pid)
+	if err := waitFile(*wait, 60*time.Second); err != nil {
+		pipeWrite.Close()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		udpConn.Close()
+		sockFile.Close()
+		return nil, err
+	}
+	dur := time.Duration(*timeout) * time.Millisecond
+	initialSeen, sendErr := sendUDPProbeOnce(udpConn, list[0], dur)
+	udpConn.Close()
+	_, _ = pipeWrite.Write([]byte("go\n"))
+	pipeWrite.Close()
+	waitErr := cmd.Wait()
+	sockFile.Close()
+	if waitErr != nil {
+		return nil, fmt.Errorf("child: %w", waitErr)
+	}
+	var res FDResult
+	if err := json.Unmarshal(lastLine(out.Bytes()), &res); err != nil {
+		return nil, err
+	}
+	res.InitialSeen = initialSeen
+	if res.Err == "" && sendErr != "" {
+		res.Err = sendErr
+	}
+	return res, nil
+}
+
+func runSendUDPFD(args []string) (any, error) {
+	fs := flag.NewFlagSet("send-udp-fd", flag.ContinueOnError)
+	fd := fs.Int("fd", 3, "inherited UDP socket")
+	syncFD := fs.Int("sync-fd", 4, "sync pipe read end")
+	to := fs.String("to", "", "echo server ip:port")
+	timeout := fs.Int("timeout", 5000, "ms")
+	if err := parse(fs, args); err != nil {
+		return nil, err
+	}
+	list, err := targets(*to)
+	if err != nil {
+		return nil, err
+	}
+	syncFile := os.NewFile(uintptr(*syncFD), "sync")
+	_, _ = io.ReadAll(syncFile)
+	syncFile.Close()
+
+	r := FDResult{Pid: os.Getpid(), Uid: os.Getuid(), Inode: inode(*fd)}
+	sockFile := os.NewFile(uintptr(*fd), "shared-udp")
+	pconn, err := net.FilePacketConn(sockFile)
+	sockFile.Close()
+	if err != nil {
+		r.Err = err.Error()
+		return r, nil
+	}
+	defer pconn.Close()
+	start := time.Now()
+	seen, errCode := sendUDPProbeOnce(pconn.(*net.UDPConn), list[0], time.Duration(*timeout)*time.Millisecond)
+	r.ConnectMS = msSince(start)
+	r.Seen = seen
+	r.Err = errCode
+	return r, nil
 }
 
 func runSpawn(args []string) (any, error) {

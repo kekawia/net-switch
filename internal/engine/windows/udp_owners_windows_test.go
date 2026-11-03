@@ -48,6 +48,12 @@ func TestUDPConcurrentOwnersShareFreshNativeSnapshots(t *testing.T) {
 		t.Cleanup(func() { conn.Close() })
 		keys[i] = conn.LocalAddr().(*net.UDPAddr).AddrPort()
 	}
+	var arrived sync.WaitGroup
+	arrived.Add(count)
+	owners.beforeUDPSnapshot = func() {
+		arrived.Done()
+		arrived.Wait()
+	}
 	start := make(chan struct{})
 	var workers sync.WaitGroup
 	results := make([]platform.Owner, count)
@@ -60,6 +66,7 @@ func TestUDPConcurrentOwnersShareFreshNativeSnapshots(t *testing.T) {
 	}
 	close(start)
 	workers.Wait()
+	owners.beforeUDPSnapshot = nil
 	for i, owner := range results {
 		if errors[i] != nil || owner.PID != uint32(os.Getpid()) || owner.Generation == "" {
 			t.Fatalf("cold UDP source %s: %+v %v", keys[i], owner, errors[i])

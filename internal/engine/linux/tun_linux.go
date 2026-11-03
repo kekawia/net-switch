@@ -27,6 +27,14 @@ type provenanceBurstSource interface {
 	)
 }
 
+type provenanceEpochRebuilder interface {
+	RebuildEpoch(tun *Tun, closeOldReader func() error) (
+		newSource provenanceBurstSource,
+		enableNew func(drainLocked func() error) error,
+		err error,
+	)
+}
+
 type queuedProvSegment struct {
 	offset int
 	length int
@@ -50,6 +58,7 @@ type Tun struct {
 	next, count, mtu   int
 	readErrors         atomic.Uint64
 	readBackoffs       atomic.Uint64
+	epochRebuildDrains atomic.Uint64
 	readBackoff        time.Duration
 	closedRead         error
 	ioDone             <-chan struct{}
@@ -58,10 +67,11 @@ type Tun struct {
 	writeBatch         [][]byte
 	writeStorage       []byte
 
-	provSource     provenanceBurstSource
-	provOnBurst    func(rawBufs [][]byte, sizes []int, decisions []ownerbpf.ReadDecision, count int, out []*ownerbpf.ProvenanceEnvelope)
-	provReadBurst  func(fd int, rawBufs [][]byte, sizes []int, decisions []ownerbpf.ReadDecision) (int, error)
-	provRawStorage []byte
+	provSource      provenanceBurstSource
+	provOnBurst     func(rawBufs [][]byte, sizes []int, decisions []ownerbpf.ReadDecision, count int, out []*ownerbpf.ProvenanceEnvelope)
+	provReadBurst   func(fd int, rawBufs [][]byte, sizes []int, decisions []ownerbpf.ReadDecision) (int, error)
+	provCloseReader func() error
+	provRawStorage  []byte
 	provRawBufs    [][]byte
 	provRawSizes   []int
 	provDecisions  []ownerbpf.ReadDecision
@@ -240,26 +250,51 @@ func openTun(v tunObject) (*Tun, error) {
 	ok = true
 	return t, nil
 }
-func (t *Tun) MTU() int           { return t.mtu }
-func (t *Tun) Ifindex() int       { return t.index }
-func (t *Tun) TxQLen() int        { return t.txqlen }
-func (t *Tun) NetNSInode() uint32 { return t.netns }
+func (t *Tun) MTU() int                    { return t.mtu }
+func (t *Tun) Ifindex() int                { return t.index }
+func (t *Tun) TxQLen() int                 { return t.txqlen }
+func (t *Tun) NetNSInode() uint32          { return t.netns }
+func (t *Tun) EpochRebuildDrained() uint64 { return t.epochRebuildDrains.Load() }
 
 func (t *Tun) DrainNonblock() error {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
+	return t.drainNonblockLocked()
+}
+
+func (t *Tun) drainNonblockLocked() error {
+	_, err := t.drainNonblockCountLocked()
+	return err
+}
+
+func (t *Tun) drainRebuildLocked() error {
+	drained, err := t.drainNonblockCountLocked()
+	if drained > 0 {
+		t.epochRebuildDrains.Add(drained)
+	}
+	return err
+}
+
+func (t *Tun) drainNonblockCountLocked() (uint64, error) {
 	if t.rawConn == nil {
-		return nil
+		return 0, nil
 	}
 	scratch := t.writeBuffer[:]
 	if len(t.bufs) > 0 && len(t.bufs[0]) > len(scratch) {
 		scratch = t.bufs[0]
 	}
-	var drainErr error
+	var (
+		drained  uint64
+		drainErr error
+	)
 	ctlErr := t.rawConn.Control(func(fd uintptr) {
 		for {
 			_, err := unix.Read(int(fd), scratch)
-			if err == nil || errors.Is(err, unix.EINTR) {
+			if err == nil {
+				drained++
+				continue
+			}
+			if errors.Is(err, unix.EINTR) {
 				continue
 			}
 			if errors.Is(err, unix.EAGAIN) {
@@ -270,9 +305,9 @@ func (t *Tun) DrainNonblock() error {
 		}
 	})
 	if ctlErr != nil {
-		return ctlErr
+		return drained, ctlErr
 	}
-	return drainErr
+	return drained, drainErr
 }
 
 func (t *Tun) AttachProvenanceReader(
@@ -284,6 +319,7 @@ func (t *Tun) AttachProvenanceReader(
 	t.provSource = src
 	t.provOnBurst = onBurst
 	t.provReadBurst = nil
+	t.provCloseReader = nil
 	t.provPendingErr = nil
 	t.provNext = 0
 	if t.provRawStorage == nil {
@@ -313,6 +349,7 @@ func (t *Tun) DetachProvenanceReader() {
 	t.provSource = nil
 	t.provOnBurst = nil
 	t.provReadBurst = nil
+	t.provCloseReader = nil
 	t.provPendingErr = nil
 	t.provNext = 0
 	if t.provEnvs != nil {
@@ -338,16 +375,51 @@ func (t *Tun) BindPumpThread() (func(), error) {
 		return nil, err
 	}
 	t.provReadBurst = readBurst
+	t.provCloseReader = closeReader
 	return func() {
 		t.readMu.Lock()
 		t.provReadBurst = nil
+		cr := t.provCloseReader
+		t.provCloseReader = nil
 		clear(t.provQueue)
 		t.provQueue = t.provQueue[:0]
 		t.provNext = 0
 		clear(t.provEnvs)
 		t.readMu.Unlock()
-		_ = closeReader()
+		if cr != nil {
+			_ = cr()
+		}
 	}, nil
+}
+
+func (t *Tun) rebuildProvenanceEpochLocked(rebuilder provenanceEpochRebuilder) error {
+	oldClose := t.provCloseReader
+	t.provReadBurst = nil
+	t.provCloseReader = nil
+	clear(t.provQueue)
+	t.provQueue = t.provQueue[:0]
+	t.provNext = 0
+	if t.provEnvs != nil {
+		clear(t.provEnvs)
+	}
+	newSrc, enableNew, err := rebuilder.RebuildEpoch(t, oldClose)
+	if err != nil {
+		return err
+	}
+	newReadBurst, newCloseReader, err := newSrc.BindReader()
+	if err != nil {
+		return err
+	}
+	if enableNew != nil {
+		if err := enableNew(t.drainRebuildLocked); err != nil {
+			_ = newCloseReader()
+			return err
+		}
+	}
+	t.provSource = newSrc
+	t.provReadBurst = newReadBurst
+	t.provCloseReader = newCloseReader
+	return nil
 }
 func (t *Tun) Stats() any {
 	l, err := netlink.LinkByIndex(t.index)
@@ -358,7 +430,7 @@ func (t *Tun) Stats() any {
 	if s == nil {
 		return nil
 	}
-	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped, "readDrops": t.readErrors.Load(), "readBackoffs": t.readBackoffs.Load()}
+	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped, "readDrops": t.readErrors.Load(), "readBackoffs": t.readBackoffs.Load(), "epochRebuildDrained": t.epochRebuildDrains.Load()}
 }
 func (t *Tun) BindIOContext(ctx context.Context) {
 	t.ioDone = ctx.Done()
@@ -469,11 +541,13 @@ func (t *Tun) ReadPacketWithProvenance(ctx context.Context, out []byte) (int, an
 			defer stop()
 		}
 		var (
-			count    int
-			burstErr error
+			count          int
+			burstErr       error
+			burstReadStart time.Time
 		)
 		if t.rawConn != nil {
 			rawErr := t.rawConn.Read(func(fd uintptr) bool {
+				burstReadStart = time.Now()
 				count, burstErr = t.provReadBurst(int(fd), t.provRawBufs, t.provRawSizes, t.provDecisions)
 				if count == 0 && burstErr == nil {
 					return false
@@ -484,6 +558,7 @@ func (t *Tun) ReadPacketWithProvenance(ctx context.Context, out []byte) (int, an
 				burstErr = rawErr
 			}
 		} else {
+			burstReadStart = time.Now()
 			count, burstErr = t.provReadBurst(-1, t.provRawBufs, t.provRawSizes, t.provDecisions)
 		}
 		if err := ctx.Err(); err != nil {
@@ -492,7 +567,15 @@ func (t *Tun) ReadPacketWithProvenance(ctx context.Context, out []byte) (int, an
 		if burstErr != nil {
 			if errors.Is(burstErr, ownerbpf.ErrEpochRebuild) {
 				// Whole-burst refusal on detected skip, health fault, or stopped epoch:
-				// never admit frames from a faulted burst.
+				// never admit frames from a faulted burst. When a live epoch rebuilder
+				// is attached, quiesce, drain uncertified frames, and swap in a fresh
+				// epoch on this locked pump thread without terminating the engine.
+				if rebuilder, ok := t.provSource.(provenanceEpochRebuilder); ok {
+					if rebErr := t.rebuildProvenanceEpochLocked(rebuilder); rebErr != nil {
+						return 0, nil, errors.Join(burstErr, rebErr)
+					}
+					return 0, nil, nil
+				}
 				return 0, nil, burstErr
 			}
 			if errors.Is(burstErr, os.ErrClosed) || errors.Is(burstErr, unix.EBADF) || errors.Is(burstErr, unix.EBADFD) {
@@ -510,6 +593,12 @@ func (t *Tun) ReadPacketWithProvenance(ctx context.Context, out []byte) (int, an
 		if count > 0 {
 			envs := t.provEnvs[:count]
 			t.provOnBurst(t.provRawBufs, t.provRawSizes, t.provDecisions, count, envs)
+			perFrameCost := max(time.Nanosecond, time.Since(burstReadStart)/time.Duration(count))
+			for i := 0; i < count; i++ {
+				if envs[i] != nil {
+					envs[i].SetAcquireCost(perFrameCost)
+				}
+			}
 			arenaUsed := 0
 			t.provSpans = t.provSpans[:0]
 			for i := 0; i < count; i++ {

@@ -211,6 +211,7 @@ jobs:
           go test -count=1 -v ./tests/linux/harness ./tests/linux/suite
           go test -count=1 -v ./internal/journal
           go build -trimpath -o "$RUNNER_TEMP/nsaccept" ./tests/linux/cmd/nsaccept
+          "$RUNNER_TEMP/nsaccept" release-gate
           go build -trimpath -o "$RUNNER_TEMP/netswitch-engine" ./cmd/netswitch-engine
           go build -trimpath -tags acceptance -o "$RUNNER_TEMP/netswitch-engine-faults" ./cmd/netswitch-engine
           node scripts/engine-notices.mjs "$RUNNER_TEMP/netswitch-engine" --check

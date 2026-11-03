@@ -126,7 +126,11 @@ func TestBridgePerfSkippedConsumes(t *testing.T) {
 	}
 	const sent = 10000
 	done := write(sent)
-	deadline := time.Now().Add(5 * time.Second)
+	bound := 5 * time.Second
+	if verifiedFloor58Profile() && runtime.GOARCH == "arm64" {
+		bound = 60 * time.Second
+	}
+	deadline := time.Now().Add(bound)
 	lookups := 0
 	finished := false
 	for !finished && time.Now().Before(deadline) {

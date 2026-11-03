@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"unsafe"
+
+	"github.com/cilium/ebpf"
 )
 
 const (
@@ -65,16 +67,79 @@ type stagedCorkContributor struct {
 	reason   IdentityReason
 }
 
+const (
+	reasonCodeNone uint8 = iota
+	reasonCodeValidated
+	reasonCodeInheritedValidated
+	reasonCodeIdentityUnretained
+	reasonCodeContextChanged
+	reasonCodeSandboxUnverified
+	reasonCodeSubmitterUnobservable
+	reasonCodeConflictingApp
+	reasonCodeBudgetExceeded
+	reasonCodePacketIncomplete
+)
+
+func reasonToCode(r IdentityReason) uint8 {
+	switch r {
+	case ReasonValidated:
+		return reasonCodeValidated
+	case ReasonInheritedValidated:
+		return reasonCodeInheritedValidated
+	case ReasonIdentityUnretained:
+		return reasonCodeIdentityUnretained
+	case ReasonContextChanged:
+		return reasonCodeContextChanged
+	case ReasonSandboxUnverified:
+		return reasonCodeSandboxUnverified
+	case ReasonSubmitterUnobservable:
+		return reasonCodeSubmitterUnobservable
+	case ReasonConflictingApp:
+		return reasonCodeConflictingApp
+	case ReasonBudgetExceeded:
+		return reasonCodeBudgetExceeded
+	case ReasonPacketIncomplete:
+		return reasonCodePacketIncomplete
+	default:
+		return reasonCodeNone
+	}
+}
+
+func codeToReason(c uint8) IdentityReason {
+	switch c {
+	case reasonCodeValidated:
+		return ReasonValidated
+	case reasonCodeInheritedValidated:
+		return ReasonInheritedValidated
+	case reasonCodeIdentityUnretained:
+		return ReasonIdentityUnretained
+	case reasonCodeContextChanged:
+		return ReasonContextChanged
+	case reasonCodeSandboxUnverified:
+		return ReasonSandboxUnverified
+	case reasonCodeSubmitterUnobservable:
+		return ReasonSubmitterUnobservable
+	case reasonCodeConflictingApp:
+		return ReasonConflictingApp
+	case reasonCodeBudgetExceeded:
+		return ReasonBudgetExceeded
+	case reasonCodePacketIncomplete:
+		return ReasonPacketIncomplete
+	default:
+		return ""
+	}
+}
+
 type socketSlotMeta struct {
+	owner          *IdentitySnapshot
+	envelopeRefs   uint32
+	lastReasonCode uint8
 	inUse          bool
 	socketAlive    bool
-	envelopeRefs   int
-	owner          *IdentitySnapshot
-	lastReason     IdentityReason
-	contributors   map[ActorIdentityKey]IdentityReason
-	stagedCork     []stagedCorkContributor
 	corkCommitted  bool
 }
+
+var _ [16 - unsafe.Sizeof(socketSlotMeta{})]byte
 
 type SocketSlotMetrics struct {
 	ActiveSlots      int
@@ -123,18 +188,25 @@ func newSocketSlotTableFromBacking(slots []SocketStateSlot, closeFn func() error
 		MaxSlots:     maxSlots,
 		slots:        slots,
 		meta:         make([]socketSlotMeta, maxSlots),
-		cookieToSlot: make(map[uint64]uint32, maxSlots),
+		cookieToSlot: make(map[uint64]uint32, min(maxSlots, 4096)),
 		freeSlots:    free,
 		closeFn:      closeFn,
 	}
 }
 
 func (t *SocketSlotTable) Close() error {
-	if t == nil || t.closeFn == nil {
+	if t == nil {
 		return nil
 	}
 	fn := t.closeFn
 	t.closeFn = nil
+	t.slots = nil
+	t.meta = nil
+	t.cookieToSlot = nil
+	t.freeSlots = nil
+	if fn == nil {
+		return nil
+	}
 	return fn()
 }
 
@@ -228,9 +300,8 @@ func (t *SocketSlotTable) ensureSlot(cookie uint64) (uint32, bool) {
 	atomic.StoreUint32(&s.Flags, uint32(SocketSlotNone))
 
 	t.meta[idx] = socketSlotMeta{
-		inUse:        true,
-		socketAlive:  true,
-		contributors: make(map[ActorIdentityKey]IdentityReason),
+		inUse:       true,
+		socketAlive: true,
 	}
 	t.cookieToSlot[cookie] = idx
 	t.metrics.AllocatedTotal++
@@ -254,6 +325,7 @@ func (t *SocketSlotTable) checkAndPoisonWrap(s *SocketStateSlot) bool {
 //   - On first complete owner: store immutable owner/revision, then XADD version += 1.
 //   - Incomplete first identity is never promoted in place by a subsequent contributor.
 func (t *SocketSlotTable) publishContributor(ledger *IdentityLedger, cookie uint64, actorKey ActorIdentityKey, snap *IdentitySnapshot, reason IdentityReason) bool {
+	_ = actorKey
 	idx, ok := t.ensureSlot(cookie)
 	if !ok {
 		return false
@@ -266,9 +338,6 @@ func (t *SocketSlotTable) publishContributor(ledger *IdentityLedger, cookie uint
 	}
 	if t.checkAndPoisonWrap(s) {
 		return false
-	}
-	if actorKey != (ActorIdentityKey{}) {
-		m.contributors[actorKey] = reason
 	}
 
 	flags := SocketSlotFlags(atomic.LoadUint32(&s.Flags))
@@ -294,9 +363,9 @@ func (t *SocketSlotTable) publishContributor(ledger *IdentityLedger, cookie uint
 		atomic.AddUint64(&s.Version, 1)
 		t.metrics.ConflictUpdates++
 		if hadPriorOwner {
-			m.lastReason = ReasonConflictingApp
-		} else if m.lastReason == "" || m.lastReason == ReasonValidated || m.lastReason == ReasonInheritedValidated {
-			m.lastReason = reason
+			m.lastReasonCode = reasonCodeConflictingApp
+		} else if curReason := codeToReason(m.lastReasonCode); curReason == "" || curReason == ReasonValidated || curReason == ReasonInheritedValidated {
+			m.lastReasonCode = reasonToCode(reason)
 		}
 		return true
 	}
@@ -312,7 +381,7 @@ func (t *SocketSlotTable) publishContributor(ledger *IdentityLedger, cookie uint
 	if m.owner == nil && curVersion == 0 {
 		snap.socketRefs++
 		m.owner = snap
-		m.lastReason = snap.Reason
+		m.lastReasonCode = reasonToCode(snap.Reason)
 		atomic.StoreUint64(&s.EvidenceRevision, snap.EvidenceRevision)
 		atomic.StoreUint32(&s.Flags, uint32((flags&^SocketSlotNone)|SocketSlotValid))
 		atomic.AddUint64(&s.Version, 1)
@@ -327,7 +396,7 @@ func (t *SocketSlotTable) publishContributor(ledger *IdentityLedger, cookie uint
 		ledger.decrementSocketRef(m.owner)
 	}
 	m.owner = nil
-	m.lastReason = ReasonConflictingApp
+	m.lastReasonCode = reasonCodeConflictingApp
 	atomic.StoreUint64(&s.EvidenceRevision, 0)
 	atomic.StoreUint32(&s.Flags, uint32((flags&^SocketSlotValid)|SocketSlotConflicting))
 	// 5.8 XADD order: conflicts += 1 first, then version += 1.
@@ -353,7 +422,9 @@ func (t *SocketSlotTable) tryReclaimSlot(ledger *IdentityLedger, idx uint32) {
 		}
 		m.owner = nil
 	}
-	delete(t.cookieToSlot, cookie)
+	if curIdx, ok := t.cookieToSlot[cookie]; ok && curIdx == idx {
+		delete(t.cookieToSlot, cookie)
+	}
 	atomic.StoreUint64(&s.Cookie, 0)
 	atomic.StoreUint64(&s.SlotGeneration, 0)
 	atomic.StoreUint64(&s.Version, 0)
@@ -413,14 +484,16 @@ func (l *IdentityLedger) StageCorkContributor(key ActorKey, ev ActorEvidence, ma
 	if l.slotTable == nil {
 		l.AttachSlotTable(NewSocketSlotTable(DefaultMaxSocketSlots))
 	}
-	idx, ok := l.slotTable.ensureSlot(key.Cookie)
+	_, ok := l.slotTable.ensureSlot(key.Cookie)
 	if !ok {
 		l.recordFailureMetric(ReasonBudgetExceeded)
 		return nil, ReasonBudgetExceeded
 	}
-	m := &l.slotTable.meta[idx]
+	if l.stagedCork == nil {
+		l.stagedCork = make(map[uint64][]stagedCorkContributor)
+	}
 	actorID := ActorIdentityKey{TGID: key.TGID, StartBoottime: key.Start, ExecID: key.Exec}
-	m.stagedCork = append(m.stagedCork, stagedCorkContributor{
+	l.stagedCork[key.Cookie] = append(l.stagedCork[key.Cookie], stagedCorkContributor{
 		actorKey: actorID,
 		snap:     snap,
 		reason:   reason,
@@ -439,8 +512,10 @@ func (l *IdentityLedger) DiscardCork(cookie uint64) {
 	if !ok {
 		return
 	}
+	if l.stagedCork != nil {
+		delete(l.stagedCork, cookie)
+	}
 	m := &l.slotTable.meta[idx]
-	m.stagedCork = nil
 	l.slotTable.metrics.CorkDiscards++
 	s := &l.slotTable.slots[idx]
 	if !m.corkCommitted && atomic.LoadUint64(&s.Version) == 0 && atomic.LoadUint64(&s.Conflicts) == 0 && m.envelopeRefs == 0 {
@@ -452,19 +527,19 @@ func (l *IdentityLedger) DiscardCork(cookie uint64) {
 // FlushCork commits all staged cork contributors on cookie when the corked
 // datagram is actually constructed for transmission.
 func (l *IdentityLedger) FlushCork(cookie uint64) bool {
-	if l.slotTable == nil || cookie == 0 {
+	if l.slotTable == nil || cookie == 0 || l.stagedCork == nil {
 		return false
 	}
 	idx, ok := l.slotTable.cookieToSlot[cookie]
 	if !ok {
 		return false
 	}
-	m := &l.slotTable.meta[idx]
-	if len(m.stagedCork) == 0 {
+	staged := l.stagedCork[cookie]
+	if len(staged) == 0 {
 		return false
 	}
-	staged := m.stagedCork
-	m.stagedCork = nil
+	delete(l.stagedCork, cookie)
+	m := &l.slotTable.meta[idx]
 	m.corkCommitted = true
 	l.slotTable.metrics.CorkFlushes++
 	for _, c := range staged {
@@ -604,7 +679,7 @@ func (l *IdentityLedger) ValidateForwardingEnvelope(env ForwardEnvelope) PacketI
 	rev := atomic.LoadUint64(&s.EvidenceRevision)
 	flags := SocketSlotFlags(atomic.LoadUint32(&s.Flags))
 	owner := m.owner
-	lastReason := m.lastReason
+	lastReason := codeToReason(m.lastReasonCode)
 	v2 := atomic.LoadUint64(&s.Version)
 	c2 := atomic.LoadUint64(&s.Conflicts)
 
@@ -1279,6 +1354,14 @@ func (c *KernelControlClassifier) RecordUserspaceSocket(cookie uint64) {
 	delete(c.kernelControl, cookie)
 }
 
+func (c *KernelControlClassifier) ForgetSocket(cookie uint64) {
+	if c == nil || cookie == 0 {
+		return
+	}
+	delete(c.userspaceCookies, cookie)
+	delete(c.kernelControl, cookie)
+}
+
 func (c *KernelControlClassifier) RecordKernelControlSocket(ev KernelControlEvidence) {
 	if ev.Cookie == 0 || c.userspaceCookies[ev.Cookie] {
 		return
@@ -1370,6 +1453,7 @@ const (
 	FallbackMissingBTF              DegradedFallbackReason = "degraded_missing_btf"
 	FallbackCgroupV1                DegradedFallbackReason = "degraded_cgroup_v1"
 	FallbackCapabilityDenied        DegradedFallbackReason = "degraded_capability_denied"
+	FallbackKernelUnsupported       DegradedFallbackReason = "degraded_kernel_unsupported"
 	FallbackVerifierRejected        DegradedFallbackReason = "degraded_verifier_rejected"
 )
 
@@ -1401,6 +1485,13 @@ func ClassifyLoadFailure(err error, lockdownRaw string, hasBTF, isCgroupV2 bool)
 		strings.Contains(msg, "permission denied") ||
 		(hasBTF && (strings.Contains(msg, "BTF not supported") || strings.Contains(msg, "BTF: not supported"))) {
 		return FallbackCapabilityDenied
+	}
+	var verErr *ebpf.VerifierError
+	if errors.As(err, &verErr) {
+		return FallbackVerifierRejected
+	}
+	if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, ebpf.ErrNotSupported) {
+		return FallbackKernelUnsupported
 	}
 	return FallbackVerifierRejected
 }

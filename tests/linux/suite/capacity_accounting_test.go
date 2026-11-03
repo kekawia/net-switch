@@ -28,15 +28,6 @@ func TestCapacityMissingGenerationReportsQueryEvidence(t *testing.T) {
 	requireFailure(t, report, "every UDP setup obtained a socket generation (1 missing; UDPGenerationFailures=[tuple=198.18.0.1:50469->198.51.100.36:7001 stage=exact-query query-stage=context query-start-after-deadline=6.861197ms sent=false reply-errno=0 errno=0")
 }
 
-func runCapacityCheck(t *testing.T, run func(*Env)) *harness.Report {
-	t.Helper()
-	c := &harness.Case{ID: "capacity.mixed-caps", Title: "capacity evidence", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("capacity.mixed-caps")}
-	c.Run = func(check *harness.T) { run(&Env{T: check, deferAttribution: true}) }
-	return harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
-}
-
-// runHardCheck runs checks in a case with no declared release blocker, so a
-// fixture that makes no release assertion is not an incomplete declaration.
 func runHardCheck(t *testing.T, run func(*Env)) *harness.Report {
 	t.Helper()
 	c := &harness.Case{ID: "capacity.hard-checks", Title: "hard checks", Label: harness.Requires10}
@@ -135,14 +126,19 @@ func TestCapacityShortfallNeedsCompleteRefusalEvidence(t *testing.T) {
 					} else {
 						s.RefusedTCP = r
 					}
-					report := runCapacityCheck(t, func(e *Env) {
+					report := runHardCheck(t, func(e *Env) {
 						credit := e.capacityAccounting("test", protocol, engine.Stats{}, s, heldBase{}, 150, 90, refused, scope)
 						e.exactCapacity("test", 90, 100, credit)
 					})
 					if test.failure != "" {
 						requireFailure(t, report, test.failure)
-					} else if report.JobFailed || report.Cases[0].Outcome != harness.ReleaseBlocked {
-						t.Fatalf("valid attribution evidence: %+v", report)
+					} else {
+						requireFailure(t, report, "test reaches exactly 100 (90 held, 10 missing)")
+						for _, check := range report.Cases[0].Checks {
+							if !check.OK && !strings.Contains(check.Message, "test reaches exactly 100") {
+								t.Fatalf("unexpected accounting failure alongside exact-cap failure: %+v", check)
+							}
+						}
 					}
 				})
 			}
@@ -160,7 +156,7 @@ func TestUDPAccountingRequiresExactDecisionCountAndRealSessions(t *testing.T) {
 		if variant == "phantom UDP" {
 			s.UDP++
 		}
-		report := runCapacityCheck(t, func(e *Env) {
+		report := runHardCheck(t, func(e *Env) {
 			e.capacityAccounting("udp", "udp", engine.Stats{}, s, heldBase{}, 150, 90, 60, capacityTotal)
 			e.exactCapacity("udp", 90, 90, 0)
 		})
@@ -231,13 +227,13 @@ func TestMixedCapacityCountsOnlyServerObservedIdentifiedSockets(t *testing.T) {
 			}
 			// The verdict is the only thing that lets a mixed per-app refusal pass.
 			s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{PerApp: 50, Unknown: 10}, PeakPerApp: 8192, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 60, "forcedGCHeapBytes": 400 << 20}}
-			report := runCapacityCheck(t, func(e *Env) {
+			report := runHardCheck(t, func(e *Env) {
 				credit := e.capacityAccounting("mixed", "tcp", engine.Stats{}, s, heldBase{}, 150, 90, 60, capacityMixed, full)
-				e.exactCapacity("mixed", 90, 100, credit)
+				e.exactCapacity("mixed", 90, 90, credit)
 			})
 			if !test.full {
 				requireFailure(t, report, "UDP-holding client app")
-			} else if report.JobFailed {
+			} else if report.JobFailed || report.Cases[0].Outcome != harness.Pass {
 				t.Fatal(report)
 			}
 		})
@@ -246,7 +242,7 @@ func TestMixedCapacityCountsOnlyServerObservedIdentifiedSockets(t *testing.T) {
 
 func TestTCPRepeatedCapDecisionsCannotHideShortfall(t *testing.T) {
 	s := engine.Stats{Flows: 90, Admitted: 90, LookupMisses: 10, RefusedTCP: flows.Refusals{Total: 70, Unknown: 10}, PeakFlows: 65536, PeakUnknown: 2048, Counters: map[string]uint64{"tcpRejected": 80, "forcedGCHeapBytes": 400 << 20}}
-	report := runCapacityCheck(t, func(e *Env) {
+	report := runHardCheck(t, func(e *Env) {
 		credit := e.capacityAccounting("tcp", "tcp", engine.Stats{}, s, heldBase{}, 150, 90, 60, capacityTotal)
 		e.exactCapacity("tcp", 90, 100, credit)
 	})

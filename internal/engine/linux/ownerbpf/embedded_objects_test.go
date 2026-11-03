@@ -9,6 +9,9 @@ import (
 	"os"
 	"runtime"
 	"testing"
+
+	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/btf"
 )
 
 func TestEmbeddedBPFObjectsMatchManifestAndParse(t *testing.T) {
@@ -101,6 +104,46 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 	if len(bridgeSpec.Programs) != 4 || bridgeSpec.Maps["packets"].MaxEntries != 32768 {
 		t.Fatalf("unexpected bridge spec: progs=%d packets.MaxEntries=%d", len(bridgeSpec.Programs), bridgeSpec.Maps["packets"].MaxEntries)
 	}
+	for _, progName := range []string{"consume", "freed"} {
+		cp := bridgeSpec.Programs[progName].Copy()
+		insns := cp.Instructions
+		if len(insns) != 230 {
+			t.Fatalf("%s patched instruction count = %d, want 230", progName, len(insns))
+		}
+		if btf.FuncMetadata(&insns[0]) == nil || insns[0].Source() == nil {
+			t.Fatalf("%s insns[0] lost BTF FuncMetadata or initial LineInfo", progName)
+		}
+		if !insns[18].IsLoadFromMap() || insns[18].Reference() != "packets" {
+			t.Fatalf("%s insns[18] = %v (ref=%q), want LoadMapPtr packets immediately after config/cpu_state lookup", progName, insns[18], insns[18].Reference())
+		}
+		probeReads := 0
+		for idx, ins := range insns {
+			if ins.OpCode == asm.Call.Op(asm.ImmSource) && ins.Constant == int64(asm.FnProbeReadKernel) {
+				if idx < 18 {
+					t.Fatalf("%s retained pre-packets probe_read_kernel at insn %d", progName, idx)
+				}
+				probeReads++
+			}
+		}
+		if probeReads != 1 {
+			t.Fatalf("%s probe_read_kernel count = %d, want 1 (task->start_boottime only)", progName, probeReads)
+		}
+		assertAllInstructionsReachableAndValidJumps(t, progName, insns)
+		for i, mapName := range []string{"config", "cpu_state", "packets", "health", "readers", "read_slots"} {
+			if err := cp.Instructions.AssociateMap(mapName, fakeFD(20+i)); err != nil {
+				t.Fatalf("%s AssociateMap(%s): %v", progName, mapName, err)
+			}
+		}
+		if runtime.GOOS == "linux" {
+			var encoded bytes.Buffer
+			if err := cp.Instructions.Marshal(&encoded, binary.LittleEndian); err != nil {
+				t.Fatalf("%s Marshal patched instructions: %v", progName, err)
+			}
+			if encoded.Len() != 239*asm.InstructionSize {
+				t.Fatalf("%s encoded byte len = %d, want %d", progName, encoded.Len(), 239*asm.InstructionSize)
+			}
+		}
+	}
 
 	for _, arch := range []string{"amd64", "arm64"} {
 		spec, err := PrepareEngineSenderSpec(arch, 0, 0)
@@ -159,6 +202,62 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 			if gotJumpOff != wantJumpOff {
 				t.Fatalf("%s encoded jump offset at raw insn %d = %d, want %d (target raw insn %d)", arch, rawSlot158, gotJumpOff, wantJumpOff, rawSlot187)
 			}
+		}
+	}
+}
+
+func assertAllInstructionsReachableAndValidJumps(t *testing.T, name string, insns asm.Instructions) {
+	t.Helper()
+	rawSlot := make([]int, len(insns))
+	slotToIdx := make(map[int]int, len(insns))
+	raw := 0
+	for i, ins := range insns {
+		rawSlot[i] = raw
+		slotToIdx[raw] = i
+		raw += int(ins.Size() / asm.InstructionSize)
+	}
+	visited := make([]bool, len(insns))
+	stack := []int{0}
+	visited[0] = true
+	push := func(target int, from int) {
+		if target < 0 || target >= len(insns) {
+			t.Fatalf("%s: out-of-bounds CFG edge %d -> %d", name, from, target)
+		}
+		if !visited[target] {
+			visited[target] = true
+			stack = append(stack, target)
+		}
+	}
+	for len(stack) > 0 {
+		idx := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		ins := insns[idx]
+		if ins.OpCode.Class().IsJump() {
+			jop := ins.OpCode.JumpOp()
+			if jop == asm.Exit {
+				continue
+			}
+			if jop == asm.Call {
+				push(idx+1, idx)
+				continue
+			}
+			width := int(ins.Size() / asm.InstructionSize)
+			targetSlot := rawSlot[idx] + width + int(ins.Offset)
+			targetIdx, ok := slotToIdx[targetSlot]
+			if !ok {
+				t.Fatalf("%s: jump at insn %d targets invalid raw slot %d", name, idx, targetSlot)
+			}
+			push(targetIdx, idx)
+			if jop != asm.Ja {
+				push(idx+1, idx)
+			}
+			continue
+		}
+		push(idx+1, idx)
+	}
+	for i, ok := range visited {
+		if !ok {
+			t.Fatalf("%s: unreachable instruction at index %d (raw slot %d): %v", name, i, rawSlot[i], insns[i])
 		}
 	}
 }

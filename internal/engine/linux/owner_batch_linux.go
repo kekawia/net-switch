@@ -345,10 +345,16 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		return out
 	}
 	job.stage.Store(3)
+	now := time.Now()
+	var visited int64
 	out.count, out.err = f.Visit(k.limit, func(name []byte) bool {
-		job.visited.Add(1)
-		// One clock read serves the deadline and the read's start.
-		started := time.Now()
+		visited++
+		if visited&15 == 0 {
+			job.visited.Store(visited)
+		}
+		// Carry the previous finish clock read as the next start/deadline check
+		// so each descriptor read issues one clock read instead of two.
+		started := now
 		if expiredAt(started) {
 			return false
 		}
@@ -359,7 +365,8 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		out.lastFD = max(out.lastFD, int64(fd))
 		job.trace.reading(int64(fd), started)
 		inode, ok := socketInodeAt(f.fd, string(name))
-		job.trace.read(int64(fd), started)
+		now = time.Now()
+		job.trace.finish(int64(fd), started, now)
 		if !ok {
 			return true
 		}
@@ -377,6 +384,7 @@ func (o *Owners) readDescriptorBatch(job *descriptorBatch) descriptorBatchResult
 		}
 		return true
 	})
+	job.visited.Store(visited)
 	if expired() && out.err == nil {
 		out.err = context.DeadlineExceeded
 	}

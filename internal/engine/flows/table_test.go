@@ -342,3 +342,190 @@ func TestSharedReconnectKeepsRoutedFlows(t *testing.T) {
 		t.Fatal("shared flow closed")
 	}
 }
+
+func stormTuple(port int) platform.Tuple {
+	addr := netip.AddrFrom4([4]byte{198, 18, byte((port >> 16) & 0xff), byte(((port >> 8) & 0xfe) | 2)})
+	return platform.Tuple{
+		Source:      netip.AddrPortFrom(addr, uint16(10000+(port%50000))),
+		Destination: netip.MustParseAddrPort("203.0.113.7:443"),
+	}
+}
+
+func TestSplitCohortTCPRefusalNeverStarvesLateRetransmits(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		earlyWorkers   int
+		lateWorkers    int
+		lateOffsetMS   int
+		totalOfferings int
+	}{
+		{name: "185_early_115_late", earlyWorkers: 185, lateWorkers: 115, lateOffsetMS: 780, totalOfferings: 3808},
+		{name: "299_early_1_late", earlyWorkers: 299, lateWorkers: 1, lateOffsetMS: 850, totalOfferings: 3808},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := table(t, Defaults())
+			base := time.Unix(1_700_000_000, 0)
+			now := base
+			f.now = func() time.Time { return now }
+
+			type worker struct {
+				wakeAt  time.Time
+				started time.Time
+				tuple   platform.Tuple
+				active  bool
+			}
+			workers := make([]worker, tc.earlyWorkers+tc.lateWorkers)
+			nextPort := 1
+			remaining := tc.totalOfferings
+			openAttempt := func(w *worker, at time.Time) {
+				if remaining == 0 {
+					w.active = false
+					return
+				}
+				remaining--
+				w.tuple = stormTuple(nextPort)
+				nextPort++
+				w.started = at
+				w.wakeAt = at
+				w.active = true
+			}
+			for i := range workers {
+				at := base.Add(110 * time.Millisecond)
+				if i >= tc.earlyWorkers {
+					at = base.Add(time.Duration(tc.lateOffsetMS) * time.Millisecond)
+				}
+				openAttempt(&workers[i], at)
+			}
+
+			perSecond := map[int64]int{}
+			var maxRefusal time.Duration
+			completed := 0
+			for completed < tc.totalOfferings {
+				best := -1
+				for i := range workers {
+					if !workers[i].active {
+						continue
+					}
+					if best == -1 || workers[i].wakeAt.Before(workers[best].wakeAt) {
+						best = i
+					}
+				}
+				if best == -1 {
+					t.Fatalf("deadlock after %d of %d refusals", completed, tc.totalOfferings)
+				}
+				w := &workers[best]
+				now = w.wakeAt
+				if f.AllowRejectTuple("bravo", w.tuple) {
+					perSecond[now.Unix()]++
+					if d := now.Sub(w.started); d > maxRefusal {
+						maxRefusal = d
+					}
+					completed++
+					openAttempt(w, now.Add(time.Millisecond))
+				} else {
+					w.wakeAt = now.Add(1020 * time.Millisecond)
+				}
+			}
+			if maxRefusal > 1050*time.Millisecond {
+				t.Fatalf("slowest refusal %v exceeded first-retransmit bound", maxRefusal)
+			}
+			for sec, count := range perSecond {
+				if count > rejectPerAppPerSec {
+					t.Fatalf("second %d emitted %d notices, want <= %d", sec, count, rejectPerAppPerSec)
+				}
+			}
+			if len(f.rejectWaiting) != 0 || len(f.rejectWaitingApps) != 0 || f.rejectPriorGlobal != 0 || len(f.rejectPriorApps) != 0 {
+				t.Fatalf("waiting state leaked after storm: waiting=%d apps=%v priorGlobal=%d priorApps=%v", len(f.rejectWaiting), f.rejectWaitingApps, f.rejectPriorGlobal, f.rejectPriorApps)
+			}
+		})
+	}
+}
+
+func TestTupleRejectBoundaryGraceExpiryAndAdmissionCleanup(t *testing.T) {
+	f := table(t, Defaults())
+	s0 := time.Unix(1_700_000_100, 0)
+	now := s0.Add(990 * time.Millisecond)
+	f.now = func() time.Time { return now }
+
+	// Exhaust S0's per-app budget and drop one late TCP tuple at S0+990ms.
+	for range rejectPerAppPerSec {
+		if !f.AllowReject("bravo") {
+			t.Fatal("early S0 per-app limit")
+		}
+	}
+	late := stormTuple(1)
+	if f.AllowRejectTuple("bravo", late) {
+		t.Fatal("expected S0+990ms tuple to drop")
+	}
+
+	// Cross two Unix-second boundaries to S2+10ms (1.02s linear SYN RTO):
+	// non-waiting traffic stops at 999, holding 1 token for late's retransmit.
+	now = s0.Add(2*time.Second + 10*time.Millisecond)
+	for i := range rejectPerAppPerSec - 1 {
+		if !f.AllowReject("bravo") {
+			t.Fatalf("S2 non-waiting call %d failed early", i)
+		}
+	}
+	if f.AllowReject("bravo") {
+		t.Fatal("S2 non-waiting traffic consumed late tuple's reserved token")
+	}
+	if !f.AllowRejectTuple("bravo", late) {
+		t.Fatal("S2+10ms boundary-crossing retransmit was starved")
+	}
+	if f.AllowReject("bravo") {
+		t.Fatal("S2 exceeded hard 1,000/s per-app limit")
+	}
+
+	// Synthetic non-retransmitting flood in S2 caps reservations at 500 per app
+	// (leaving >=500 tokens for brand-new SYNs in S3) and expires after 1.5s.
+	for i := range 2000 {
+		if f.AllowRejectTuple("bravo", stormTuple(100+i)) {
+			t.Fatal("S2 flood unexpectedly allowed")
+		}
+	}
+	if len(f.rejectWaiting) != rejectReservePerApp {
+		t.Fatalf("waiting count = %d, want %d", len(f.rejectWaiting), rejectReservePerApp)
+	}
+	now = s0.Add(3*time.Second + 100*time.Millisecond)
+	allowedNew := 0
+	for range rejectPerAppPerSec {
+		if f.AllowReject("bravo") {
+			allowedNew++
+		}
+	}
+	if allowedNew != rejectPerAppPerSec-rejectReservePerApp {
+		t.Fatalf("S3 brand-new headroom = %d, want %d", allowedNew, rejectPerAppPerSec-rejectReservePerApp)
+	}
+	// Advance past S2+10ms + 1.5s = S3+510ms within the same S3 Unix second:
+	// sweepRejectWaitingLocked frees all 500 abandoned reservations immediately.
+	now = s0.Add(3*time.Second + 600*time.Millisecond)
+	freed := 0
+	for range rejectPerAppPerSec {
+		if f.AllowReject("bravo") {
+			freed++
+		}
+	}
+	if freed != rejectReservePerApp {
+		t.Fatalf("post-expiry freed headroom in S3 = %d, want %d", freed, rejectReservePerApp)
+	}
+
+	// Admitting a waiting TCP tuple clears its reservation immediately.
+	admittedTuple := stormTuple(9999)
+	if f.AllowRejectTuple("bravo", admittedTuple) {
+		t.Fatal("expected S3 exhausted drop")
+	}
+	now = s0.Add(4*time.Second + 50*time.Millisecond)
+	tk, err := f.Begin("tcp", admittedTuple)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tk.Resolve(platform.Owner{AppID: "bravo"}); err != nil {
+		t.Fatal(err)
+	}
+	defer tk.Close()
+	for i := range rejectPerAppPerSec {
+		if !f.AllowReject("bravo") {
+			t.Fatalf("admitted tuple leaked reservation at %d", i)
+		}
+	}
+}
