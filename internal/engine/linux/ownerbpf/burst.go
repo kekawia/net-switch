@@ -52,6 +52,18 @@ func NewFloor58BurstGuard(initial [3]CounterSample) (*BurstGuard, error) {
 	return &BurstGuard{previous: initial, floor58: true}, nil
 }
 
+// ChangedMask returns a 3-bit mask (bit 0 = capture, bit 1 = consume, bit 2 = freed)
+// identifying which program counters differ from the guard's last certified baseline.
+func (g *BurstGuard) ChangedMask(after [3]CounterSample) uint8 {
+	var mask uint8
+	for i, c := range after {
+		if c.Present != !g.floor58 || c.ProgramID != g.previous[i].ProgramID || c.Misses != g.previous[i].Misses {
+			mask |= 1 << i
+		}
+	}
+	return mask
+}
+
 // Certify is called only after the hardware barrier and all three get-info
 // calls. It never clears poison: reload constructs a new guard. Each registered
 // reader owns its guard; epoch publication is separately serialized by Bridge.

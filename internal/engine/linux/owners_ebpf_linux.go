@@ -66,10 +66,13 @@ type ebpfOwnerStats struct {
 	Ledger                       ownerbpf.LedgerMetrics     `json:"ledger"`
 	SocketSlots                  ownerbpf.SocketSlotMetrics `json:"socketSlots"`
 	Classifier                   ownerbpf.ClassifierMetrics `json:"classifier"`
-	BridgeDeliveredWithoutRecord uint64                     `json:"bridgeDeliveredWithoutRecord"`
-	BridgeReadUnknown            uint64                     `json:"bridgeReadUnknown"`
-	BridgeUnknownRecursion       uint64                     `json:"bridgeUnknownRecursion"`
-	BridgeFaults                 uint64                     `json:"bridgeFaults"`
+	BridgeDeliveredWithoutRecord  uint64                     `json:"bridgeDeliveredWithoutRecord"`
+	BridgeReadUnknown             uint64                     `json:"bridgeReadUnknown"`
+	BridgeUnknownRecursion        uint64                     `json:"bridgeUnknownRecursion"`
+	BridgeUnknownRecursionCapture uint64                     `json:"bridgeUnknownRecursionCapture"`
+	BridgeUnknownRecursionConsume uint64                     `json:"bridgeUnknownRecursionConsume"`
+	BridgeUnknownRecursionFreed   uint64                     `json:"bridgeUnknownRecursionFreed"`
+	BridgeFaults                  uint64                     `json:"bridgeFaults"`
 	TCPKnown                     uint64                     `json:"tcpKnown"`
 	TCPUnknownIdentity           uint64                     `json:"tcpUnknownIdentity"`
 	TCPConflicting               uint64                     `json:"tcpConflicting"`
@@ -88,27 +91,33 @@ type ebpfOwnerStats struct {
 }
 
 type ebpfOwnerState struct {
-	mu          sync.Mutex
-	stopped     bool
-	nextEpoch   atomic.Uint64
-	tun         *Tun
-	bridge      *ownerbpf.Bridge
-	probe       *ownerbpf.AcceptedSenderProbe
-	runtime     *ownerbpf.ProvenanceRuntime
-	maintCancel context.CancelFunc
-	maintWG     sync.WaitGroup
-	reconcileCh chan struct{}
-	retireCh    chan struct{}
+	mu             sync.Mutex
+	stopped        bool
+	nextEpoch      atomic.Uint64
+	tun            *Tun
+	bridge         *ownerbpf.Bridge
+	standbyBridge  *ownerbpf.Bridge
+	retiredBridges []*ownerbpf.Bridge
+	probe          *ownerbpf.AcceptedSenderProbe
+	runtime        *ownerbpf.ProvenanceRuntime
+	maintCancel    context.CancelFunc
+	maintWG        sync.WaitGroup
+	reconcileCh    chan struct{}
+	retireCh       chan struct{}
+	bridgeMaintCh  chan struct{}
 
 	retireMu                  sync.Mutex
 	pendingRetire             map[uint64]time.Time
 	lastPressureReconcileNano atomic.Int64
 
-	bridgeDeliveredBase        atomic.Uint64
-	bridgeReadUnknownBase      atomic.Uint64
-	bridgeUnknownRecursionBase atomic.Uint64
-	bridgeFaultsBase           atomic.Uint64
-	epochRebuildDrainedBase    atomic.Uint64
+	bridgeDeliveredBase               atomic.Uint64
+	bridgeReadUnknownBase             atomic.Uint64
+	bridgeUnknownRecursionBase        atomic.Uint64
+	bridgeUnknownRecursionCaptureBase atomic.Uint64
+	bridgeUnknownRecursionConsumeBase atomic.Uint64
+	bridgeUnknownRecursionFreedBase   atomic.Uint64
+	bridgeFaultsBase                  atomic.Uint64
+	epochRebuildDrainedBase           atomic.Uint64
 
 	epochRebuilds            atomic.Uint64
 	epochRebuildNanos        atomic.Uint64
@@ -136,6 +145,9 @@ func (o *Owners) foldBridgeStatsLocked(b *ownerbpf.Bridge) {
 	o.ebpf.bridgeDeliveredBase.Add(b.DeliveredWithoutRecord.Load())
 	o.ebpf.bridgeReadUnknownBase.Add(b.ReadUnknown.Load())
 	o.ebpf.bridgeUnknownRecursionBase.Add(b.UnknownRecursion.Load())
+	o.ebpf.bridgeUnknownRecursionCaptureBase.Add(b.UnknownRecursionCapture.Load())
+	o.ebpf.bridgeUnknownRecursionConsumeBase.Add(b.UnknownRecursionConsume.Load())
+	o.ebpf.bridgeUnknownRecursionFreedBase.Add(b.UnknownRecursionFreed.Load())
 	o.ebpf.bridgeFaultsBase.Add(b.Faults())
 }
 
@@ -152,12 +164,18 @@ func (o *Owners) ebpfStats() *ebpfOwnerStats {
 	delivered := o.ebpf.bridgeDeliveredBase.Load()
 	readUnknown := o.ebpf.bridgeReadUnknownBase.Load()
 	unknownRec := o.ebpf.bridgeUnknownRecursionBase.Load()
+	unknownRecCapture := o.ebpf.bridgeUnknownRecursionCaptureBase.Load()
+	unknownRecConsume := o.ebpf.bridgeUnknownRecursionConsumeBase.Load()
+	unknownRecFreed := o.ebpf.bridgeUnknownRecursionFreedBase.Load()
 	faults := o.ebpf.bridgeFaultsBase.Load()
 	rebuildDrained := o.ebpf.epochRebuildDrainedBase.Load()
 	if b := o.ebpf.bridge; b != nil {
 		delivered += b.DeliveredWithoutRecord.Load()
 		readUnknown += b.ReadUnknown.Load()
 		unknownRec += b.UnknownRecursion.Load()
+		unknownRecCapture += b.UnknownRecursionCapture.Load()
+		unknownRecConsume += b.UnknownRecursionConsume.Load()
+		unknownRecFreed += b.UnknownRecursionFreed.Load()
 		faults += b.Faults()
 	}
 	if tun := o.ebpf.tun; tun != nil {
@@ -166,13 +184,16 @@ func (o *Owners) ebpfStats() *ebpfOwnerStats {
 	o.ebpf.mu.Unlock()
 
 	out := &ebpfOwnerStats{
-		EpochRebuilds:                o.ebpf.epochRebuilds.Load(),
-		EpochRebuildDrained:          rebuildDrained,
-		EpochRebuildNanos:            o.ebpf.epochRebuildNanos.Load(),
-		BridgeDeliveredWithoutRecord: delivered,
-		BridgeReadUnknown:            readUnknown,
-		BridgeUnknownRecursion:       unknownRec,
-		BridgeFaults:                 faults,
+		EpochRebuilds:                 o.ebpf.epochRebuilds.Load(),
+		EpochRebuildDrained:           rebuildDrained,
+		EpochRebuildNanos:             o.ebpf.epochRebuildNanos.Load(),
+		BridgeDeliveredWithoutRecord:  delivered,
+		BridgeReadUnknown:             readUnknown,
+		BridgeUnknownRecursion:        unknownRec,
+		BridgeUnknownRecursionCapture: unknownRecCapture,
+		BridgeUnknownRecursionConsume: unknownRecConsume,
+		BridgeUnknownRecursionFreed:   unknownRecFreed,
+		BridgeFaults:                  faults,
 		TCPKnown:                     o.ebpf.tcpKnown.Load(),
 		TCPUnknownIdentity:           o.ebpf.tcpUnknownIdentity.Load(),
 		TCPConflicting:               o.ebpf.tcpConflicting.Load(),
@@ -294,6 +315,7 @@ func (o *Owners) AttachProvenance(ctx context.Context, dev platform.TunDevice) (
 		_ = rt.Close()
 		return handleLoadFailure("load eBPF sender probe", err)
 	}
+	standbyBridge, _ := ownerbpf.LoadEngineBridgeStandby(uint32(tun.Ifindex()), tun.NetNSInode(), uint64(tun.TxQLen()))
 
 	o.ebpf.retireMu.Lock()
 	o.ebpf.pendingRetire = make(map[uint64]time.Time)
@@ -302,16 +324,22 @@ func (o *Owners) AttachProvenance(ctx context.Context, dev platform.TunDevice) (
 	o.ebpf.bridgeDeliveredBase.Store(0)
 	o.ebpf.bridgeReadUnknownBase.Store(0)
 	o.ebpf.bridgeUnknownRecursionBase.Store(0)
+	o.ebpf.bridgeUnknownRecursionCaptureBase.Store(0)
+	o.ebpf.bridgeUnknownRecursionConsumeBase.Store(0)
+	o.ebpf.bridgeUnknownRecursionFreedBase.Store(0)
 	o.ebpf.bridgeFaultsBase.Store(0)
 
 	o.ebpf.mu.Lock()
 	o.ebpf.stopped = false
 	o.ebpf.tun = tun
 	o.ebpf.bridge = bridge
+	o.ebpf.standbyBridge = standbyBridge
+	o.ebpf.retiredBridges = nil
 	o.ebpf.probe = probe
 	o.ebpf.runtime = rt
 	o.ebpf.reconcileCh = make(chan struct{}, 1)
 	o.ebpf.retireCh = make(chan struct{}, 1)
+	o.ebpf.bridgeMaintCh = make(chan struct{}, 1)
 	o.ebpf.mu.Unlock()
 
 	tun.AttachProvenanceReader(&ebpfBridgeBurstSource{owners: o, bridge: bridge}, o.onProvenanceBurst)
@@ -347,29 +375,49 @@ func (o *Owners) rebuildProvenanceEpoch(
 	if o.ebpf.bridge == oldBridge {
 		o.foldBridgeStatsLocked(oldBridge)
 		o.ebpf.bridge = nil
+		if oldBridge != nil {
+			o.ebpf.retiredBridges = append(o.ebpf.retiredBridges, oldBridge)
+		}
 	}
+	standby := o.ebpf.standbyBridge
+	o.ebpf.standbyBridge = nil
 	stopped = o.ebpf.stopped
 	o.ebpf.mu.Unlock()
 
-	if oldBridge != nil {
-		_ = oldBridge.Close()
-	}
 	if stopped {
+		if standby != nil {
+			_ = standby.Close()
+		}
 		return nil, nil, errors.New("provenance stopped during epoch rebuild")
 	}
 
 	newEpoch := o.ebpf.nextEpoch.Add(1)
 	rt.AdvanceBridgeEpoch(newEpoch)
 
-	newBridge, err := ownerbpf.LoadEngineBridge(uint32(tun.Ifindex()), tun.NetNSInode(), newEpoch, uint64(tun.TxQLen()))
-	if err != nil {
-		return nil, nil, fmt.Errorf("reload eBPF provenance bridge for epoch %d: %w", newEpoch, err)
+	var (
+		newBridge *ownerbpf.Bridge
+		err       error
+	)
+	if standby != nil {
+		if actErr := standby.ActivateStandby(newEpoch); actErr == nil {
+			newBridge = standby
+		} else {
+			_ = standby.Close()
+		}
+	}
+	if newBridge == nil {
+		newBridge, err = ownerbpf.LoadEngineBridge(uint32(tun.Ifindex()), tun.NetNSInode(), newEpoch, uint64(tun.TxQLen()))
+		if err != nil {
+			o.requestProvenanceBridgeMaintenance()
+			return nil, nil, fmt.Errorf("reload eBPF provenance bridge for epoch %d: %w", newEpoch, err)
+		}
 	}
 
 	o.ebpf.mu.Lock()
 	if o.ebpf.stopped || o.ebpf.runtime != rt || o.ebpf.probe == nil {
 		o.ebpf.mu.Unlock()
 		_ = newBridge.Close()
+		o.requestProvenanceBridgeMaintenance()
 		return nil, nil, errors.New("provenance stopped during bridge reload")
 	}
 	o.ebpf.bridge = newBridge
@@ -378,6 +426,7 @@ func (o *Owners) rebuildProvenanceEpoch(
 	enableNew := func(drainLocked func() error) error {
 		if drainLocked != nil {
 			if err := drainLocked(); err != nil {
+				o.requestProvenanceBridgeMaintenance()
 				return fmt.Errorf("drain uncertified TUN frames during epoch rebuild: %w", err)
 			}
 		}
@@ -385,13 +434,18 @@ func (o *Owners) rebuildProvenanceEpoch(
 		aborted := o.ebpf.stopped || o.ebpf.bridge != newBridge
 		o.ebpf.mu.Unlock()
 		if aborted {
+			o.requestProvenanceBridgeMaintenance()
 			return errors.New("provenance stopped before enabling rebuilt bridge")
 		}
 		if err := newBridge.Enable(uint64(tun.TxQLen())); err != nil {
+			o.requestProvenanceBridgeMaintenance()
 			return fmt.Errorf("enable rebuilt eBPF provenance bridge: %w", err)
 		}
 		o.ebpf.epochRebuilds.Add(1)
 		o.ebpf.epochRebuildNanos.Add(uint64(max(time.Since(rebuildStarted), 0)))
+		// Defer oldBridge RCU tracepoint detach and next standby preload until
+		// after newBridge is active so tracepoints_mutex is uncontended during swap.
+		o.requestProvenanceBridgeMaintenance()
 		return nil
 	}
 	return &ebpfBridgeBurstSource{owners: o, bridge: newBridge}, enableNew, nil
@@ -449,6 +503,8 @@ func (o *Owners) CloseProvenance() error {
 	o.ebpf.mu.Lock()
 	tun := o.ebpf.tun
 	bridge := o.ebpf.bridge
+	standbyBridge := o.ebpf.standbyBridge
+	retiredBridges := o.ebpf.retiredBridges
 	probe := o.ebpf.probe
 	rt := o.ebpf.runtime
 	o.foldBridgeStatsLocked(bridge)
@@ -457,10 +513,13 @@ func (o *Owners) CloseProvenance() error {
 	}
 	o.ebpf.tun = nil
 	o.ebpf.bridge = nil
+	o.ebpf.standbyBridge = nil
+	o.ebpf.retiredBridges = nil
 	o.ebpf.probe = nil
 	o.ebpf.runtime = nil
 	o.ebpf.reconcileCh = nil
 	o.ebpf.retireCh = nil
+	o.ebpf.bridgeMaintCh = nil
 	o.ebpf.mu.Unlock()
 
 	o.ebpf.retireMu.Lock()
@@ -476,6 +535,14 @@ func (o *Owners) CloseProvenance() error {
 	}
 	if bridge != nil {
 		errs = append(errs, bridge.Close())
+	}
+	if standbyBridge != nil {
+		errs = append(errs, standbyBridge.Close())
+	}
+	for _, rb := range retiredBridges {
+		if rb != nil {
+			errs = append(errs, rb.Close())
+		}
 	}
 	if probe != nil {
 		errs = append(errs, probe.Close())
@@ -578,6 +645,53 @@ func (o *Owners) requestProvenanceReconcile() {
 		case ch <- struct{}{}:
 		default:
 		}
+	}
+}
+
+func (o *Owners) requestProvenanceBridgeMaintenance() {
+	if !o.isEBPFBackend() {
+		return
+	}
+	o.ebpf.mu.Lock()
+	ch := o.ebpf.bridgeMaintCh
+	o.ebpf.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
+func (o *Owners) maintainProvenanceBridges(ctx context.Context) {
+	o.ebpf.mu.Lock()
+	retired := o.ebpf.retiredBridges
+	o.ebpf.retiredBridges = nil
+	needStandby := !o.ebpf.stopped && o.ebpf.runtime != nil && o.ebpf.tun != nil && o.ebpf.standbyBridge == nil
+	rt := o.ebpf.runtime
+	tun := o.ebpf.tun
+	o.ebpf.mu.Unlock()
+
+	for _, rb := range retired {
+		if rb != nil {
+			_ = rb.Close()
+		}
+	}
+	if !needStandby || ctx.Err() != nil {
+		return
+	}
+	cand, err := ownerbpf.LoadEngineBridgeStandby(uint32(tun.Ifindex()), tun.NetNSInode(), uint64(tun.TxQLen()))
+	if err != nil || cand == nil {
+		return
+	}
+	o.ebpf.mu.Lock()
+	if !o.ebpf.stopped && o.ebpf.runtime == rt && o.ebpf.tun == tun && o.ebpf.standbyBridge == nil {
+		o.ebpf.standbyBridge = cand
+		cand = nil
+	}
+	o.ebpf.mu.Unlock()
+	if cand != nil {
+		_ = cand.Close()
 	}
 }
 
@@ -688,6 +802,7 @@ func (o *Owners) startProvenanceMaintenance() {
 	o.ebpf.maintCancel = cancel
 	reconcileCh := o.ebpf.reconcileCh
 	retireCh := o.ebpf.retireCh
+	bridgeMaintCh := o.ebpf.bridgeMaintCh
 	o.ebpf.maintWG.Add(1)
 	o.ebpf.mu.Unlock()
 
@@ -705,7 +820,10 @@ func (o *Owners) startProvenanceMaintenance() {
 				o.sweepPendingCookieRetires(now)
 			case <-retireCh:
 				o.sweepPendingCookieRetires(time.Now())
+			case <-bridgeMaintCh:
+				o.maintainProvenanceBridges(ctx)
 			case <-reconcileTicker.C:
+				o.maintainProvenanceBridges(ctx)
 				o.sweepPendingCookieRetires(time.Now())
 				o.reconcileProvenanceLiveCookies(ctx)
 			case <-reconcileCh:
