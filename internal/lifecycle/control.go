@@ -103,7 +103,7 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	// A Control failure releases its connection, not the engine. The service
 	// manager gets the first recovery opportunity; the lease is the fallback.
 	crash := crashnet.New(log, func(context.Context) error { cancel(); return nil })
-	core, err := control.New(ctx, control.Options{Engine: remote, Platform: desktop, Settings: store, Undo: undo, Journal: journal, IO: ioOptions, Mode: c.Mode, Version: assets.AppVersion(), UserDir: c.Data, Log: log, Crash: crash, ServiceMode: true, BootID: boot, AutostartAllowed: true, Checkpoint: func(point string) { faultpoint.Hit(c.Data, point) }, CheckUpdate: func(ctx context.Context) (*updates.Offer, error) {
+	core, err := control.New(ctx, control.Options{Engine: remote, Platform: desktop, PathRules: &appIdentityRules, Settings: store, Undo: undo, Journal: journal, IO: ioOptions, Mode: c.Mode, Version: assets.AppVersion(), UserDir: c.Data, Log: log, Crash: crash, ServiceMode: true, BootID: boot, AutostartAllowed: true, Checkpoint: func(point string) { faultpoint.Hit(c.Data, point) }, CheckUpdate: func(ctx context.Context) (*updates.Offer, error) {
 		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		architecture, err := desktop.Base.Call(ctx, "architecture", nil)

@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/apppath"
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/crashnet"
@@ -59,6 +60,7 @@ type Options struct {
 	AutostartAllowed       bool
 	CheckUpdate            func(context.Context) (*updates.Offer, error)
 	Tracker                AppTracker
+	PathRules              *apppath.Rules
 	Crash                  *crashnet.Net
 	// ServiceMode changes durability and lifetime, while the old CI launcher
 	// remains a behavior oracle until the engine swap.
@@ -220,7 +222,11 @@ func New(ctx context.Context, o Options) (*Core, error) {
 		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	c := &Core{op: o, ctx: ctx, cancel: cancel, values: o.Settings.Values(), lanes: map[string]*lane{}, adapters: []map[string]any{}, routes: []map[string]any{}, meters: map[string]meter{}, tracker: apps.NewTracker(), outside: apps.NewOutsideTracker(), usage: usage.New(o.Location), exhausted: map[string]bool{}, closePending: map[string]bool{}, connections: map[string]int{}, info: map[string]map[string]any{}, events: []map[string]any{}, wanted: true, lastStatus: "off"}
+	rules := apppath.Windows
+	if o.PathRules != nil && o.PathRules.Separator != "" {
+		rules = *o.PathRules
+	}
+	c := &Core{op: o, ctx: ctx, cancel: cancel, values: o.Settings.Values(), lanes: map[string]*lane{}, adapters: []map[string]any{}, routes: []map[string]any{}, meters: map[string]meter{}, tracker: apps.NewTrackerWithRules(rules), outside: apps.NewOutsideTrackerWithRules(rules), usage: usage.New(o.Location), exhausted: map[string]bool{}, closePending: map[string]bool{}, connections: map[string]int{}, info: map[string]map[string]any{}, events: []map[string]any{}, wanted: true, lastStatus: "off"}
 	if o.ServiceMode {
 		c.wanted = false
 	}
@@ -1568,12 +1574,43 @@ func (c *Core) HelperLine(data []byte) bool {
 			if a["up"] != nil {
 				up = ptr(js.Number(a["up"]))
 			}
-			samples = append(samples, apps.OutsideSample{ID: js.Text(a["id"]), Path: js.Text(a["path"]), Line: id, Down: down, Up: up, BeforeRouting: created.Before(s.StartedAt)})
+			samples = append(samples, apps.OutsideSample{ID: js.Text(a["id"]), Path: js.Text(a["path"]), AppID: js.Text(a["appId"]), Line: id, Down: down, Up: up, BeforeRouting: created.Before(s.StartedAt)})
 			c.outsideStarts[js.Text(a["id"])] = js.Text(a["processStarted"])
 		}
 		c.outside.Ingest(samples, now)
 	}
 	return true
+}
+
+func (c *Core) pathRules() apppath.Rules {
+	if c.op.PathRules != nil && c.op.PathRules.Separator != "" {
+		return *c.op.PathRules
+	}
+	return apppath.Windows
+}
+
+func (c *Core) appKey(v string) string {
+	return apps.AppKeyWith(v, c.pathRules())
+}
+
+func (c *Core) infoAttemptKey(path string) string {
+	if c.pathRules().Separator == "/" {
+		return path
+	}
+	return strings.ToLower(path)
+}
+
+func (c *Core) trackedSandboxAtPathLocked(path string) string {
+	pathKey := c.appKey(path)
+	if s, ok := c.tracker.(interface{ SandboxAtPath(string) string }); ok {
+		if id := s.SandboxAtPath(pathKey); id != "" {
+			return id
+		}
+	}
+	if c.outside != nil {
+		return c.outside.SandboxAtPath(pathKey)
+	}
+	return ""
 }
 
 func array(v any) []any { a, _ := v.([]any); return a }

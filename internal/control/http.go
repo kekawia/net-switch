@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	assets "github.com/AyoubAchour/net-switch"
-	"github.com/AyoubAchour/net-switch/internal/apps"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 )
 
@@ -98,7 +97,7 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.sameToken(token) {
 			h.Core.mu.Lock()
-			info := h.Core.info[apps.AppKey(r.URL.Query().Get("key"))]
+			info := h.Core.info[h.Core.appKey(r.URL.Query().Get("key"))]
 			icon, _ = base64.StdEncoding.DecodeString(js.Text(info["icon"]))
 			h.Core.mu.Unlock()
 		}

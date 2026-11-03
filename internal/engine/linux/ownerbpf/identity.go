@@ -531,60 +531,9 @@ func ValidateProcessIdentity(key ActorKey, ev ActorEvidence, mat RawProcessMater
 	cleanExe := path.Clean(rawExe)
 	canonPath := cleanExe
 
-	if mat.FlatpakInfoErr != nil {
+	sandbox, appID, ok := resolveSandboxIdentity(cleanExe, mat.FlatpakAppID, mat.FlatpakInfoErr, mat.Mounts, ev.Device, mat.AppImageEnv, mat.AppDirEnv, mat.AppImageBacking)
+	if !ok {
 		return ValidatedIdentity{}, ReasonSandboxUnverified
-	}
-	if strings.HasPrefix(cleanExe, "/app/") && mat.FlatpakAppID == "" {
-		// /app/bin/foo without verified confined .flatpak-info is never trusted.
-		return ValidatedIdentity{}, ReasonSandboxUnverified
-	}
-
-	sandbox := SandboxNone
-	appID := apppath.Normalize(cleanExe, apppath.Linux)
-
-	if mat.FlatpakAppID != "" {
-		sandbox = SandboxFlatpak
-		appID = "flatpak:" + strings.TrimSpace(mat.FlatpakAppID)
-	} else if snapName, snapRoot, ok := parseSnapExePath(cleanExe); ok {
-		if !verifySnapMount(mat.Mounts, snapRoot, ev.Device) {
-			return ValidatedIdentity{}, ReasonSandboxUnverified
-		}
-		sandbox = SandboxSnap
-		appID = "snap:" + snapName
-	}
-
-	// Registered AppImage verification: an APPIMAGE environment variable alone is
-	// never trusted without a matching active AppImage mount in /proc/<tgid>/mountinfo
-	// covering /proc/<tgid>/exe whose device matches synchronous send evidence.
-	covMount, hasCovMount := deepCoveringMount(mat.Mounts, cleanExe)
-	exeOnAppImageMount := hasCovMount && isAppImageMount(covMount)
-	if mat.AppImageEnv != "" || mat.AppDirEnv != "" || exeOnAppImageMount {
-		if sandbox != SandboxNone {
-			return ValidatedIdentity{}, ReasonSandboxUnverified
-		}
-		appImgPath := path.Clean(strings.TrimSpace(mat.AppImageEnv))
-		if !strings.HasPrefix(appImgPath, "/") || !strings.HasSuffix(strings.ToLower(appImgPath), ".appimage") {
-			return ValidatedIdentity{}, ReasonSandboxUnverified
-		}
-		if mat.AppImageBacking == nil || !mat.AppImageBacking.Regular || mat.AppImageBacking.Ino == 0 {
-			return ValidatedIdentity{}, ReasonSandboxUnverified
-		}
-		if !exeOnAppImageMount {
-			return ValidatedIdentity{}, ReasonSandboxUnverified
-		}
-		if EncodeKernelDev(covMount.Major, covMount.Minor) != ev.Device {
-			return ValidatedIdentity{}, ReasonSandboxUnverified
-		}
-		if mat.AppDirEnv != "" && path.Clean(mat.AppDirEnv) != path.Clean(covMount.MountPoint) {
-			return ValidatedIdentity{}, ReasonSandboxUnverified
-		}
-		base := path.Base(appImgPath)
-		name := base[:len(base)-len(".appimage")]
-		if name == "" {
-			return ValidatedIdentity{}, ReasonSandboxUnverified
-		}
-		sandbox = SandboxAppImage
-		appID = "appimage:" + name
 	}
 
 	ctx := b
@@ -597,6 +546,65 @@ func ValidateProcessIdentity(key ActorKey, ev ActorEvidence, mat RawProcessMater
 		Sandbox:    sandbox,
 		ExeDeleted: deleted,
 	}, ReasonValidated
+}
+
+func resolveSandboxIdentity(cleanExe, flatpakAppID string, flatpakInfoErr error, mounts []MountEntry, exeDev uint64, appImgEnv, appDirEnv string, backing *FileIdentity) (SandboxKind, string, bool) {
+	if flatpakInfoErr != nil {
+		return SandboxNone, "", false
+	}
+	if strings.HasPrefix(cleanExe, "/app/") && flatpakAppID == "" {
+		// /app/bin/foo without verified confined .flatpak-info is never trusted.
+		return SandboxNone, "", false
+	}
+
+	sandbox := SandboxNone
+	appID := apppath.Normalize(cleanExe, apppath.Linux)
+
+	if flatpakAppID != "" {
+		sandbox = SandboxFlatpak
+		appID = "flatpak:" + strings.TrimSpace(flatpakAppID)
+	} else if snapName, snapRoot, ok := parseSnapExePath(cleanExe); ok {
+		if !verifySnapMount(mounts, snapRoot, exeDev) {
+			return SandboxNone, "", false
+		}
+		sandbox = SandboxSnap
+		appID = "snap:" + snapName
+	}
+
+	// Registered AppImage verification: an APPIMAGE environment variable alone is
+	// never trusted without a matching active AppImage mount in /proc/<tgid>/mountinfo
+	// covering /proc/<tgid>/exe whose device matches synchronous send evidence.
+	covMount, hasCovMount := deepCoveringMount(mounts, cleanExe)
+	exeOnAppImageMount := hasCovMount && isAppImageMount(covMount)
+	if appImgEnv != "" || appDirEnv != "" || exeOnAppImageMount {
+		if sandbox != SandboxNone {
+			return SandboxNone, "", false
+		}
+		appImgPath := path.Clean(strings.TrimSpace(appImgEnv))
+		if !strings.HasPrefix(appImgPath, "/") || !strings.HasSuffix(strings.ToLower(appImgPath), ".appimage") {
+			return SandboxNone, "", false
+		}
+		if backing == nil || !backing.Regular || backing.Ino == 0 {
+			return SandboxNone, "", false
+		}
+		if !exeOnAppImageMount {
+			return SandboxNone, "", false
+		}
+		if EncodeKernelDev(covMount.Major, covMount.Minor) != exeDev {
+			return SandboxNone, "", false
+		}
+		if appDirEnv != "" && path.Clean(appDirEnv) != path.Clean(covMount.MountPoint) {
+			return SandboxNone, "", false
+		}
+		base := path.Base(appImgPath)
+		name := base[:len(base)-len(".appimage")]
+		if name == "" {
+			return SandboxNone, "", false
+		}
+		sandbox = SandboxAppImage
+		appID = "appimage:" + name
+	}
+	return sandbox, appID, true
 }
 
 func parseSnapExePath(cleanExe string) (name, snapRoot string, ok bool) {

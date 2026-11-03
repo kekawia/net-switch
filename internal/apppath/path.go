@@ -77,9 +77,13 @@ func Normalize(s string, rules Rules) string { return rules.FoldCase(parts(s, ru
 func Pattern(s string, rules Rules) string {
 	return rules.RegexFlags + "^" + parts(s, rules, true) + "$"
 }
-func Key(s string) string {
+func KeyWith(s string, rules Rules) string {
 	if s == "" {
 		return "unknown"
 	}
-	return Normalize(s, Windows)
+	if rules.Separator == "" {
+		rules = Windows
+	}
+	return Normalize(s, rules)
 }
+func Key(s string) string { return KeyWith(s, Windows) }

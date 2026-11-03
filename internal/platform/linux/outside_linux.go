@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/linux/ownerbpf"
 	"github.com/AyoubAchour/net-switch/internal/platform/outside"
 	"golang.org/x/sys/unix"
 )
@@ -584,11 +585,12 @@ func scanSocketOwners(inodes map[uint32]struct{}) map[uint32]procOwner {
 			return true
 		}
 		exe := readProcExe(pid)
+		appID := ownerbpf.InspectLiveProcessAppID(pid, startBefore, exe)
 		startAfter, err := readProcStatStart(pid)
 		if err != nil || startAfter != startBefore {
 			return true
 		}
-		owner := procOwner{pid: pid, start: startBefore, path: exe}
+		owner := procOwner{pid: pid, start: startBefore, path: exe, appID: appID}
 		for _, inode := range matched {
 			if _, exists := out[inode]; !exists {
 				out[inode] = owner

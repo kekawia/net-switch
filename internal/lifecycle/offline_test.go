@@ -70,6 +70,16 @@ func TestServiceAssetsDoNotPutCredentialsInURLs(t *testing.T) {
 	if !strings.Contains(string(source), "&token=") {
 		t.Fatal("test did not exercise legacy icon source")
 	}
+	for _, want := range []string{
+		"api('/api/app-line', { path: app.identity ?? app.path, line })",
+		"api('/api/app-line', { path: appTarget, line: line.id })",
+		"item.identity === path || item.key === path",
+		"map((app) => [app.key, app.line])",
+	} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("service asset missing %q", want)
+		}
+	}
 }
 func TestDurableStorePrimaryAndBackup(t *testing.T) {
 	if runtime.GOOS == "windows" && (os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted") {

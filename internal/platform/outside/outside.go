@@ -15,6 +15,7 @@ type Entry struct {
 	ID             string  `json:"id"`
 	PID            uint32  `json:"pid"`
 	Path           string  `json:"path"`
+	AppID          string  `json:"appId,omitempty"`
 	Local          string  `json:"local"`
 	Created        string  `json:"created"`
 	ProcessStarted string  `json:"processStarted,omitempty"`
@@ -65,6 +66,7 @@ type System[Row any] struct {
 	RefreshRow   bool
 	Connections  func() ([]Connection[Row], error)
 	ProcessPath  func(pid uint32) string
+	ProcessAppID func(pid uint32) string
 	ProcessStart func(pid uint32, row *Row) string
 	Enable       func(row *Row) bool
 	Read         func(row *Row) (down, up uint64, ok bool)
@@ -119,6 +121,7 @@ func (w *Watcher[Row]) rescan() {
 		return
 	}
 	paths := map[uint32]string{}
+	appIDs := map[uint32]string{}
 	seen := map[string]bool{}
 	for _, c := range connections {
 		if !c.Established {
@@ -134,6 +137,9 @@ func (w *Watcher[Row]) rescan() {
 				path = w.system.ProcessPath(c.PID)
 			}
 			paths[c.PID] = path
+			if w.system.ProcessAppID != nil {
+				appIDs[c.PID] = w.system.ProcessAppID(c.PID)
+			}
 		}
 		if w.sameEngine(path) {
 			continue
@@ -148,7 +154,7 @@ func (w *Watcher[Row]) rescan() {
 		}
 		row := c.Row
 		measured := w.system.Estats && (w.system.Enable == nil || w.system.Enable(&row))
-		entry := Entry{ID: id, PID: c.PID, Path: path, Local: local, Created: c.Created}
+		entry := Entry{ID: id, PID: c.PID, Path: path, AppID: appIDs[c.PID], Local: local, Created: c.Created}
 		if w.system.ProcessStart != nil {
 			entry.ProcessStarted = w.system.ProcessStart(c.PID, &row)
 		}

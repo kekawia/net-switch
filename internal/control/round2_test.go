@@ -121,12 +121,12 @@ func TestRealTrafficKeepsLastMeasuredPing(t *testing.T) {
 func TestReconnectOnlyExcludesUnknownAndWindowsServices(t *testing.T) {
 	c, _, _, _ := testCore(t, nil)
 	for _, exe := range []string{"node", "python", "pythonw", "java", "javaw", "cmd", "powershell", "pwsh", "wscript", "cscript", "dotnet"} {
-		if c.describeLocked(`C:\Apps\` + exe + ".exe")["reconnectable"] != true {
+		if c.describeLocked(`C:\Apps\`+exe+".exe", "")["reconnectable"] != true {
 			t.Fatal(exe)
 		}
 	}
 	for _, path := range []string{"", `C:\Windows\System32\svchost.exe`} {
-		if c.describeLocked(path)["reconnectable"] != false {
+		if c.describeLocked(path, "")["reconnectable"] != false {
 			t.Fatal(path)
 		}
 	}

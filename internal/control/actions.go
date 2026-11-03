@@ -47,23 +47,31 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 			for _, l := range c.itemsLocked() {
 				exists = exists || l.ID == id
 			}
-			// A pin stores the identity the person selected. For an app the
-			// engine reports under a sandbox identity, that is the identity,
-			// never the path other sandboxes may share; a path pin for it is
-			// replaced here. On Windows the identity is the path as today.
+			// A pin stores the identity the person selected. Control never derives
+			// a sandbox identity from a path (two sandboxes can share /app/bin/game);
+			// on Linux a raw sandbox path may only be unpinned, never newly pinned.
 			identity := path
-			if tracked := c.tracker.IdentityOf(apps.AppKey(path)); tracked != "" {
+			isLinux := c.pathRules().Separator == "/"
+			sandboxPath := false
+			if isLinux {
+				if !apps.SandboxIdentity(path) && (apps.SandboxLocation(path) || c.trackedSandboxAtPathLocked(path) != "") {
+					sandboxPath = true
+				}
+			} else if tracked := c.tracker.IdentityOf(c.appKey(path)); tracked != "" {
 				identity = tracked
 			}
 			pins := apps.Pins{}
 			for _, p := range c.pinsLocked() {
-				if apps.AppKey(p.Path) != apps.AppKey(path) && apps.AppKey(p.Path) != apps.AppKey(identity) {
+				if c.appKey(p.Path) != c.appKey(path) && c.appKey(p.Path) != c.appKey(identity) {
 					pins = append(pins, p)
 				}
 			}
 			c.mu.Unlock()
 			if !exists {
 				return bad("That line isn’t there any more.")
+			}
+			if sandboxPath && b["line"] != nil {
+				return bad("Choose this app again from the list so Net Switch pins the right sandboxed app.")
 			}
 			if b["line"] != nil {
 				pins = append(pins, apps.Pin{Path: identity, LineID: id})
@@ -334,25 +342,26 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 	}
 	s = c.op.Engine.Snapshot()
 	c.mu.Lock()
-	path := ""
+	path, identity := "", ""
 	for _, a := range c.tracker.Snapshot(nil) {
 		if a.Key == key {
-			path = a.Path
+			path, identity = a.Path, a.Identity
 			break
 		}
 	}
 	if path == "" {
 		if a := c.outside.Get(key); a != nil {
-			path = a.Path
+			path, identity = a.Path, a.Identity
 		}
 	}
-	if c.describeLocked(path)["reconnectable"] != true {
+	if c.describeLocked(path, identity)["reconnectable"] != true {
 		c.mu.Unlock()
 		return nil, bad("This one can’t be reconnected, because other programs share its connections.")
 	}
 	pinned := ""
+	isLinux := c.pathRules().Separator == "/"
 	for _, p := range c.pinsLocked() {
-		if apps.AppKey(p.Path) == key {
+		if c.appKey(p.Path) == key && !(isLinux && apps.PinNeedsReselection(p, identity)) {
 			pinned = p.LineID
 		}
 	}
