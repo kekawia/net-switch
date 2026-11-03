@@ -90,6 +90,43 @@ func suppressTunIPv6Autoconf(name string) error {
 	return nil
 }
 
+// avoidLocklessPfifoFast replaces a root pfifo_fast qdisc with locked pfifo
+// (limit = dev->tx_queue_len, FIFO wire order). On Linux 5.8–5.12, lockless
+// TCQ_F_NOLOCK pfifo_fast can strand the final packet of a concurrent two-CPU
+// burst when enqueue races qdisc_run_end (upstream fix in 5.13). Hosts already
+// defaulting to fq_codel or built without CONFIG_NET_SCHED are left untouched.
+func avoidLocklessPfifoFast(l netlink.Link) error {
+	qdiscs, err := netlink.QdiscList(l)
+	if err != nil {
+		if errors.Is(err, unix.EOPNOTSUPP) || errors.Is(err, unix.ENOSYS) {
+			return nil
+		}
+		return fmt.Errorf("list TUN qdiscs: %w", err)
+	}
+	hasPfifoFast := false
+	for _, q := range qdiscs {
+		if q.Attrs().Parent == netlink.HANDLE_ROOT && q.Type() == "pfifo_fast" {
+			hasPfifoFast = true
+			break
+		}
+	}
+	if !hasPfifoFast {
+		return nil
+	}
+	err = netlink.QdiscReplace(&netlink.GenericQdisc{
+		QdiscAttrs: netlink.QdiscAttrs{
+			LinkIndex: l.Attrs().Index,
+			Parent:    netlink.HANDLE_ROOT,
+			Handle:    netlink.MakeHandle(1, 0),
+		},
+		QdiscType: "pfifo",
+	})
+	if err != nil && !errors.Is(err, unix.ENOENT) && !errors.Is(err, unix.EOPNOTSUPP) {
+		return fmt.Errorf("replace TUN pfifo_fast qdisc with locked pfifo: %w", err)
+	}
+	return nil
+}
+
 func (t *Tun) prepareBatchStorage() {
 	if t.writeStorage != nil {
 		return
@@ -161,6 +198,9 @@ func openTun(v tunObject) (*Tun, error) {
 	txqlen := updated.Attrs().TxQLen
 	if txqlen <= 0 {
 		return nil, fmt.Errorf("invalid readback TUN tx_queue_len %d", txqlen)
+	}
+	if err := avoidLocklessPfifoFast(updated); err != nil {
+		return nil, err
 	}
 	var nsStat unix.Stat_t
 	if err := unix.Stat("/proc/self/ns/net", &nsStat); err != nil {

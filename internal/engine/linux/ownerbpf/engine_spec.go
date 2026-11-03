@@ -185,10 +185,11 @@ func PrepareEngineSenderSpec(arch string, maxActors, queueEntries uint32) (*ebpf
 	// When bpf_map_update_elem(&actors, &key, &value, BPF_NOEXIST) succeeds
 	// (r0 == 0), branch past the original epilogue to push the initialized
 	// 64-byte stack frame [rfp-120..rfp-56) into actor_events and bump
-	// counters[1] (NewActors; counters[6] on queue overflow).
-	jeqEmit := asm.JEq.Imm(asm.R0, 0, "ns_emit_new_actor")
+	// counters[1] (NewActors; counters[6] on queue overflow). Copy BTF line
+	// metadata before attaching the symbol reference so Metadata retains both.
+	jeqEmit := asm.JEq.Imm(asm.R0, 0, "")
 	jeqEmit.Metadata = insns[158].Metadata
-	insns[158] = jeqEmit
+	insns[158] = jeqEmit.WithReference("ns_emit_new_actor")
 
 	insns = append(insns,
 		asm.LoadMapPtr(asm.R1, 0).WithReference("actor_events").WithSymbol("ns_emit_new_actor"),

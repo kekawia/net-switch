@@ -120,10 +120,17 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 			t.Fatalf("%s: unexpected actor_events queue spec: %+v", arch, q)
 		}
 
-		// Verify all map references bind and (on Linux) all symbol jumps marshal.
+		// Verify all map references bind and the patched actor-insert jump
+		// retains its symbol reference (never overwritten by BTF metadata).
 		cp := spec.Programs["observe_send"].Copy()
 		if len(cp.Instructions) != 213 {
 			t.Fatalf("%s patched observe_send len = %d, want 213", arch, len(cp.Instructions))
+		}
+		if ref := cp.Instructions[158].Reference(); ref != "ns_emit_new_actor" {
+			t.Fatalf("%s patched observe_send insns[158] reference = %q, want ns_emit_new_actor", arch, ref)
+		}
+		if sym := cp.Instructions[187].Symbol(); sym != "ns_emit_new_actor" {
+			t.Fatalf("%s patched observe_send insns[187] symbol = %q, want ns_emit_new_actor", arch, sym)
 		}
 		for i, name := range []string{"scope", "counters", "actors", "actor_events"} {
 			if err := cp.Instructions.AssociateMap(name, fakeFD(10+i)); err != nil {
@@ -131,12 +138,26 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 			}
 		}
 		if runtime.GOOS == "linux" {
+			var rawSlot158, rawSlot187 int
+			for idx := 0; idx < 187; idx++ {
+				slots := int(cp.Instructions[idx].Size() / 8)
+				if idx < 158 {
+					rawSlot158 += slots
+				}
+				rawSlot187 += slots
+			}
 			var encoded bytes.Buffer
 			if err := cp.Instructions.Marshal(&encoded, binary.LittleEndian); err != nil {
 				t.Fatalf("%s Marshal patched observe_send: %v", arch, err)
 			}
-			if encoded.Len() == 0 || encoded.Len()%8 != 0 {
-				t.Fatalf("%s unexpected encoded bytecode len %d", arch, encoded.Len())
+			raw := encoded.Bytes()
+			if len(raw) == 0 || len(raw)%8 != 0 {
+				t.Fatalf("%s unexpected encoded bytecode len %d", arch, len(raw))
+			}
+			gotJumpOff := int(int16(binary.LittleEndian.Uint16(raw[rawSlot158*8+2 : rawSlot158*8+4])))
+			wantJumpOff := rawSlot187 - (rawSlot158 + 1)
+			if gotJumpOff != wantJumpOff {
+				t.Fatalf("%s encoded jump offset at raw insn %d = %d, want %d (target raw insn %d)", arch, rawSlot158, gotJumpOff, wantJumpOff, rawSlot187)
 			}
 		}
 	}
