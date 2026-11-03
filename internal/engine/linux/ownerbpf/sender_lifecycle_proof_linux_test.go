@@ -1960,7 +1960,7 @@ func TestSenderEngineSpecLoad(t *testing.T) {
 	}
 	matchedActor := false
 	for _, ev := range events {
-		if ev.Key.Cookie == cookie && ev.Key.TGID == uint32(os.Getpid()) && ev.Evidence.ABI == ProvenanceABI {
+		if ev.Key.Cookie == cookie && ev.Key.TGID == uint32(os.Getpid()) && ev.Evidence.ABI == ABI {
 			matchedActor = true
 			break
 		}
