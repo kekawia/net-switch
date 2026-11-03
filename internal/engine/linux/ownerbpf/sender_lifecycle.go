@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"unsafe"
+
+	"github.com/cilium/ebpf"
 )
 
 const (
@@ -130,11 +132,18 @@ func newSocketSlotTableFromBacking(slots []SocketStateSlot, closeFn func() error
 }
 
 func (t *SocketSlotTable) Close() error {
-	if t == nil || t.closeFn == nil {
+	if t == nil {
 		return nil
 	}
 	fn := t.closeFn
 	t.closeFn = nil
+	t.slots = nil
+	t.meta = nil
+	t.cookieToSlot = nil
+	t.freeSlots = nil
+	if fn == nil {
+		return nil
+	}
 	return fn()
 }
 
@@ -353,7 +362,9 @@ func (t *SocketSlotTable) tryReclaimSlot(ledger *IdentityLedger, idx uint32) {
 		}
 		m.owner = nil
 	}
-	delete(t.cookieToSlot, cookie)
+	if curIdx, ok := t.cookieToSlot[cookie]; ok && curIdx == idx {
+		delete(t.cookieToSlot, cookie)
+	}
 	atomic.StoreUint64(&s.Cookie, 0)
 	atomic.StoreUint64(&s.SlotGeneration, 0)
 	atomic.StoreUint64(&s.Version, 0)
@@ -1370,6 +1381,7 @@ const (
 	FallbackMissingBTF              DegradedFallbackReason = "degraded_missing_btf"
 	FallbackCgroupV1                DegradedFallbackReason = "degraded_cgroup_v1"
 	FallbackCapabilityDenied        DegradedFallbackReason = "degraded_capability_denied"
+	FallbackKernelUnsupported       DegradedFallbackReason = "degraded_kernel_unsupported"
 	FallbackVerifierRejected        DegradedFallbackReason = "degraded_verifier_rejected"
 )
 
@@ -1401,6 +1413,13 @@ func ClassifyLoadFailure(err error, lockdownRaw string, hasBTF, isCgroupV2 bool)
 		strings.Contains(msg, "permission denied") ||
 		(hasBTF && (strings.Contains(msg, "BTF not supported") || strings.Contains(msg, "BTF: not supported"))) {
 		return FallbackCapabilityDenied
+	}
+	var verErr *ebpf.VerifierError
+	if errors.As(err, &verErr) {
+		return FallbackVerifierRejected
+	}
+	if errors.Is(err, syscall.ENOSYS) || errors.Is(err, syscall.EOPNOTSUPP) || errors.Is(err, ebpf.ErrNotSupported) {
+		return FallbackKernelUnsupported
 	}
 	return FallbackVerifierRejected
 }

@@ -49,6 +49,8 @@ var modes = map[string]mode{
 	"fdpass-recv": {runFDPassRecv, "receive a TCP socket and connect it"},
 	"share-exec":  {runShareExec, "create a TCP socket and start a program that inherits it"},
 	"connect-fd":  {runConnectFD, "connect an inherited TCP socket"},
+	"share-udp":   {runShareUDP, "bind a UDP socket, send first, and let an inherited child send next"},
+	"send-udp-fd": {runSendUDPFD, "send echo probes on an inherited UDP socket after a sync barrier"},
 	"spawn":       {runSpawn, "start another program (fork and exec) and pass on its result"},
 }
 

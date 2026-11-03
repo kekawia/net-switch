@@ -101,7 +101,7 @@ func LoadConfig(data string) (Config, error) {
 	if raw.Adapter != "" || c.Mode != "tun" {
 		return c, errors.New("native service qualification requires tun mode and no adapter")
 	}
-	if c.OwnerBackend != "" && c.OwnerBackend != "proc-fallback" && c.OwnerBackend != "ebpf" {
+	if c.OwnerBackend != "" && c.OwnerBackend != "auto" && c.OwnerBackend != "proc-fallback" && c.OwnerBackend != "ebpf" {
 		return c, errors.New("invalid owner backend")
 	}
 	if err := service.CheckInstallation(c.Directory); err != nil {

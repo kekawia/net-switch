@@ -291,6 +291,61 @@ jobs:
           --out "$RUNNER_TEMP/acceptance/faults"
           --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
+      - name: Run same-host backend overhead and 7c6692a fallback comparisons
+        if: ${{ !cancelled() && (matrix.runner == 'ubuntu-24.04' || matrix.runner == 'ubuntu-26.04') && inputs.run == '' && inputs.engine_build == '' && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
+        env:
+          GOFLAGS: -mod=vendor
+        run: |
+          mkdir -p "$RUNNER_TEMP/acceptance/comparisons"
+          for mode in proc_disabled proc_instrumented ebpf_full; do
+            extra_env=()
+            case "$mode" in
+              proc_disabled)
+                extra_env=("NSACCEPT_OWNER_BACKEND=proc-fallback")
+                ;;
+              proc_instrumented)
+                extra_env=("NSACCEPT_OWNER_BACKEND=proc-fallback" "NETSWITCH_BENCH_EBPF_INSTRUMENTATION_ONLY=1")
+                ;;
+              ebpf_full)
+                extra_env=("NSACCEPT_OWNER_BACKEND=ebpf")
+                ;;
+            esac
+            echo "== same-host comparison: $mode =="
+            sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-cmp-${mode}-${{ github.run_id }}-${{ strategy.job-index }}" -- \
+              env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+              "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs" \
+              "${extra_env[@]}" \
+              "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine" \
+              --build-mode release \
+              --out "$RUNNER_TEMP/acceptance/comparisons/$mode" \
+              --quic "$RUNNER_TEMP/nsquic" \
+              --app-uid "$(id -u)" --app-gid "$(id -g)" \
+              --run '^(performance\.two-cpu-and-dns|lookup\.p95-measured)$'
+          done
+          git fetch --no-tags --depth=1 https://github.com/kekawia/net-switch.git 7c6692aa2b3526b9e3d176d0b41c6fa699eb665f
+          git worktree add --detach "$RUNNER_TEMP/wt-7c6692a" 7c6692aa2b3526b9e3d176d0b41c6fa699eb665f
+          go -C "$RUNNER_TEMP/wt-7c6692a" build -trimpath -o "$RUNNER_TEMP/netswitch-engine-7c6692a" ./cmd/netswitch-engine
+          git worktree remove --force "$RUNNER_TEMP/wt-7c6692a"
+          echo "== 7c6692a vs current proc-fallback on overload.tcp-flows-total =="
+          sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-7c6692a-${{ github.run_id }}-${{ strategy.job-index }}" -- \
+            env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs" \
+            "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine-7c6692a" \
+            --build-mode release \
+            --out "$RUNNER_TEMP/acceptance/comparisons/flows_7c6692a" \
+            --quic "$RUNNER_TEMP/nsquic" \
+            --app-uid "$(id -u)" --app-gid "$(id -g)" \
+            --run '^overload\.tcp-flows-total$'
+          sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-curproc-${{ github.run_id }}-${{ strategy.job-index }}" -- \
+            env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" \
+            "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs" \
+            "NSACCEPT_OWNER_BACKEND=proc-fallback" \
+            "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine" \
+            --build-mode release \
+            --out "$RUNNER_TEMP/acceptance/comparisons/flows_current_proc" \
+            --quic "$RUNNER_TEMP/nsquic" \
+            --app-uid "$(id -u)" --app-gid "$(id -g)" \
+            --run '^overload\.tcp-flows-total$'
       - name: Summarize capacity heap and goroutine profiles
         if: ${{ always() }}
         run: |

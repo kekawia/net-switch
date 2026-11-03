@@ -72,6 +72,7 @@ type socketActorAssoc struct {
 // validate pinned socket-slot generations atomically without locks or syscalls.
 type ProvenanceRuntime struct {
 	mu              sync.Mutex
+	closed          bool
 	epoch           atomic.Uint64
 	epochPoisoned   atomic.Bool
 	ledger          *IdentityLedger
@@ -136,6 +137,62 @@ func (rt *ProvenanceRuntime) SetEpoch(epoch uint64) {
 	rt.mu.Lock()
 	rt.epoch.Store(epoch)
 	rt.mu.Unlock()
+}
+
+// AdvanceEpoch transitions rt to a new strictly larger epoch during a quiesced
+// live bridge/probe rebuild. Any previously acquired ProvenanceEnvelope on the
+// Go heap immediately sees rt.epoch.Load() != e.Epoch (returning MissingCookie)
+// while its mmap slot and IdentitySnapshot pins remain valid until GC cleanup.
+func (rt *ProvenanceRuntime) AdvanceEpoch(newEpoch uint64) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.closed {
+		return
+	}
+	if cur := rt.epoch.Load(); newEpoch <= cur {
+		newEpoch = cur + 1
+	}
+	rt.epoch.Store(newEpoch)
+	rt.epochPoisoned.Store(false)
+	if rt.slots != nil {
+		rt.slots.metrics.EpochPoisoned = false
+		for idx := range rt.slots.meta {
+			m := &rt.slots.meta[idx]
+			if !m.inUse {
+				continue
+			}
+			s := &rt.slots.slots[idx]
+			cookie := atomic.LoadUint64(&s.Cookie)
+			delete(rt.slots.cookieToSlot, cookie)
+			m.socketAlive = false
+			flags := SocketSlotFlags(atomic.LoadUint32(&s.Flags))
+			atomic.StoreUint32(&s.Flags, uint32((flags&^SocketSlotValid)|SocketSlotDestroyed))
+			rt.slots.tryReclaimSlot(rt.ledger, uint32(idx))
+		}
+	}
+	if rt.ledger != nil {
+		for cookie, st := range rt.ledger.sockets {
+			owner := st.Owner
+			st.Owner = nil
+			delete(rt.ledger.sockets, cookie)
+			rt.ledger.decrementSocketRef(owner)
+		}
+		for _, snap := range rt.ledger.actors {
+			if snap == nil {
+				continue
+			}
+			snap.actorRefs = 0
+			rt.ledger.tryReclaimSnapshot(snap)
+		}
+	}
+	clear(rt.processed)
+	clear(rt.cookieActors)
+	clear(rt.cookieObserved)
+	clear(rt.actorRefCookies)
+	rt.classifier = NewKernelControlClassifier()
 }
 
 func (rt *ProvenanceRuntime) syncEpochPoisonedLocked() {
@@ -440,7 +497,12 @@ func (rt *ProvenanceRuntime) Close() error {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.closed {
+		return nil
+	}
+	rt.closed = true
 	rt.epoch.Add(1)
+	rt.epochPoisoned.Store(true)
 	if rt.slots != nil {
 		return rt.slots.Close()
 	}
@@ -493,6 +555,9 @@ func (rt *ProvenanceRuntime) LookupLiveCookieOwner(cookie uint64) (platform.Owne
 func (rt *ProvenanceRuntime) releasePin(pin envelopePin) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.closed {
+		return
+	}
 	fe := ForwardEnvelope{
 		Identity:  PacketIdentityDecision{Snapshot: pin.snap},
 		SlotIndex: pin.slotIndex,
@@ -610,9 +675,24 @@ type ProvenanceEnvelope struct {
 	Owner            platform.Owner
 	Reason           IdentityReason
 	FragmentsMerged  int
+	acquireCostNanos uint64
 	slotIndex        uint32
 	slotGeneration   uint64
 	hasSlot          bool
+}
+
+func (e *ProvenanceEnvelope) SetAcquireCost(d time.Duration) {
+	if e == nil || d <= 0 {
+		return
+	}
+	atomic.StoreUint64(&e.acquireCostNanos, uint64(d))
+}
+
+func (e *ProvenanceEnvelope) ProvenanceLookupCost() time.Duration {
+	if e == nil {
+		return 0
+	}
+	return time.Duration(atomic.SwapUint64(&e.acquireCostNanos, 0))
 }
 
 func (e *ProvenanceEnvelope) anchor() *ProvenanceEnvelope {
@@ -720,17 +800,20 @@ func (e *ProvenanceEnvelope) slotHasConflict() bool {
 func (e *ProvenanceEnvelope) NetSwitchMissingProvenance() any {
 	epoch := uint64(0)
 	merged := 1
+	var cost uint64
 	if e != nil {
 		epoch = e.Epoch
 		merged = e.FragmentsMerged + 1
+		cost = uint64(e.ProvenanceLookupCost())
 	}
 	return &ProvenanceEnvelope{
-		Source:          ProvenanceSourcePacket,
-		Epoch:           epoch,
-		Status:          EnvelopeMissingCookie,
-		ReadStatus:      ReadMissing,
-		Reason:          ReasonPacketIncomplete,
-		FragmentsMerged: merged,
+		Source:           ProvenanceSourcePacket,
+		Epoch:            epoch,
+		Status:           EnvelopeMissingCookie,
+		ReadStatus:       ReadMissing,
+		Reason:           ReasonPacketIncomplete,
+		FragmentsMerged:  merged,
+		acquireCostNanos: cost,
 	}
 }
 
@@ -758,16 +841,18 @@ func (e *ProvenanceEnvelope) MergeNetSwitchProvenance(other any) any {
 	}
 
 	mergedCount := max(1, e.FragmentsMerged) + max(1, o.FragmentsMerged)
+	mergedCost := uint64(e.ProvenanceLookupCost() + o.ProvenanceLookupCost())
 	if e.Epoch == 0 || e.Epoch != o.Epoch ||
 		e.Cookie == 0 || o.Cookie == 0 || e.Cookie != o.Cookie ||
 		e.Status == EnvelopeMissingCookie || o.Status == EnvelopeMissingCookie {
 		return &ProvenanceEnvelope{
-			Source:          ProvenanceSourcePacket,
-			Epoch:           e.Epoch,
-			Status:          EnvelopeMissingCookie,
-			ReadStatus:      ReadMissing,
-			Reason:          ReasonPacketIncomplete,
-			FragmentsMerged: mergedCount,
+			Source:           ProvenanceSourcePacket,
+			Epoch:            e.Epoch,
+			Status:           EnvelopeMissingCookie,
+			ReadStatus:       ReadMissing,
+			Reason:           ReasonPacketIncomplete,
+			FragmentsMerged:  mergedCount,
+			acquireCostNanos: mergedCost,
 		}
 	}
 
@@ -775,12 +860,13 @@ func (e *ProvenanceEnvelope) MergeNetSwitchProvenance(other any) any {
 	ownerB, statusB := o.ValidateForwarding()
 	if statusA == EnvelopeMissingCookie || statusB == EnvelopeMissingCookie {
 		return &ProvenanceEnvelope{
-			Source:          ProvenanceSourcePacket,
-			Epoch:           e.Epoch,
-			Status:          EnvelopeMissingCookie,
-			ReadStatus:      ReadMissing,
-			Reason:          ReasonPacketIncomplete,
-			FragmentsMerged: mergedCount,
+			Source:           ProvenanceSourcePacket,
+			Epoch:            e.Epoch,
+			Status:           EnvelopeMissingCookie,
+			ReadStatus:       ReadMissing,
+			Reason:           ReasonPacketIncomplete,
+			FragmentsMerged:  mergedCount,
+			acquireCostNanos: mergedCost,
 		}
 	}
 
@@ -798,65 +884,69 @@ func (e *ProvenanceEnvelope) MergeNetSwitchProvenance(other any) any {
 		cp := *e
 		cp.pinAnchor = anchor
 		cp.FragmentsMerged = mergedCount
+		cp.acquireCostNanos = mergedCost
 		return &cp
 	}
 
 	if statusA == EnvelopeConflicting || statusB == EnvelopeConflicting ||
 		(statusA == EnvelopeKnown && statusB == EnvelopeKnown && ownerA.AppID != ownerB.AppID) {
 		return &ProvenanceEnvelope{
-			runtime:         e.runtime,
-			pinAnchor:       anchor,
-			Source:          ProvenanceSourcePacket,
-			Epoch:           e.Epoch,
-			Status:          EnvelopeConflicting,
-			ReadStatus:      ReadCookie,
-			Cookie:          e.Cookie,
-			Generation:      e.Generation,
-			CaptureSerial:   e.CaptureSerial,
-			Owner:           platform.Owner{Generation: e.Generation, Ambiguous: true},
-			Reason:          ReasonConflictingApp,
-			FragmentsMerged: mergedCount,
-			slotIndex:       e.slotIndex,
-			slotGeneration:  e.slotGeneration,
-			hasSlot:         e.hasSlot,
+			runtime:          e.runtime,
+			pinAnchor:        anchor,
+			Source:           ProvenanceSourcePacket,
+			Epoch:            e.Epoch,
+			Status:           EnvelopeConflicting,
+			ReadStatus:       ReadCookie,
+			Cookie:           e.Cookie,
+			Generation:       e.Generation,
+			CaptureSerial:    e.CaptureSerial,
+			Owner:            platform.Owner{Generation: e.Generation, Ambiguous: true},
+			Reason:           ReasonConflictingApp,
+			FragmentsMerged:  mergedCount,
+			acquireCostNanos: mergedCost,
+			slotIndex:        e.slotIndex,
+			slotGeneration:   e.slotGeneration,
+			hasSlot:          e.hasSlot,
 		}
 	}
 
 	if statusA == EnvelopeKernelControl && statusB == EnvelopeKernelControl {
 		return &ProvenanceEnvelope{
-			runtime:         e.runtime,
-			pinAnchor:       anchor,
-			Source:          ProvenanceSourcePacket,
-			Epoch:           e.Epoch,
-			Status:          EnvelopeKernelControl,
-			ReadStatus:      ReadCookie,
-			Cookie:          e.Cookie,
-			Generation:      e.Generation,
-			CaptureSerial:   e.CaptureSerial,
-			Owner:           platform.Owner{Generation: e.Generation},
-			Reason:          e.Reason,
-			FragmentsMerged: mergedCount,
-			slotIndex:       e.slotIndex,
-			slotGeneration:  e.slotGeneration,
-			hasSlot:         e.hasSlot,
+			runtime:          e.runtime,
+			pinAnchor:        anchor,
+			Source:           ProvenanceSourcePacket,
+			Epoch:            e.Epoch,
+			Status:           EnvelopeKernelControl,
+			ReadStatus:       ReadCookie,
+			Cookie:           e.Cookie,
+			Generation:       e.Generation,
+			CaptureSerial:    e.CaptureSerial,
+			Owner:            platform.Owner{Generation: e.Generation},
+			Reason:           e.Reason,
+			FragmentsMerged:  mergedCount,
+			acquireCostNanos: mergedCost,
+			slotIndex:        e.slotIndex,
+			slotGeneration:   e.slotGeneration,
+			hasSlot:          e.hasSlot,
 		}
 	}
 
 	return &ProvenanceEnvelope{
-		runtime:         e.runtime,
-		pinAnchor:       anchor,
-		Source:          ProvenanceSourcePacket,
-		Epoch:           e.Epoch,
-		Status:          EnvelopeUnknownIdentity,
-		ReadStatus:      ReadCookie,
-		Cookie:          e.Cookie,
-		Generation:      e.Generation,
-		CaptureSerial:   e.CaptureSerial,
-		Owner:           platform.Owner{Generation: e.Generation},
-		Reason:          ReasonPacketIncomplete,
-		FragmentsMerged: mergedCount,
-		slotIndex:       e.slotIndex,
-		slotGeneration:  e.slotGeneration,
-		hasSlot:         e.hasSlot,
+		runtime:          e.runtime,
+		pinAnchor:        anchor,
+		Source:           ProvenanceSourcePacket,
+		Epoch:            e.Epoch,
+		Status:           EnvelopeUnknownIdentity,
+		ReadStatus:       ReadCookie,
+		Cookie:           e.Cookie,
+		Generation:       e.Generation,
+		CaptureSerial:    e.CaptureSerial,
+		Owner:            platform.Owner{Generation: e.Generation},
+		Reason:           ReasonPacketIncomplete,
+		FragmentsMerged:  mergedCount,
+		acquireCostNanos: mergedCost,
+		slotIndex:        e.slotIndex,
+		slotGeneration:   e.slotGeneration,
+		hasSlot:          e.hasSlot,
 	}
 }

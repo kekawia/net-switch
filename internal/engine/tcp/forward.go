@@ -310,11 +310,12 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	} else {
 		owner, lookupErr = f.owners.TCP(lookup, t)
 	}
+	provCost := platform.ProvenanceLookupDuration(prov)
 	prov = nil
 	if observer, ok := f.control.(interface {
 		Lookup(time.Duration, error, platform.Owner)
 	}); ok {
-		observer.Lookup(time.Since(lookupStart), lookupErr, owner)
+		observer.Lookup(provCost+time.Since(lookupStart), lookupErr, owner)
 	}
 	if lookupErr != nil {
 		owner = platform.Owner{Ambiguous: errors.Is(lookupErr, platform.ErrAmbiguous)}

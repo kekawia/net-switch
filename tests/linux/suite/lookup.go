@@ -89,11 +89,29 @@ func lookupGate(e *Env, scoped, measured bool) {
 			after := stats()
 			p.lookups, p.misses, p.lookupTime = after.LookupCount-before.LookupCount, after.LookupMisses-before.LookupMisses, after.LookupTime-before.LookupTime
 			if scoped {
-				var first, last struct{ CgroupPopulated uint64 }
+				var first, last struct {
+					Backend         string
+					CgroupPopulated uint64
+					EBPF            *struct {
+						TCPKnown uint64 `json:"tcpKnown"`
+					}
+				}
 				err1 := json.Unmarshal(before.OwnerLookup, &first)
 				err2 := json.Unmarshal(after.OwnerLookup, &last)
-				delta := last.CgroupPopulated - first.CgroupPopulated
-				e.T.Check(err1 == nil && err2 == nil && p.lookups > 0 && delta*200 >= p.lookups*199, "this scoped phase resolved populated cgroup hints for at least 99.5%% of its own lookups (%d of %d; %v %v)", delta, p.lookups, err1, err2)
+				if last.Backend == "ebpf" {
+					var beforeKnown, afterKnown uint64
+					if first.EBPF != nil {
+						beforeKnown = first.EBPF.TCPKnown
+					}
+					if last.EBPF != nil {
+						afterKnown = last.EBPF.TCPKnown
+					}
+					delta := afterKnown - beforeKnown
+					e.T.Check(err1 == nil && err2 == nil && p.lookups > 0 && delta*200 >= p.lookups*199, "this scoped phase resolved accepted-sender eBPF owners for at least 99.5%% of its own lookups (%d of %d; %v %v)", delta, p.lookups, err1, err2)
+				} else {
+					delta := last.CgroupPopulated - first.CgroupPopulated
+					e.T.Check(err1 == nil && err2 == nil && p.lookups > 0 && delta*200 >= p.lookups*199, "this scoped phase resolved populated cgroup hints for at least 99.5%% of its own lookups (%d of %d; %v %v)", delta, p.lookups, err1, err2)
+				}
 			}
 			for i := range p.histogram {
 				p.histogram[i] = after.LookupHistogram[i] - before.LookupHistogram[i]
@@ -188,11 +206,33 @@ func forkExec(e *Env) {
 	}
 }
 
+func (e *Env) isEBPFBackend() bool {
+	v1, ok := e.Eng.(engine.V1)
+	if !ok || v1.Session() == nil {
+		return false
+	}
+	st, err := v1.Session().Stats(e.Ctx())
+	if err != nil {
+		e.T.Fatalf("stats: %v", err)
+	}
+	var ol struct {
+		Backend string
+	}
+	if err := json.Unmarshal(st.OwnerLookup, &ol); err != nil {
+		e.T.Fatalf("owner lookup stats: %v", err)
+	}
+	return ol.Backend == "ebpf"
+}
+
 // shared starts bravo handing a socket to a charlie child, waits until the
 // hand-off is complete, checks who holds the socket, then lets charlie
 // connect.
 func (e *Env) shared(keep bool, wantHolders []string) app.FDResult {
 	e.StartEngine(e.DefaultConfig())
+	return e.sharedOnRunningEngine(keep, wantHolders)
+}
+
+func (e *Env) sharedOnRunningEngine(keep bool, wantHolders []string) app.FDResult {
 	trigger := filepath.Join(e.SharedDir(), "go")
 	bg := e.Start(Run{App: "bravo", Args: []string{"share-exec", "--to", To(topo.Server4, wire.PortWhoami), "--child", AppPath("charlie"), "--keep=" + strconv.FormatBool(keep), "--wait-file", trigger}})
 	inode, _ := e.ParseReady(bg.WaitLine(e, "ready ", 30*time.Second))
@@ -212,14 +252,45 @@ func (e *Env) shared(keep bool, wantHolders []string) app.FDResult {
 	return r
 }
 
+func (e *Env) sharedUDPOnRunningEngine(wantHolders []string) app.FDResult {
+	trigger := filepath.Join(e.SharedDir(), "go-udp")
+	bg := e.Start(Run{App: "bravo", Args: []string{"share-udp", "--to", To(topo.Server4, wire.PortUDPEcho), "--child", AppPath("charlie"), "--wait-file", trigger}})
+	inode, _ := e.ParseReady(bg.WaitLine(e, "ready ", 30*time.Second))
+	holders := e.Holders(inode)
+	var names []string
+	for _, h := range holders {
+		names = append(names, filepath.Base(filepath.Dir(h.Exe)))
+	}
+	slices.Sort(names)
+	e.T.Require(slices.Equal(names, wantHolders), "before sending on the shared UDP socket %d, it is held by %v (%v)", inode, wantHolders, holders)
+	if err := os.WriteFile(trigger, nil, 0o644); err != nil {
+		e.T.Fatalf("%v", err)
+	}
+	var r app.FDResult
+	bg.WaitJSON(e, 30*time.Second, &r)
+	e.T.Require(r.Inode == inode, "charlie sent on the same shared UDP socket (%d)", r.Inode)
+	return r
+}
+
 func inheritedSocket(e *Env) {
 	r := e.shared(false, []string{"charlie"})
 	e.T.Check(r.Err == "" && topo.LineOfText(r.Seen) == "c", "bravo's socket, inherited and connected by charlie alone, is charlie's: line %q (%s)", topo.LineOfText(r.Seen), r.Err)
 }
 
 func ambiguousHolders(e *Env) {
-	r := e.shared(true, []string{"bravo", "charlie"})
+	e.StartEngine(e.DefaultConfig())
+	r := e.sharedOnRunningEngine(true, []string{"bravo", "charlie"})
 	e.T.Check(r.Err == "" && r.Seen != "", "charlie's connection completed (%s)", r.Err)
+	if e.isEBPFBackend() {
+		e.T.Check(topo.LineOfText(r.Seen) == "c",
+			"with accepted-sender eBPF attribution, an idle second holder (bravo) does not make charlie's initiated TCP connection ambiguous: line %q", topo.LineOfText(r.Seen))
+		u := e.sharedUDPOnRunningEngine([]string{"bravo", "charlie"})
+		e.T.Check(u.Err == "" && topo.LineOfText(u.InitialSeen) == "b",
+			"bravo's initial send on the shared UDP socket took line b (%q, %s)", topo.LineOfText(u.InitialSeen), u.Err)
+		e.T.Expect(topo.LineOfText(u.Seen) == "a",
+			"a shared UDP socket actively sent on by bravo (b) and charlie (c) becomes conflicting, so unknown, so on the main line a: line %q", topo.LineOfText(u.Seen))
+		return
+	}
 	e.T.Expect(topo.LineOfText(r.Seen) == "a",
 		"a socket held by bravo (b) and charlie (c) at once is ambiguous, so unknown, so on the main line a: line %q", topo.LineOfText(r.Seen))
 }

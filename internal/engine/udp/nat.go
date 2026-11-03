@@ -351,6 +351,7 @@ func (s *session) run() {
 	lookupStart := time.Now()
 	var owner platform.Owner
 	var err error
+	var provCost time.Duration
 	if provOwners, ok := n.owners.(platform.ProvenanceOwnerLookup); ok {
 		s.mu.Lock()
 		var destination netip.AddrPort
@@ -365,6 +366,7 @@ func (s *session) run() {
 			return
 		}
 		owner, err = provOwners.UDPWithProvenance(lookup, platform.Tuple{Source: s.source, Destination: destination}, firstProv)
+		provCost = platform.ProvenanceLookupDuration(firstProv)
 		firstProv = nil
 	} else if owners, ok := n.owners.(platform.DatagramOwnerLookup); ok {
 		s.mu.Lock()
@@ -384,7 +386,7 @@ func (s *session) run() {
 	if observer, ok := n.control.(interface {
 		Lookup(time.Duration, error, platform.Owner)
 	}); ok {
-		observer.Lookup(time.Since(lookupStart), err, owner)
+		observer.Lookup(provCost+time.Since(lookupStart), err, owner)
 	}
 	cl()
 	if err != nil {

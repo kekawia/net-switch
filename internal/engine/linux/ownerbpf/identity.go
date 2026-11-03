@@ -1,8 +1,10 @@
 package ownerbpf
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"strconv"
 	"strings"
@@ -957,4 +959,52 @@ func (l *IdentityLedger) ReleasePacket(snap *IdentitySnapshot) {
 		snap.packetRefs--
 	}
 	l.tryReclaimSnapshot(snap)
+}
+
+const maxAsyncMapsStreamBytes = 16 << 20
+
+// readerContainsToken streams r in fixed chunks with boundary overlap so tokens
+// spanning read boundaries or appearing past 64 KiB in /proc/<tgid>/maps are
+// never missed without allocating unbounded buffers. If r exceeds maxBytes, it
+// fails closed by returning (true, nil).
+func readerContainsToken(r io.Reader, token []byte, chunkSize, maxBytes int) (bool, error) {
+	if len(token) == 0 {
+		return true, nil
+	}
+	if chunkSize < len(token)*2 {
+		chunkSize = len(token) * 2
+	}
+	overlap := len(token) - 1
+	buf := make([]byte, overlap+chunkSize)
+	carry := 0
+	var total int
+	for {
+		n, err := r.Read(buf[carry : carry+chunkSize])
+		if n > 0 {
+			total += n
+			window := buf[:carry+n]
+			if bytes.Contains(window, token) {
+				return true, nil
+			}
+			if maxBytes > 0 && total > maxBytes {
+				return true, nil
+			}
+			if len(window) >= overlap {
+				copy(buf[:overlap], window[len(window)-overlap:])
+				carry = overlap
+			} else {
+				copy(buf[:len(window)], window)
+				carry = len(window)
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return false, nil
+			}
+			return false, err
+		}
+		if n == 0 {
+			return false, nil
+		}
+	}
 }

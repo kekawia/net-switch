@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/netip"
 	"os"
 	"sync"
@@ -22,6 +23,7 @@ const provenanceCookieRetireGrace = 250 * time.Millisecond
 func ebpfBackendSupported() bool { return true }
 
 type ebpfBridgeBurstSource struct {
+	owners *Owners
 	bridge *ownerbpf.Bridge
 }
 
@@ -40,10 +42,25 @@ func (s *ebpfBridgeBurstSource) BindReader() (
 	return r.ReadBurstInto, r.Close, nil
 }
 
+func (s *ebpfBridgeBurstSource) RebuildEpoch(
+	tun *Tun,
+	closeOldReader func() error,
+) (provenanceBurstSource, func(func() error) error, error) {
+	if s == nil || s.owners == nil {
+		return nil, nil, errors.New("nil eBPF owners on epoch rebuild")
+	}
+	return s.owners.rebuildProvenanceEpoch(tun, closeOldReader)
+}
+
 type ebpfOwnerStats struct {
 	Epoch                        uint64                     `json:"epoch"`
 	EpochPoisoned                bool                       `json:"epochPoisoned"`
+	EpochRebuilds                uint64                     `json:"epochRebuilds"`
 	ProbePoisoned                bool                       `json:"probePoisoned"`
+	NoIOUringActive              bool                       `json:"noIOUringActive"`
+	BPFMapBytes                  uint64                     `json:"bpfMapBytes"`
+	BPFMapCount                  int                        `json:"bpfMapCount"`
+	BPFMapMeasured               bool                       `json:"bpfMapMeasured"`
 	Ledger                       ownerbpf.LedgerMetrics     `json:"ledger"`
 	SocketSlots                  ownerbpf.SocketSlotMetrics `json:"socketSlots"`
 	Classifier                   ownerbpf.ClassifierMetrics `json:"classifier"`
@@ -82,6 +99,7 @@ type ebpfOwnerState struct {
 	retireMu      sync.Mutex
 	pendingRetire map[uint64]time.Time
 
+	epochRebuilds            atomic.Uint64
 	tcpKnown                 atomic.Uint64
 	tcpUnknownIdentity       atomic.Uint64
 	tcpConflicting           atomic.Uint64
@@ -108,6 +126,7 @@ func (o *Owners) ebpfCurrent() (*ownerbpf.ProvenanceRuntime, *ownerbpf.AcceptedS
 func (o *Owners) ebpfStats() *ebpfOwnerStats {
 	rt, probe, bridge, _ := o.ebpfCurrent()
 	out := &ebpfOwnerStats{
+		EpochRebuilds:            o.ebpf.epochRebuilds.Load(),
 		TCPKnown:                 o.ebpf.tcpKnown.Load(),
 		TCPUnknownIdentity:       o.ebpf.tcpUnknownIdentity.Load(),
 		TCPConflicting:           o.ebpf.tcpConflicting.Load(),
@@ -131,6 +150,7 @@ func (o *Owners) ebpfStats() *ebpfOwnerStats {
 	}
 	if probe != nil {
 		out.ProbePoisoned = probe.IsPoisoned()
+		out.NoIOUringActive = probe.NoIOUringActive()
 	}
 	if bridge != nil {
 		out.BridgeDeliveredWithoutRecord = bridge.DeliveredWithoutRecord.Load()
@@ -138,7 +158,42 @@ func (o *Owners) ebpfStats() *ebpfOwnerStats {
 		out.BridgeUnknownRecursion = bridge.UnknownRecursion.Load()
 		out.BridgeFaults = bridge.Faults()
 	}
+	if mapBytes, mapCount, err := ReadSelfBPFMapMemlockBytes(); err == nil {
+		out.BPFMapBytes = mapBytes
+		out.BPFMapCount = mapCount
+		out.BPFMapMeasured = true
+	}
 	return out
+}
+
+func classifyHostLoadFailure(err error) ownerbpf.DegradedFallbackReason {
+	lockdownRaw := ""
+	if b, rErr := os.ReadFile("/sys/kernel/security/lockdown"); rErr == nil {
+		lockdownRaw = string(b)
+	}
+	_, btfErr := os.Stat("/sys/kernel/btf/vmlinux")
+	hasBTF := btfErr == nil
+	isCgroupV2 := false
+	var fs unix.Statfs_t
+	if unix.Statfs("/sys/fs/cgroup", &fs) == nil && fs.Type == unix.CGROUP2_SUPER_MAGIC {
+		isCgroupV2 = true
+	}
+	return ownerbpf.ClassifyLoadFailure(err, lockdownRaw, hasBTF, isCgroupV2)
+}
+
+func (o *Owners) degradeToProcFallback(ctx context.Context, reason ownerbpf.DegradedFallbackReason, cause error) (bool, error) {
+	log.Printf("eBPF owner attribution unavailable (%s: %v); degrading to proc-fallback", reason, cause)
+	o.ebpfActive.Store(false)
+	o.mu.Lock()
+	o.backend = OwnerBackendProcFallback
+	o.degradedFallback = true
+	o.degradedReason = string(reason)
+	o.warmed = false
+	o.mu.Unlock()
+	if err := o.Warm(ctx); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func unwrapNativeTun(dev platform.TunDevice) (*Tun, bool) {
@@ -155,20 +210,38 @@ func unwrapNativeTun(dev platform.TunDevice) (*Tun, bool) {
 	return nil, false
 }
 
-func (o *Owners) AttachProvenance(_ context.Context, dev platform.TunDevice) (bool, error) {
+func (o *Owners) AttachProvenance(ctx context.Context, dev platform.TunDevice) (bool, error) {
 	if !o.isEBPFBackend() {
+		if os.Getenv("NETSWITCH_BENCH_EBPF_INSTRUMENTATION_ONLY") == "1" {
+			return o.attachInstrumentationOnly(dev)
+		}
 		return false, nil
 	}
 	tun, ok := unwrapNativeTun(dev)
 	if !ok || tun == nil {
-		return false, errors.New("eBPF owner backend requires native Linux *Tun device")
+		err := errors.New("eBPF owner backend requires native Linux *Tun device")
+		if o.autoFallback {
+			return o.degradeToProcFallback(ctx, ownerbpf.FallbackKernelUnsupported, err)
+		}
+		return false, err
 	}
 	_ = o.CloseProvenance()
+
+	handleLoadFailure := func(stage string, err error) (bool, error) {
+		wrapped := fmt.Errorf("%s: %w", stage, err)
+		if o.autoFallback {
+			reason := classifyHostLoadFailure(err)
+			if reason != ownerbpf.FallbackVerifierRejected && reason != ownerbpf.FallbackNone {
+				return o.degradeToProcFallback(ctx, reason, wrapped)
+			}
+		}
+		return false, wrapped
+	}
 
 	epoch := o.ebpf.nextEpoch.Add(1)
 	slots, err := ownerbpf.NewMmapSocketSlotTable(ownerbpf.DefaultEngineMaxSocketSlots)
 	if err != nil {
-		return false, fmt.Errorf("allocate eBPF socket-slot table: %w", err)
+		return handleLoadFailure("allocate eBPF socket-slot table", err)
 	}
 	ledger := ownerbpf.NewIdentityLedger(ownerbpf.DefaultEngineMaxSnapshots, ownerbpf.DefaultEngineMaxBlobBytes)
 	rt := ownerbpf.NewProvenanceRuntime(epoch, ledger, slots)
@@ -176,13 +249,13 @@ func (o *Owners) AttachProvenance(_ context.Context, dev platform.TunDevice) (bo
 	bridge, err := ownerbpf.LoadEngineBridge(uint32(tun.Ifindex()), tun.NetNSInode(), epoch, uint64(tun.TxQLen()))
 	if err != nil {
 		_ = rt.Close()
-		return false, fmt.Errorf("load eBPF provenance bridge: %w", err)
+		return handleLoadFailure("load eBPF provenance bridge", err)
 	}
 	probe, err := ownerbpf.LoadEngineSenderProbe("/sys/fs/cgroup", ownerbpf.DefaultEngineMaxActors, ownerbpf.DefaultEngineActorEventQueue)
 	if err != nil {
 		_ = bridge.Close()
 		_ = rt.Close()
-		return false, fmt.Errorf("load eBPF sender probe: %w", err)
+		return handleLoadFailure("load eBPF sender probe", err)
 	}
 
 	o.ebpf.retireMu.Lock()
@@ -197,8 +270,122 @@ func (o *Owners) AttachProvenance(_ context.Context, dev platform.TunDevice) (bo
 	o.ebpf.reconcileCh = make(chan struct{}, 1)
 	o.ebpf.mu.Unlock()
 
-	tun.AttachProvenanceReader(&ebpfBridgeBurstSource{bridge: bridge}, o.onProvenanceBurst)
+	tun.AttachProvenanceReader(&ebpfBridgeBurstSource{owners: o, bridge: bridge}, o.onProvenanceBurst)
 	return true, nil
+}
+
+// attachInstrumentationOnly loads and enables the production eBPF bridge and
+// sender probe while keeping userspace on the non-provenance TUN pump and
+// proc-fallback scanner so 3-way benchmarks isolate kernel BPF hook cost.
+func (o *Owners) attachInstrumentationOnly(dev platform.TunDevice) (bool, error) {
+	tun, ok := unwrapNativeTun(dev)
+	if !ok || tun == nil {
+		return false, errors.New("NETSWITCH_BENCH_EBPF_INSTRUMENTATION_ONLY requires native Linux *Tun device")
+	}
+	_ = o.CloseProvenance()
+
+	epoch := o.ebpf.nextEpoch.Add(1)
+	bridge, err := ownerbpf.LoadEngineBridge(uint32(tun.Ifindex()), tun.NetNSInode(), epoch, uint64(tun.TxQLen()))
+	if err != nil {
+		return false, fmt.Errorf("load instrumentation-only eBPF bridge: %w", err)
+	}
+	probe, err := ownerbpf.LoadEngineSenderProbe("/sys/fs/cgroup", ownerbpf.DefaultEngineMaxActors, ownerbpf.DefaultEngineActorEventQueue)
+	if err != nil {
+		_ = bridge.Close()
+		return false, fmt.Errorf("load instrumentation-only eBPF sender probe: %w", err)
+	}
+	if err := probe.Enable(); err != nil {
+		_ = probe.Close()
+		_ = bridge.Close()
+		return false, fmt.Errorf("enable instrumentation-only eBPF sender probe: %w", err)
+	}
+	if err := bridge.Enable(uint64(tun.TxQLen())); err != nil {
+		_ = probe.Disable()
+		_ = probe.Close()
+		_ = bridge.Close()
+		return false, fmt.Errorf("enable instrumentation-only eBPF bridge: %w", err)
+	}
+
+	o.ebpf.mu.Lock()
+	o.ebpf.tun = tun
+	o.ebpf.bridge = bridge
+	o.ebpf.probe = probe
+	o.ebpf.mu.Unlock()
+	return false, nil
+}
+
+func (o *Owners) rebuildProvenanceEpoch(
+	tun *Tun,
+	closeOldReader func() error,
+) (provenanceBurstSource, func(func() error) error, error) {
+	if err := o.StopProvenance(); err != nil {
+		return nil, nil, fmt.Errorf("quiesce faulted provenance epoch: %w", err)
+	}
+	if closeOldReader != nil {
+		_ = closeOldReader()
+	}
+
+	o.ebpf.mu.Lock()
+	oldBridge := o.ebpf.bridge
+	oldProbe := o.ebpf.probe
+	rt := o.ebpf.runtime
+	o.ebpf.bridge = nil
+	o.ebpf.probe = nil
+	o.ebpf.reconcileCh = nil
+	o.ebpf.mu.Unlock()
+
+	if oldBridge != nil {
+		_ = oldBridge.Close()
+	}
+	if oldProbe != nil {
+		_ = oldProbe.Close()
+	}
+	if rt == nil || tun == nil {
+		return nil, nil, errors.New("cannot rebuild nil provenance runtime or TUN")
+	}
+
+	newEpoch := o.ebpf.nextEpoch.Add(1)
+	rt.AdvanceEpoch(newEpoch)
+
+	newBridge, err := ownerbpf.LoadEngineBridge(uint32(tun.Ifindex()), tun.NetNSInode(), newEpoch, uint64(tun.TxQLen()))
+	if err != nil {
+		return nil, nil, fmt.Errorf("reload eBPF provenance bridge for epoch %d: %w", newEpoch, err)
+	}
+	newProbe, err := ownerbpf.LoadEngineSenderProbe("/sys/fs/cgroup", ownerbpf.DefaultEngineMaxActors, ownerbpf.DefaultEngineActorEventQueue)
+	if err != nil {
+		_ = newBridge.Close()
+		return nil, nil, fmt.Errorf("reload eBPF sender probe for epoch %d: %w", newEpoch, err)
+	}
+
+	o.ebpf.retireMu.Lock()
+	o.ebpf.pendingRetire = make(map[uint64]time.Time)
+	o.ebpf.retireMu.Unlock()
+
+	o.ebpf.mu.Lock()
+	o.ebpf.bridge = newBridge
+	o.ebpf.probe = newProbe
+	o.ebpf.reconcileCh = make(chan struct{}, 1)
+	o.ebpf.mu.Unlock()
+
+	enableNew := func(drainLocked func() error) error {
+		if err := newProbe.Enable(); err != nil {
+			return fmt.Errorf("enable rebuilt eBPF sender probe: %w", err)
+		}
+		if drainLocked != nil {
+			if err := drainLocked(); err != nil {
+				_ = newProbe.Disable()
+				return fmt.Errorf("drain uncertified TUN frames during epoch rebuild: %w", err)
+			}
+		}
+		if err := newBridge.Enable(uint64(tun.TxQLen())); err != nil {
+			_ = newProbe.Disable()
+			return fmt.Errorf("enable rebuilt eBPF provenance bridge: %w", err)
+		}
+		o.ebpf.epochRebuilds.Add(1)
+		o.startProvenanceMaintenance()
+		return nil
+	}
+	return &ebpfBridgeBurstSource{owners: o, bridge: newBridge}, enableNew, nil
 }
 
 func (o *Owners) EnableProvenance() error {
@@ -225,9 +412,6 @@ func (o *Owners) EnableProvenance() error {
 }
 
 func (o *Owners) StopProvenance() error {
-	if !o.isEBPFBackend() {
-		return nil
-	}
 	o.ebpf.mu.Lock()
 	cancel := o.ebpf.maintCancel
 	o.ebpf.maintCancel = nil
@@ -250,9 +434,6 @@ func (o *Owners) StopProvenance() error {
 }
 
 func (o *Owners) CloseProvenance() error {
-	if !o.isEBPFBackend() {
-		return nil
-	}
 	stopErr := o.StopProvenance()
 
 	o.ebpf.mu.Lock()
@@ -305,7 +486,7 @@ func (o *Owners) drainPendingActors(rt *ownerbpf.ProvenanceRuntime, probe *owner
 		o.ebpf.actorDrainErrors.Add(1)
 	}
 	if len(events) > 0 {
-		rt.SyncQueuedActors(events)
+		rt.SyncQueuedActorsWithOptions(events, probe.NoIOUringActive())
 	}
 	if probe.IsPoisoned() {
 		rt.PoisonEpoch()

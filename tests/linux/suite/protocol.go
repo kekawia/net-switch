@@ -378,11 +378,20 @@ func predictKeepsCounter(e *Env) {
 }
 
 func lookupCounters(e *Env) {
-	r := e.shared(true, []string{"bravo", "charlie"})
+	e.StartEngine(e.DefaultConfig())
+	var seen string
+	if e.isEBPFBackend() {
+		u := e.sharedUDPOnRunningEngine([]string{"bravo", "charlie"})
+		e.T.Check(u.Err == "" && topo.LineOfText(u.InitialSeen) == "b", "bravo's initial send on the shared UDP socket took line b (%q, %s)", topo.LineOfText(u.InitialSeen), u.Err)
+		seen = u.Seen
+	} else {
+		r := e.sharedOnRunningEngine(true, []string{"bravo", "charlie"})
+		seen = r.Seen
+	}
 	_, s := e.v1()
 	after, err := s.Stats(e.Ctx())
 	e.T.Require(err == nil, "stats (%v)", err)
-	e.T.Check(topo.LineOfText(r.Seen) == "a", "the ambiguous socket went to the main line (%q)", topo.LineOfText(r.Seen))
+	e.T.Check(topo.LineOfText(seen) == "a", "the ambiguous socket went to the main line (%q)", topo.LineOfText(seen))
 	e.T.Check(after.LookupAmbiguous >= 1, "the ambiguous owner was counted (%d)", after.LookupAmbiguous)
 	e.T.Check(after.LookupCount >= 1 && after.LookupTime > 0, "lookup time is recorded (%d lookups, %v in total, mean %v)", after.LookupCount, after.LookupTime, after.LookupMean())
 }

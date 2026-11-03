@@ -470,3 +470,132 @@ func TestTunProvenanceWholeBurstRefusalOnEpochRebuild(t *testing.T) {
 		t.Fatalf("faulted burst leaked partial state: n=%d p=%#v onBurstCalled=%v queue=%d", n, p, onBurstCalled, len(tun.provQueue))
 	}
 }
+
+type rebuildableProvBurstSource struct {
+	*fakeProvBurstSource
+	rebuildFn func(tun *Tun, closeOldReader func() error) (provenanceBurstSource, func(func() error) error, error)
+}
+
+func (s *rebuildableProvBurstSource) RebuildEpoch(tun *Tun, closeOldReader func() error) (provenanceBurstSource, func(func() error) error, error) {
+	return s.rebuildFn(tun, closeOldReader)
+}
+
+func TestTunProvenanceLiveEpochRebuildRecoversWithoutAdmittingFaultedBurst(t *testing.T) {
+	rt := ownerbpf.NewProvenanceRuntime(1, ownerbpf.NewIdentityLedger(16, 16<<10), ownerbpf.NewSocketSlotTable(16))
+	defer rt.Close()
+	_ = enrichTunTestActor(t, rt, 0x99, 4301, 500_000_000, "/usr/bin/AppRebuild")
+
+	src4 := netip.MustParseAddr("198.18.0.1").As4()
+	dst4 := netip.MustParseAddr("198.51.100.10").As4()
+	makeFrame := func(payload string) []byte {
+		raw := make([]byte, ownerbpf.VirtioNetHdrLen+28+len(payload))
+		ip4 := raw[ownerbpf.VirtioNetHdrLen:]
+		ip4[0] = 0x45
+		binary.BigEndian.PutUint16(ip4[2:4], uint16(28+len(payload)))
+		ip4[8] = 64
+		ip4[9] = 17
+		copy(ip4[12:16], src4[:])
+		copy(ip4[16:20], dst4[:])
+		binary.BigEndian.PutUint16(ip4[10:12], ^fold16(csum16(0, ip4[:20])))
+		udp4 := ip4[20:]
+		binary.BigEndian.PutUint16(udp4[0:2], 54000)
+		binary.BigEndian.PutUint16(udp4[2:4], 443)
+		binary.BigEndian.PutUint16(udp4[4:6], uint16(8+len(payload)))
+		copy(udp4[8:], payload)
+		return raw
+	}
+
+	epoch1Src := &fakeProvBurstSource{
+		bursts: []fakeProvBurst{
+			{
+				frames: []fakeProvFrame{{
+					raw:      makeFrame("epoch-1-valid"),
+					decision: ownerbpf.ReadDecision{Status: ownerbpf.ReadCookie, Packet: ownerbpf.PacketRecord{Epoch: 1, Cookie: 0x99, Serial: 1}},
+				}},
+			},
+			{
+				frames: []fakeProvFrame{{
+					raw:      makeFrame("epoch-1-faulted-must-drop"),
+					decision: ownerbpf.ReadDecision{Status: ownerbpf.ReadEpochFault, Rebuild: true},
+				}},
+				err: fmt.Errorf("%w: ring overflow", ownerbpf.ErrEpochRebuild),
+			},
+		},
+	}
+	epoch2Src := &fakeProvBurstSource{
+		bursts: []fakeProvBurst{{
+			frames: []fakeProvFrame{{
+				raw:      makeFrame("epoch-2-recovered"),
+				decision: ownerbpf.ReadDecision{Status: ownerbpf.ReadCookie, Packet: ownerbpf.PacketRecord{Epoch: 2, Cookie: 0x99, Serial: 1}},
+			}},
+		}},
+	}
+
+	drainedDuringRebuild := false
+	src := &rebuildableProvBurstSource{
+		fakeProvBurstSource: epoch1Src,
+		rebuildFn: func(_ *Tun, closeOldReader func() error) (provenanceBurstSource, func(func() error) error, error) {
+			if closeOldReader != nil {
+				_ = closeOldReader()
+			}
+			rt.AdvanceEpoch(2)
+			_ = enrichTunTestActor(t, rt, 0x99, 4301, 500_000_000, "/usr/bin/AppRebuild")
+			return epoch2Src, func(drainLocked func() error) error {
+				drainedDuringRebuild = true
+				return drainLocked()
+			}, nil
+		},
+	}
+
+	tun := &Tun{mtu: 9000}
+	tun.AttachProvenanceReader(src, func(rawBufs [][]byte, sizes []int, decisions []ownerbpf.ReadDecision, count int, out []*ownerbpf.ProvenanceEnvelope) {
+		for i := 0; i < count; i++ {
+			out[i] = rt.AcquirePacket(rawBufs[i][ownerbpf.VirtioNetHdrLen:sizes[i]], decisions[i])
+		}
+	})
+	unbind, err := tun.BindPumpThread()
+	if err != nil {
+		t.Fatalf("BindPumpThread: %v", err)
+	}
+
+	ctx := context.Background()
+	buf := make([]byte, 9000)
+
+	// 1. Epoch 1 clean burst succeeds and carries non-zero AcquireCost.
+	n1, p1, err := tun.ReadPacketWithProvenance(ctx, buf)
+	if err != nil || n1 == 0 {
+		t.Fatalf("epoch 1 read: n=%d err=%v", n1, err)
+	}
+	env1 := p1.(*ownerbpf.ProvenanceEnvelope)
+	if cost := env1.ProvenanceLookupCost(); cost <= 0 {
+		t.Fatalf("expected non-zero ProvenanceLookupCost, got %v", cost)
+	}
+
+	// 2. Faulted burst triggers live quiesced rebuild, drops the faulted frame, and returns (0, nil, nil).
+	nFault, pFault, err := tun.ReadPacketWithProvenance(ctx, buf)
+	if err != nil || nFault != 0 || pFault != nil {
+		t.Fatalf("rebuild read returned n=%d p=%#v err=%v, want (0, nil, nil)", nFault, pFault, err)
+	}
+	if !epoch1Src.closed || !drainedDuringRebuild {
+		t.Fatalf("expected old reader closed (%v) and drain executed (%v)", epoch1Src.closed, drainedDuringRebuild)
+	}
+	// Stale epoch 1 envelope immediately fails validation after rebuild.
+	if _, st := env1.ValidateForwarding(); st != ownerbpf.EnvelopeMissingCookie {
+		t.Fatalf("stale epoch 1 envelope status = %s, want %s", st, ownerbpf.EnvelopeMissingCookie)
+	}
+
+	// 3. Subsequent read uses epoch 2 reader and validates AppRebuild cleanly.
+	n2, p2, err := tun.ReadPacketWithProvenance(ctx, buf)
+	if err != nil || !bytes.HasSuffix(buf[:n2], []byte("epoch-2-recovered")) {
+		t.Fatalf("epoch 2 read: n=%d err=%v payload=%q", n2, err, string(buf[:n2]))
+	}
+	env2 := p2.(*ownerbpf.ProvenanceEnvelope)
+	if owner2, st2 := env2.ValidateForwarding(); st2 != ownerbpf.EnvelopeKnown || owner2.AppID != "/usr/bin/AppRebuild" {
+		t.Fatalf("epoch 2 ValidateForwarding: status=%s owner=%+v", st2, owner2)
+	}
+
+	unbind()
+	if !epoch2Src.closed {
+		t.Fatal("unbind did not close rebuilt epoch 2 reader")
+	}
+}

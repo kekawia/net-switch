@@ -23,8 +23,8 @@ type State interface {
 }
 
 type Options struct {
-	// OwnerBackend selects the Linux attribution backend ("proc-fallback" by
-	// default, "ebpf" when explicitly opted in). Ignored on other platforms.
+	// OwnerBackend selects the Linux attribution backend ("auto" by default,
+	// "ebpf" when strictly required, or "proc-fallback"). Ignored on other platforms.
 	OwnerBackend string
 	// Listen replaces only the transport. The child retains all protocol state.
 	Listen func() (Listener, error)

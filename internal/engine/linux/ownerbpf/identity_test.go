@@ -1,8 +1,14 @@
 package ownerbpf
 
 import (
+	"bytes"
 	"errors"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/cilium/ebpf"
 )
 
 func validProcessFixture() (ActorKey, ActorEvidence, RawProcessMaterial) {
@@ -300,5 +306,101 @@ func TestIdentitySharedSubmitterAndBudgetBounds(t *testing.T) {
 	matB3.After.TGID = 5003
 	if _, r := ledger.EnrichActor(keyB3, evB3, matB3); r != ReasonBudgetExceeded {
 		t.Fatalf("exceeding MaxSnapshots got %s, want %s", r, ReasonBudgetExceeded)
+	}
+}
+
+func TestReaderContainsTokenBoundaryAndOverflow(t *testing.T) {
+	token := []byte("[io_uring]")
+
+	// Token past 64 KiB and split right across a 32-byte chunk boundary.
+	prefix := strings.Repeat("7f0000000000-7f0000001000 r--p 00000000 08:01 123 /usr/lib/libfoo.so\n", 1100)
+	if len(prefix) <= 64<<10 {
+		t.Fatalf("prefix too short: %d", len(prefix))
+	}
+	rem := len(prefix) % 32
+	pad := (32 - rem - 4 + 32) % 32
+	stream := prefix + strings.Repeat("x", pad) + "[io_uring]\n"
+	found, err := readerContainsToken(strings.NewReader(stream), token, 32, maxAsyncMapsStreamBytes)
+	if err != nil || !found {
+		t.Fatalf("expected boundary-split token past 64 KiB to be found: found=%v err=%v", found, err)
+	}
+
+	// Absent token across multi-chunk read returns false.
+	foundAbsent, err := readerContainsToken(strings.NewReader(prefix), token, 64, maxAsyncMapsStreamBytes)
+	if err != nil || foundAbsent {
+		t.Fatalf("expected absent token to return false: found=%v err=%v", foundAbsent, err)
+	}
+
+	// Exceeding maxBytes fails closed (true, nil).
+	huge := bytes.NewReader(bytes.Repeat([]byte("a"), 4096))
+	foundOverflow, err := readerContainsToken(huge, token, 64, 1024)
+	if err != nil || !foundOverflow {
+		t.Fatalf("expected maxBytes overflow to fail closed: found=%v err=%v", foundOverflow, err)
+	}
+}
+
+func TestClassifyLoadFailureDistinguishesVerifierFromUnsupportedKernel(t *testing.T) {
+	verErr := loadError("load probe", &ebpf.VerifierError{Cause: syscall.EINVAL, Log: []string{"invalid mem access"}})
+	if got := ClassifyLoadFailure(verErr, "none [integrity] confidentiality", true, true); got != FallbackVerifierRejected {
+		t.Fatalf("VerifierError classified as %q, want %q", got, FallbackVerifierRejected)
+	}
+	if got := ClassifyLoadFailure(syscall.ENOSYS, "[none]", true, true); got != FallbackKernelUnsupported {
+		t.Fatalf("ENOSYS classified as %q, want %q", got, FallbackKernelUnsupported)
+	}
+	if got := ClassifyLoadFailure(ebpf.ErrNotSupported, "[none]", true, true); got != FallbackKernelUnsupported {
+		t.Fatalf("ErrNotSupported classified as %q, want %q", got, FallbackKernelUnsupported)
+	}
+	if got := ClassifyLoadFailure(syscall.EPERM, "[none]", true, true); got != FallbackCapabilityDenied {
+		t.Fatalf("EPERM classified as %q, want %q", got, FallbackCapabilityDenied)
+	}
+	if got := ClassifyLoadFailure(nil, "none integrity [confidentiality]", true, true); got != FallbackLockdownConfidentiality {
+		t.Fatalf("confidentiality lockdown classified as %q, want %q", got, FallbackLockdownConfidentiality)
+	}
+}
+
+func TestProvenanceRuntimeAdvanceEpochAndLookupCost(t *testing.T) {
+	rt := NewProvenanceRuntime(1, NewIdentityLedger(16, 4096), NewSocketSlotTable(16))
+	defer rt.Close()
+
+	key, ev, mat := validProcessFixture()
+	if _, reason := rt.EnrichActor(key, ev, mat); reason != ReasonValidated {
+		t.Fatalf("EnrichActor epoch 1: %s", reason)
+	}
+	env1 := rt.Acquire(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie, Serial: 1}})
+	env1.SetAcquireCost(1500 * time.Nanosecond)
+	if owner, status := env1.ValidateForwarding(); status != EnvelopeKnown || owner.AppID != "/usr/bin/DirectSender" {
+		t.Fatalf("epoch 1 ValidateForwarding: status=%s owner=%+v", status, owner)
+	}
+
+	// AdvanceEpoch invalidates env1 immediately while env1 remains live on heap.
+	rt.AdvanceEpoch(2)
+	if rt.Epoch() != 2 || rt.IsEpochPoisoned() {
+		t.Fatalf("unexpected epoch state after AdvanceEpoch: epoch=%d poisoned=%v", rt.Epoch(), rt.IsEpochPoisoned())
+	}
+	if _, status := env1.ValidateForwarding(); status != EnvelopeMissingCookie {
+		t.Fatalf("stale epoch 1 envelope got %s, want %s", status, EnvelopeMissingCookie)
+	}
+
+	// Same socket cookie sending in epoch 2 allocates a fresh slot cleanly.
+	if _, reason := rt.EnrichActor(key, ev, mat); reason != ReasonValidated {
+		t.Fatalf("EnrichActor epoch 2: %s", reason)
+	}
+	fragA := rt.Acquire(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie, Serial: 2}})
+	fragA.SetAcquireCost(800 * time.Nanosecond)
+	fragB := rt.Acquire(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie, Serial: 3}})
+	fragB.SetAcquireCost(700 * time.Nanosecond)
+
+	merged, ok := fragA.MergeNetSwitchProvenance(fragB).(*ProvenanceEnvelope)
+	if !ok || merged == nil {
+		t.Fatalf("MergeNetSwitchProvenance returned %T", merged)
+	}
+	if owner, status := merged.ValidateForwarding(); status != EnvelopeKnown || owner.AppID != "/usr/bin/DirectSender" {
+		t.Fatalf("merged epoch 2 ValidateForwarding: status=%s owner=%+v", status, owner)
+	}
+	if cost := merged.ProvenanceLookupCost(); cost != 1500*time.Nanosecond {
+		t.Fatalf("ProvenanceLookupCost = %v, want 1500ns", cost)
+	}
+	if second := merged.ProvenanceLookupCost(); second != 0 {
+		t.Fatalf("second ProvenanceLookupCost claim = %v, want 0", second)
 	}
 }

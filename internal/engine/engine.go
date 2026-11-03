@@ -61,9 +61,10 @@ type Engine struct {
 	testProxy  *testproxy.Server
 	health     *forwardingCheck
 	healthInfo atomic.Pointer[forwardingInfo]
-	pumps      sync.WaitGroup
-	provActive bool
-	lastError  error
+	pumps        sync.WaitGroup
+	provAttached bool
+	provActive   bool
+	lastError    error
 	lines      []platform.Line
 	live       atomic.Pointer[liveState]
 }
@@ -153,11 +154,10 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		if err != nil {
 			return rollback(err)
 		}
+		e.provAttached = true
 		if active {
 			pt, ok := tun.(platform.TunProvenanceReader)
 			if !ok {
-				_ = ctrl.StopProvenance()
-				_ = ctrl.CloseProvenance()
 				return rollback(errors.New("provenance-enabled backend requires TunProvenanceReader"))
 			}
 			provCtrl = ctrl
@@ -383,7 +383,7 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 		e.cancel()
 	}
 	var stopProv error
-	if e.provActive {
+	if e.provAttached {
 		if ctrl, ok := e.deps.Owners.(platform.ProvenanceController); ok {
 			stopProv = ctrl.StopProvenance()
 		}
@@ -454,10 +454,11 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 		e.link.Close()
 	}
 	var closeProv error
-	if e.provActive {
+	if e.provAttached {
 		if ctrl, ok := e.deps.Owners.(platform.ProvenanceController); ok {
 			closeProv = ctrl.CloseProvenance()
 		}
+		e.provAttached = false
 		e.provActive = false
 	}
 	finish()
