@@ -53,7 +53,14 @@ type fdWindow struct {
 	fullUID    uint32
 	identity   *ownerValidation
 }
+const (
+	OwnerBackendProcFallback = "proc-fallback"
+	OwnerBackendEBPF         = "ebpf"
+)
+
 type Owners struct {
+	backend                 string
+	ebpf                    ebpfOwnerState
 	queries                 diagPool
 	batches                 descriptorBatches
 	warmed                  bool
@@ -127,10 +134,25 @@ type lookupStats struct {
 	InlineBatches                                                                        uint64
 	BatchCompletionNanos, BatchResumeNanos, BatchMaxCompletionNanos, BatchMaxResumeNanos uint64
 	BatchLockNanos, BatchUnlockNanos, BatchMaxLockNanos, BatchMaxUnlockNanos             uint64
+	EBPF                                                                                 *ebpfOwnerStats `json:",omitempty"`
+}
+
+func (o *Owners) isEBPFBackend() bool {
+	return o != nil && o.backend == OwnerBackendEBPF
+}
+
+func (o *Owners) backendName() string {
+	if o.isEBPFBackend() {
+		return OwnerBackendEBPF
+	}
+	return OwnerBackendProcFallback
 }
 
 func (o *Owners) Stats() any {
-	s := lookupStats{Backend: "proc-fallback", Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
+	s := lookupStats{Backend: o.backendName(), Timeout: o.lookupErrors[0].Load(), Missing: o.lookupErrors[1].Load(), Ambiguous: o.lookupErrors[2].Load(), Other: o.lookupErrors[3].Load()}
+	if o.isEBPFBackend() {
+		s.EBPF = o.ebpfStats()
+	}
 	s.ExactRepliesAfterDeadline = o.queries.lateReplies.Load()
 	s.ExpiredBeforeHolderScan = o.expiredBeforeHolderScan.Load()
 	s.UDPIdentityExpiredGeneration = o.udpIdentityExpiredGeneration.Load()
@@ -236,7 +258,7 @@ func (o *Owners) Warm(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !reserved {
+	if !reserved && !o.isEBPFBackend() {
 		r := prepareDescriptorTable(o.budget)
 		if r.Err != nil {
 			log.Printf("prepare owner descriptor table: target=%d limit=%d before=%d after=%d: %v; continuing with on-demand growth", r.Target, r.Limit, r.Before, r.After, r.Err)
@@ -257,7 +279,9 @@ func (o *Owners) Warm(ctx context.Context) error {
 			}
 		}
 	}
-	_ = o.refreshCgroups(ctx)
+	if !o.isEBPFBackend() {
+		_ = o.refreshCgroups(ctx)
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -268,10 +292,28 @@ func (o *Owners) Warm(ctx context.Context) error {
 }
 
 func NewOwners() *Owners {
+	return newOwners(OwnerBackendProcFallback)
+}
+
+func NewOwnersWithBackend(backend string) (*Owners, error) {
+	switch backend {
+	case "", OwnerBackendProcFallback:
+		return newOwners(OwnerBackendProcFallback), nil
+	case OwnerBackendEBPF:
+		if !ebpfBackendSupported() {
+			return nil, errors.New("eBPF owner backend is only supported on linux/amd64 and linux/arm64")
+		}
+		return newOwners(OwnerBackendEBPF), nil
+	default:
+		return nil, fmt.Errorf("unsupported owner backend %q", backend)
+	}
+}
+
+func newOwners(backend string) *Owners {
 	// Inode hints and their subscribers share a shard, not the process-state
 	// lock. Small workloads need not retain and scan tens of MiB of empty
 	// index space, and a growing shard cannot stall every other lookup.
-	o := &Owners{budget: flows.Defaults(), cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), windows: make(map[uint32]fdWindow, 256), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
+	o := &Owners{backend: backend, budget: flows.Defaults(), cgroups: make(map[uint64]string, 256), recent: make(map[uint32]*recentOwners, 64), windows: make(map[uint32]fdWindow, 256), ambiguousPorts: map[uint16]time.Time{}, indexSeed: maphash.MakeSeed()}
 	for i := range o.index {
 		o.index[i].inodes = make(map[uint32]inodeHolders, 16)
 		o.index[i].waiters = make(map[uint32]*inodeWaiter, 16)
@@ -280,6 +322,7 @@ func NewOwners() *Owners {
 }
 
 func (o *Owners) Close() {
+	_ = o.CloseProvenance()
 	o.closeDescriptorBatches()
 	o.queries.close()
 }
@@ -1568,6 +1611,9 @@ func (o *Owners) Snapshot(ctx context.Context, keys []netip.AddrPort) (map[netip
 }
 
 func (o *Owners) SnapshotAt(ctx context.Context, keys []netip.AddrPort, started time.Time) (map[netip.AddrPort]platform.Owner, error) {
+	if o.isEBPFBackend() {
+		return o.snapshotEBPFAt(ctx, keys, started)
+	}
 	rows := map[int][]socketRow{}
 	for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
 		need := false

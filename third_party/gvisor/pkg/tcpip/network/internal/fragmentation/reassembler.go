@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-11-02: merge duplicate-fragment provenance conservatively.
+
 package fragmentation
 
 import (
@@ -142,6 +144,10 @@ func (r *reassembler) process(first, last uint16, more bool, proto uint8, pkt *s
 			}
 			// Incoming fragment is a duplicate.
 			// Not dropping packet in case of duplicates.
+			currentHole.pkt.NetSwitchProvenance = stack.MergeNetSwitchProvenance(currentHole.pkt.NetSwitchProvenance, pkt.NetSwitchProvenance)
+			if first == 0 && r.pkt != nil {
+				r.pkt.NetSwitchProvenance = currentHole.pkt.NetSwitchProvenance
+			}
 			continue
 		}
 

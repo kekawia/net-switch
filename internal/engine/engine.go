@@ -62,6 +62,7 @@ type Engine struct {
 	health     *forwardingCheck
 	healthInfo atomic.Pointer[forwardingInfo]
 	pumps      sync.WaitGroup
+	provActive bool
 	lastError  error
 	lines      []platform.Line
 	live       atomic.Pointer[liveState]
@@ -145,6 +146,25 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	if err := e.startForwardingCheck(); err != nil {
 		return rollback(err)
 	}
+	var provCtrl platform.ProvenanceController
+	var provTun platform.TunProvenanceReader
+	if ctrl, ok := e.deps.Owners.(platform.ProvenanceController); ok {
+		active, err := ctrl.AttachProvenance(ctx, tun)
+		if err != nil {
+			return rollback(err)
+		}
+		if active {
+			pt, ok := tun.(platform.TunProvenanceReader)
+			if !ok {
+				_ = ctrl.StopProvenance()
+				_ = ctrl.CloseProvenance()
+				return rollback(errors.New("provenance-enabled backend requires TunProvenanceReader"))
+			}
+			provCtrl = ctrl
+			provTun = pt
+			e.provActive = true
+		}
+	}
 	// A disconnected controller does not own the forwarding lifetime. The
 	// service context and protocol lease do; reattach keeps these flows alive.
 	run, cancel := context.WithCancel(e.root)
@@ -173,11 +193,41 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		b := p.Data().AsRange().ToSlice()
 		nat.ObserveICMP(b)
 	})
+	var pumpBound chan error
+	var pumpEnabled chan struct{}
+	if provTun != nil {
+		pumpBound = make(chan error, 1)
+		pumpEnabled = make(chan struct{})
+	}
 	e.pumps.Go(func() {
 		defer echo.wait()
+		if provTun != nil {
+			runtime.LockOSThread()
+			defer runtime.UnlockOSThread()
+			unbind, err := provTun.BindPumpThread()
+			pumpBound <- err
+			if err != nil {
+				return
+			}
+			defer unbind()
+			select {
+			case <-pumpEnabled:
+			case <-run.Done():
+				return
+			}
+		}
 		b := make([]byte, ns.MTU)
 		for {
-			n, err := tun.ReadPacket(run, b)
+			var (
+				n    int
+				prov any
+				err  error
+			)
+			if provTun != nil {
+				n, prov, err = provTun.ReadPacketWithProvenance(run, b)
+			} else {
+				n, err = tun.ReadPacket(run, b)
+			}
 			if err != nil {
 				if run.Err() == nil {
 					e.fail(link, err)
@@ -199,6 +249,8 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			// MakeWithData copies into a gVisor-owned chunk before returning.
 			// An extra clone here doubles ingress payload allocations.
 			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b[:n])})
+			p.NetSwitchProvenance = prov
+			prov = nil
 			if verified, ok := tun.(platform.ChecksumVerifier); ok {
 				p.RXChecksumValidated = verified.RXChecksumVerified(b[:n])
 			}
@@ -239,6 +291,15 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			}
 		}
 	})
+	if provCtrl != nil {
+		if err := <-pumpBound; err != nil {
+			return rollback(err)
+		}
+		if err := provCtrl.EnableProvenance(); err != nil {
+			return rollback(err)
+		}
+		close(pumpEnabled)
+	}
 	if err := e.deps.Routes.Capture(ctx); err != nil {
 		return rollback(err)
 	}
@@ -321,6 +382,12 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.cancel != nil {
 		e.cancel()
 	}
+	var stopProv error
+	if e.provActive {
+		if ctrl, ok := e.deps.Owners.(platform.ProvenanceController); ok {
+			stopProv = ctrl.StopProvenance()
+		}
+	}
 	if e.testProxy != nil {
 		e.testProxy.Close()
 		e.testProxy = nil
@@ -386,6 +453,13 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.link != nil {
 		e.link.Close()
 	}
+	var closeProv error
+	if e.provActive {
+		if ctrl, ok := e.deps.Owners.(platform.ProvenanceController); ok {
+			closeProv = ctrl.CloseProvenance()
+		}
+		e.provActive = false
+	}
 	finish()
 	e.stack = nil
 	e.tcp = nil
@@ -398,7 +472,7 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	if e.deps.Routes != nil {
 		cleanup = e.deps.Routes.Cleanup(ctx)
 	}
-	err := errors.Join(joined, cleanup)
+	err := errors.Join(stopProv, joined, closeProv, cleanup)
 	status := "off"
 	if err != nil {
 		e.lastError = errors.Join(e.lastError, err)

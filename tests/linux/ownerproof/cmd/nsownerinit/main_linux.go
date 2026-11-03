@@ -189,7 +189,7 @@ func runPrivateSuite() error {
 		{"kernel-proof", "^TestKernelProof$", "5m"},
 		{"bridge-proof", "^TestBridge", "15m"},
 		{"identity-proof", "^TestIdentity", "10m"},
-		{"sender-lifecycle-proof", "^(TestSenderP3|TestOffloadAndFragmentsP4|TestLifecycleL1|TestLifecycleL2)$", "10m"},
+		{"sender-lifecycle-proof", "^(TestSenderP3|TestSenderEngineSpecLoad|TestOffloadAndFragmentsP4|TestLifecycleL1|TestLifecycleL2)$", "10m"},
 	}
 	for _, s := range suites {
 		fmt.Printf("FLOOR_GUEST_SUITE_START suite=%s pattern=%s\n", s.name, s.pattern)

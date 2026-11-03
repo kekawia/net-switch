@@ -25,6 +25,10 @@ const expected = new Set([
   'TestFragmentReassemblyAndGSOEnvelopes',
   'TestKernelControlAndLockdownClassification',
   'TestLifecycleSaturationChurnAndBaselineReturn',
+  'TestEmbeddedBPFObjectsMatchManifestAndParse',
+  'TestPrepareEngineBridgeAndSenderSpecs',
+  'TestProvenanceEnvelopeLifecycleMergeAndGCRetirement',
+  'TestVirtioGSONormalizationAndOverflowPreservation',
 ]);
 const run = spawnSync('go', ['test', '-json', '-count=1', '-p=2', './internal/engine/linux/ownerbpf'], {
   encoding: 'utf8', timeout: 180_000, maxBuffer: 8 * 1024 * 1024,

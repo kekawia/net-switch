@@ -649,7 +649,7 @@ func TestSenderP3(t *testing.T) {
 		return matchTCPDstPort(raw, 4, 43001)
 	})
 	f.syncLedger(t, ledger, processed)
-	wantTCP4App := strings.ToLower(tcp4Bin)
+	wantTCP4App := tcp4Bin
 	for i, sf := range synFrames {
 		env := ledger.ResolvePacketEnvelope(sf.Decision)
 		dec := ledger.ValidateForwardingEnvelope(env)
@@ -682,8 +682,8 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envTCP6 := ledger.ResolvePacketEnvelope(syn6Frames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envTCP6); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(tcp6Bin) {
-		t.Fatalf("TCPv6 SYN decision = %+v, want %q", dec, strings.ToLower(tcp6Bin))
+	if dec := ledger.ValidateForwardingEnvelope(envTCP6); dec.Status != IdentityKnown || dec.Snapshot.AppID != tcp6Bin {
+		t.Fatalf("TCPv6 SYN decision = %+v, want %q", dec, tcp6Bin)
 	}
 	ledger.ReleaseEnvelope(&envTCP6)
 	_ = tcp6In.Close()
@@ -704,8 +704,8 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envTFO := ledger.ResolvePacketEnvelope(tfoFrames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envTFO); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(tfoBin) {
-		t.Fatalf("TCP Fast Open SYN decision = %+v, want %q", dec, strings.ToLower(tfoBin))
+	if dec := ledger.ValidateForwardingEnvelope(envTFO); dec.Status != IdentityKnown || dec.Snapshot.AppID != tfoBin {
+		t.Fatalf("TCP Fast Open SYN decision = %+v, want %q", dec, tfoBin)
 	}
 	ledger.ReleaseEnvelope(&envTFO)
 	_ = tfoIn.Close()
@@ -727,7 +727,7 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envU6 := ledger.ResolvePacketEnvelope(u6Frames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envU6); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(udp6Bin) {
+	if dec := ledger.ValidateForwardingEnvelope(envU6); dec.Status != IdentityKnown || dec.Snapshot.AppID != udp6Bin {
 		t.Fatalf("UDPv6 sendto decision = %+v", dec)
 	}
 	ledger.ReleaseEnvelope(&envU6)
@@ -750,7 +750,7 @@ func TestSenderP3(t *testing.T) {
 	f.syncLedger(t, ledger, processed)
 	for _, mf := range mmFrames {
 		env := ledger.ResolvePacketEnvelope(mf.Decision)
-		if dec := ledger.ValidateForwardingEnvelope(env); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(mmsgBin) {
+		if dec := ledger.ValidateForwardingEnvelope(env); dec.Status != IdentityKnown || dec.Snapshot.AppID != mmsgBin {
 			t.Fatalf("sendmmsg decision = %+v", dec)
 		}
 		ledger.ReleaseEnvelope(&env)
@@ -773,7 +773,7 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envSp := ledger.ResolvePacketEnvelope(spFrames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envSp); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(spliceBin) {
+	if dec := ledger.ValidateForwardingEnvelope(envSp); dec.Status != IdentityKnown || dec.Snapshot.AppID != spliceBin {
 		t.Fatalf("splice decision = %+v", dec)
 	}
 	ledger.ReleaseEnvelope(&envSp)
@@ -849,15 +849,15 @@ func TestSenderP3(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envValid := ledger.ResolvePacketEnvelope(validFrames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envValid); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(validBin) || dec.Conflicts != 0 {
-		t.Fatalf("valid send after failed sends decision = %+v, want known %q conflicts=0", dec, strings.ToLower(validBin))
+	if dec := ledger.ValidateForwardingEnvelope(envValid); dec.Status != IdentityKnown || dec.Snapshot.AppID != validBin || dec.Conflicts != 0 {
+		t.Fatalf("valid send after failed sends decision = %+v, want known %q conflicts=0", dec, validBin)
 	}
 	ledger.ReleaseEnvelope(&envValid)
 	_ = vIn.Close()
 	_ = cmdValid.Wait()
 	_ = f2In.Close()
 	_ = cmdFail2.Wait()
-	t.Logf("P3_FAILED_SENDS_IGNORED valid_owner=%s cookie=%d", strings.ToLower(validBin), validFrames[0].Decision.Packet.Cookie)
+	t.Logf("P3_FAILED_SENDS_IGNORED valid_owner=%s cookie=%d", validBin, validFrames[0].Decision.Packet.Cookie)
 
 	// 5. Multi-app UDP_CORK into a single flushed datagram -> conflicting_identity.
 	corkAppA := makeAppBin("p3-cork-app-a")
@@ -1050,7 +1050,7 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 			t.Fatalf("IPv4 fragment %d Ingest error: %v", idx, err)
 		}
 		if idx == 0 {
-			if !done || len(pkt) != 20+8+3200 || mergedEnv.Identity.Status != IdentityKnown || mergedEnv.Identity.Snapshot.AppID != strings.ToLower(fragV4Bin) {
+			if !done || len(pkt) != 20+8+3200 || mergedEnv.Identity.Status != IdentityKnown || mergedEnv.Identity.Snapshot.AppID != fragV4Bin {
 				t.Fatalf("IPv4 reassembled done=%t len=%d id=%+v", done, len(pkt), mergedEnv.Identity)
 			}
 			ledger.ReleaseEnvelope(&mergedEnv)
@@ -1081,7 +1081,7 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 			t.Fatalf("IPv6 fragment %d Ingest error: %v", idx, err)
 		}
 		if idx == 0 {
-			if !done || len(pkt) != 40+8+3200 || mergedEnv.Identity.Status != IdentityKnown || mergedEnv.Identity.Snapshot.AppID != strings.ToLower(fragV6Bin) {
+			if !done || len(pkt) != 40+8+3200 || mergedEnv.Identity.Status != IdentityKnown || mergedEnv.Identity.Snapshot.AppID != fragV6Bin {
 				t.Fatalf("IPv6 reassembled done=%t len=%d id=%+v", done, len(pkt), mergedEnv.Identity)
 			}
 			ledger.ReleaseEnvelope(&mergedEnv)
@@ -1108,7 +1108,7 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 	})
 	f.syncLedger(t, ledger, processed)
 	envExt := ledger.ResolvePacketEnvelope(extFrames[0].Decision)
-	if dec := ledger.ValidateForwardingEnvelope(envExt); dec.Status != IdentityKnown || dec.Snapshot.AppID != strings.ToLower(extV6Bin) {
+	if dec := ledger.ValidateForwardingEnvelope(envExt); dec.Status != IdentityKnown || dec.Snapshot.AppID != extV6Bin {
 		t.Fatalf("IPv6 Destination Options packet decision = %+v", dec)
 	}
 	ledger.ReleaseEnvelope(&envExt)
@@ -1148,7 +1148,7 @@ func TestOffloadAndFragmentsP4(t *testing.T) {
 		dec := ledger.ValidateForwardingEnvelope(env)
 		hasSK := uf.Decision.Packet.Cookie != 0
 		if hasSK {
-			if dec.Status != IdentityKnown || dec.Snapshot == nil || dec.Snapshot.AppID != strings.ToLower(usoBin) {
+			if dec.Status != IdentityKnown || dec.Snapshot == nil || dec.Snapshot.AppID != usoBin {
 				t.Fatalf("UDP_SEGMENT segment %d with sk (cookie=%d) decision = %+v", segIdx, uf.Decision.Packet.Cookie, dec)
 			}
 		} else {
@@ -1818,4 +1818,165 @@ func TestLifecycleL2(t *testing.T) {
 	ledger.ReleaseEnvelope(&envFresh)
 	t.Logf("L2_EPOCH_RESTART_AND_CAPS pre_epoch_status=%s post_rebuild=known lockdown=%s has_btf=%t cap_drop=degraded_capability_denied",
 		preDec.Status, lockdownMode, btfErr == nil)
+}
+
+func TestSenderEngineSpecLoad(t *testing.T) {
+	if os.Geteuid() != 0 || os.Getenv("NS_OWNERBPF_PROOF") != "1" {
+		t.Fatal("hosted root proof required")
+	}
+	selfNS, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostNS, err := os.Readlink("/proc/1/ns/net")
+	if err != nil || selfNS == hostNS {
+		t.Fatal("private network namespace required", err)
+	}
+	if err := unix.Setrlimit(unix.RLIMIT_MEMLOCK, &unix.Rlimit{Cur: 64 << 20, Max: 64 << 20}); err != nil {
+		t.Fatal(err)
+	}
+
+	tunFD, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if tunFD >= 0 {
+			_ = unix.Close(tunFD)
+		}
+	}()
+	ifr, err := unix.NewIfreq("nseng0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_TUN_EXCL)
+	if err := unix.IoctlIfreq(tunFD, unix.TUNSETIFF, ifr); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("/proc/sys/net/ipv6/conf/nseng0/disable_ipv6", []byte("1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	nlLink, err := netlink.LinkByName("nseng0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := netlink.LinkSetTxQLen(nlLink, 500); err != nil {
+		t.Fatal(err)
+	}
+	addr, err := netlink.ParseAddr("198.18.0.1/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := netlink.AddrAdd(nlLink, addr); err != nil {
+		t.Fatal(err)
+	}
+	var nsSt unix.Stat_t
+	if err := unix.Stat("/proc/self/ns/net", &nsSt); err != nil {
+		t.Fatal(err)
+	}
+
+	epoch := uint64(time.Now().UnixNano())
+	engBridge, err := LoadEngineBridge(uint32(nlLink.Attrs().Index), uint32(nsSt.Ino), epoch, 500)
+	if err != nil {
+		t.Fatalf("LoadEngineBridge: %v", err)
+	}
+	defer func() {
+		if err := engBridge.Close(); err != nil {
+			t.Errorf("engBridge.Close: %v", err)
+		}
+	}()
+
+	engProbe, err := LoadEngineSenderProbe("/sys/fs/cgroup", 4096, 1024)
+	if err != nil {
+		t.Fatalf("LoadEngineSenderProbe: %v", err)
+	}
+	defer func() {
+		if err := engProbe.Close(); err != nil {
+			t.Errorf("engProbe.Close: %v", err)
+		}
+	}()
+
+	engReader, err := engBridge.Register()
+	if err != nil {
+		t.Fatalf("engBridge.Register: %v", err)
+	}
+	defer func() {
+		if engReader != nil {
+			if err := engReader.Close(); err != nil {
+				t.Errorf("engReader.Close: %v", err)
+			}
+		}
+	}()
+	if err := engProbe.Enable(); err != nil {
+		t.Fatalf("engProbe.Enable: %v", err)
+	}
+	if err := engBridge.Enable(500); err != nil {
+		t.Fatalf("engBridge.Enable: %v", err)
+	}
+	if err := netlink.LinkSetUp(nlLink); err != nil {
+		t.Fatal(err)
+	}
+
+	sock, err := dialBridgeUDPSocket(46099)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unix.Write(sock, []byte("engine-spec-ok")); err != nil {
+		_ = unix.Close(sock)
+		t.Fatal(err)
+	}
+	cookie, err := unix.GetsockoptUint64(sock, unix.SOL_SOCKET, unix.SO_COOKIE)
+	_ = unix.Close(sock)
+	if err != nil || cookie == 0 {
+		t.Fatalf("GetsockoptUint64 SO_COOKIE: cookie=%d err=%v", cookie, err)
+	}
+
+	rawBufs := [][]byte{make([]byte, 2048)}
+	sizes := make([]int, 1)
+	decisions := make([]ReadDecision, 1)
+	var gotCount int
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		n, rErr := engReader.ReadBurstInto(tunFD, rawBufs, sizes, decisions)
+		if rErr != nil {
+			t.Fatalf("ReadBurstInto: %v", rErr)
+		}
+		if n > 0 {
+			gotCount = n
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if gotCount != 1 || decisions[0].Status != ReadCookie || decisions[0].Packet.Cookie != cookie {
+		t.Fatalf("ReadBurstInto got count=%d decision=%+v, want cookie=%d", gotCount, decisions[0], cookie)
+	}
+	if !engProbe.HasPendingNewActors() {
+		t.Fatal("expected engProbe.HasPendingNewActors() == true after first send")
+	}
+
+	events, err := engProbe.DrainNewActors(make(map[ActorKey]bool))
+	if err != nil {
+		t.Fatalf("DrainNewActors: %v", err)
+	}
+	matchedActor := false
+	for _, ev := range events {
+		if ev.Key.Cookie == cookie && ev.Key.TGID == uint32(os.Getpid()) && ev.Evidence.ABI == ABI {
+			matchedActor = true
+			break
+		}
+	}
+	if !matchedActor {
+		t.Fatalf("DrainNewActors(%d events) did not report cookie=%d tgid=%d", len(events), cookie, os.Getpid())
+	}
+
+	if err := engBridge.Stop(); err != nil {
+		t.Fatalf("engBridge.Stop: %v", err)
+	}
+	_ = unix.Close(tunFD)
+	tunFD = -1
+	if err := engReader.Close(); err != nil {
+		t.Fatalf("engReader.Close: %v", err)
+	}
+	engReader = nil
+	t.Logf("ENGINE_SPEC_KERNEL_PROOF cookie=%d packet_slots=%d queued_events=%d", cookie, engBridge.PacketSlots(), len(events))
 }

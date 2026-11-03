@@ -18,9 +18,10 @@ import (
 )
 
 type Config struct {
-	Directory string `json:"directory"`
-	Data      string `json:"data"`
-	Mode      string `json:"mode"`
+	Directory    string `json:"directory"`
+	Data         string `json:"data"`
+	Mode         string `json:"mode"`
+	OwnerBackend string `json:"ownerBackend,omitempty"`
 }
 type Owner struct {
 	User string `json:"user"`
@@ -99,6 +100,9 @@ func LoadConfig(data string) (Config, error) {
 	}
 	if raw.Adapter != "" || c.Mode != "tun" {
 		return c, errors.New("native service qualification requires tun mode and no adapter")
+	}
+	if c.OwnerBackend != "" && c.OwnerBackend != "proc-fallback" && c.OwnerBackend != "ebpf" {
+		return c, errors.New("invalid owner backend")
 	}
 	if err := service.CheckInstallation(c.Directory); err != nil {
 		return c, err

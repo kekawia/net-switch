@@ -207,6 +207,111 @@ func TestKernelReconcileDoesNotBlockDials(t *testing.T) {
 	}
 }
 
+func TestKernelReconcileUnpublishesRemovedDefaultBeforeRouteDelete(t *testing.T) {
+	requireKernelNamespace(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	veth := &netlink.Veth{
+		LinkAttrs: netlink.LinkAttrs{Name: "line-veth"},
+		PeerName:  "line-peer",
+	}
+	if err := netlink.LinkAdd(veth); err != nil {
+		t.Fatal(err)
+	}
+	defer netlink.LinkDel(veth)
+	peer, err := netlink.LinkByName("line-peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range []netlink.Link{veth, peer} {
+		if err := netlink.LinkSetUp(l); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := netlink.AddrAdd(veth, &netlink.Addr{IPNet: prefix("192.0.2.2/24")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := netlink.AddrAdd(peer, &netlink.Addr{IPNet: prefix("192.0.2.1/24")}); err != nil {
+		t.Fatal(err)
+	}
+	def := netlink.Route{
+		Family:    unix.AF_INET,
+		LinkIndex: veth.Attrs().Index,
+		Dst:       prefix("0.0.0.0/0"),
+		Gw:        net.IPv4(192, 0, 2, 1),
+		Table:     unix.RT_TABLE_MAIN,
+		Type:      unix.RTN_UNICAST,
+	}
+	if err := netlink.RouteAdd(&def); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), "state")
+	p, err := New(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if _, err := p.OpenTun(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Prepare(ctx, []platform.Line{{ID: "line", Interface: "line-veth"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.binding("line", false); err != nil {
+		t.Fatalf("initial line binding unavailable: %v", err)
+	}
+	if err := p.journal.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store := &pausedJournal{diskStore: diskStore{filepath.Join(dir, "engine-journal.json")}, started: make(chan struct{}), resume: make(chan struct{})}
+	j := &journal.Journal{Store: store, Lock: fileLock{filepath.Join(dir, "engine.lock")}, Kinds: map[string]journal.Object{}}
+	for _, kind := range []string{"tun", "address", "route", "rule", "binding"} {
+		j.Kinds[kind] = objectDriver{p.objects, kind}
+	}
+	p.journal, err = j.Open(ctx, p.objects.boot, p.Instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := netlink.RouteDel(&def); err != nil {
+		t.Fatal(err)
+	}
+	store.paused.Store(true)
+	var resume sync.Once
+	defer resume.Do(func() { close(store.resume) })
+	reconciled := make(chan error, 1)
+	go func() { p.routeMu.Lock(); err := p.reconcileLocked(ctx); p.routeMu.Unlock(); reconciled <- err }()
+	select {
+	case <-store.started:
+	case <-ctx.Done():
+		t.Fatal("route removal did not hit journal append")
+	}
+	routes, err := allRoutes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range routes {
+		if r.LinkIndex == veth.Attrs().Index && r.Type == unix.RTN_UNICAST && (r.Dst == nil || r.Dst.String() == "0.0.0.0/0") {
+			t.Fatalf("unicast default route still present at removal append pause: %+v", r)
+		}
+	}
+	if b, err := p.binding("line", false); err == nil {
+		t.Fatalf("binding still advertised Default4 after kernel default route deletion: %+v", b)
+	}
+	dialCtx, dialCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer dialCancel()
+	start := time.Now()
+	if c, err := p.DialTCP(dialCtx, "line", netip.MustParseAddrPort("198.51.100.10:7003")); err == nil {
+		c.Close()
+		t.Fatal("DialTCP succeeded without a default route")
+	} else if errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 100*time.Millisecond {
+		t.Fatalf("DialTCP stalled (%s) on removed default route: %v", time.Since(start), err)
+	}
+	resume.Do(func() { close(store.resume) })
+	if err := <-reconciled; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestKernelMonitorRepairsRulesRoutesAndReplug(t *testing.T) {
 	testKernelReplug(t, false)
 }

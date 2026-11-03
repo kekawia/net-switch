@@ -209,6 +209,23 @@ func (t *stalledTun) BindIOContext(ctx context.Context) {
 	}
 }
 
+func (t *stalledTun) UnwrapTun() platform.TunDevice { return t.TunDevice }
+
+func (t *stalledTun) BindPumpThread() (func(), error) {
+	if p, ok := t.TunDevice.(platform.TunProvenanceReader); ok {
+		return p.BindPumpThread()
+	}
+	return nil, errors.New("underlying TUN does not support packet provenance")
+}
+
+func (t *stalledTun) ReadPacketWithProvenance(ctx context.Context, b []byte) (int, any, error) {
+	if p, ok := t.TunDevice.(platform.TunProvenanceReader); ok {
+		return p.ReadPacketWithProvenance(ctx, b)
+	}
+	n, err := t.TunDevice.ReadPacket(ctx, b)
+	return n, nil, err
+}
+
 func (t *stalledTun) WriteBatch(packets [][]byte) (int, error) {
 	if gate := t.gate(); gate != nil {
 		select {

@@ -25,13 +25,17 @@ for (const patch of patches) test(`${patch} regenerates byte for byte under cust
   if (patch === 'gvisor-local-close.patch') {
     assert.match(expected, /new file mode 100644\n[\s\S]*dispatcher_netswitch_test\.go/);
     assert.match(expected, /Net Switch addition, not upstream/);
-    assert.doesNotMatch(expected, /RTORecovery/);
+    assert.doesNotMatch(expected, /RTORecovery|NetSwitchProvenance/);
+  } else if (patch === 'gvisor-provenance.patch') {
+    assert.match(expected, /new file mode 100644\n[\s\S]*provenance_netswitch_test\.go/);
+    assert.match(expected, /NetSwitchProvenance/);
+    assert.doesNotMatch(expected, /RTORecovery|dispatcher_netswitch_test|localCloseEnabled|sackNodePool/);
   } else if (patch === 'gvisor-rto-recovery.patch') {
     assert.match(expected, /RTORecovery/);
-    assert.doesNotMatch(expected, /dispatcher_netswitch_test|localCloseEnabled/);
+    assert.doesNotMatch(expected, /dispatcher_netswitch_test|localCloseEnabled|NetSwitchProvenance/);
   } else if (patch === 'gvisor-sack-cache.patch') {
     assert.match(expected, /sackNodePool/);
-    assert.doesNotMatch(expected, /RTORecovery|dispatcher_netswitch_test|localCloseEnabled/);
+    assert.doesNotMatch(expected, /RTORecovery|dispatcher_netswitch_test|localCloseEnabled|NetSwitchProvenance/);
   }
   const settings = {
     'diff.noprefix': 'true',
@@ -63,7 +67,7 @@ for (const patch of patches) test(`${patch} regenerates byte for byte under cust
 });
 
 test('diff mode requires one named patch instead of silently combining patches', () => {
-  assert.deepEqual(patches, ['gvisor-local-close.patch', 'gvisor-rto-recovery.patch', 'gvisor-sack-cache.patch']);
+  assert.deepEqual(patches, ['gvisor-local-close.patch', 'gvisor-provenance.patch', 'gvisor-rto-recovery.patch', 'gvisor-sack-cache.patch']);
   for (const args of [['--diff'], ['--diff', '../gvisor-local-close.patch'], ['--diff', 'missing.patch']]) {
     const result = spawnSync(process.execPath, ['scripts/generate-gvisor.mjs', ...args], {
       cwd: root, encoding: 'utf8', windowsHide: true,

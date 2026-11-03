@@ -54,6 +54,7 @@ func Ctl(args []string) error {
 	dir := flags.String("directory", "", "directory containing the service executables")
 	adapter := flags.String("adapter", "", "retired stand-in flag (rejected by install)")
 	mode := flags.String("mode", "tun", "tun or proxy")
+	ownerBackend := flags.String("owner-backend", "", "Linux attribution backend (proc-fallback or ebpf)")
 	ownerName := flags.String("owner", "", "interactive owner to enroll; omit to leave pending")
 	engine := flags.Bool("engine", false, "engine recovery")
 	if err := flags.Parse(args[1:]); err != nil {
@@ -142,6 +143,9 @@ func Ctl(args []string) error {
 		if *adapter != "" || *mode != "tun" {
 			return errors.New("native service qualification requires tun mode and no adapter")
 		}
+		if *ownerBackend != "" && *ownerBackend != "proc-fallback" && *ownerBackend != "ebpf" {
+			return errors.New("owner-backend must be proc-fallback or ebpf")
+		}
 		if err := service.CheckInstallation(*dir); err != nil {
 			return err
 		}
@@ -152,7 +156,7 @@ func Ctl(args []string) error {
 		if err := refuseStandInStore(*data); err != nil {
 			return err
 		}
-		c := Config{Directory: *dir, Data: *data, Mode: *mode}
+		c := Config{Directory: *dir, Data: *data, Mode: *mode, OwnerBackend: *ownerBackend}
 		if err := Save(filepath.Join(*data, "service-config.json"), c); err != nil {
 			return err
 		}

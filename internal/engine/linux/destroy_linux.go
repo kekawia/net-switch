@@ -34,8 +34,17 @@ func (o *Owners) listenDestroy(ctx context.Context, destroy func(netip.AddrPort,
 	}
 	f := os.NewFile(uintptr(fd), "UDP destroy")
 	defer f.Close()
-	// Group numbers are 2 (INET_UDP_DESTROY) and 4 (INET6_UDP_DESTROY).
-	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: 1<<1 | 1<<3}); err != nil {
+	if o.isEBPFBackend() {
+		_ = unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_RCVBUF, 1<<20)
+	}
+	// Group numbers are 2 (INET_UDP_DESTROY) and 4 (INET6_UDP_DESTROY); in eBPF
+	// mode also subscribe to 1 (INET_TCP_DESTROY) and 3 (INET6_TCP_DESTROY) for
+	// bounded socket-slot and BPF actor-map reclamation.
+	groups := uint32(1<<1 | 1<<3)
+	if o.isEBPFBackend() {
+		groups |= 1<<0 | 1<<2
+	}
+	if err := unix.Bind(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK, Groups: groups}); err != nil {
 		return err
 	}
 	stop := context.AfterFunc(ctx, func() { f.SetReadDeadline(time.Now()) })
@@ -46,6 +55,7 @@ func (o *Owners) listenDestroy(ctx context.Context, destroy func(netip.AddrPort,
 		n, err := readNetlink(f, b)
 		if err != nil {
 			if errors.Is(err, unix.ENOBUFS) {
+				o.requestProvenanceReconcile()
 				refresh()
 				continue
 			}
@@ -53,11 +63,13 @@ func (o *Owners) listenDestroy(ctx context.Context, destroy func(netip.AddrPort,
 		}
 		messages, err := syscall.ParseNetlinkMessage(b[:n])
 		if err != nil {
+			o.requestProvenanceReconcile()
 			refresh()
 			continue
 		}
 		for _, m := range messages {
 			if m.Header.Type == unix.NLMSG_OVERRUN {
+				o.requestProvenanceReconcile()
 				refresh()
 				continue
 			}
@@ -66,8 +78,15 @@ func (o *Owners) listenDestroy(ctx context.Context, destroy func(netip.AddrPort,
 			}
 			r, err := parseDiag(m.Data)
 			if err != nil {
+				o.requestProvenanceReconcile()
 				refresh()
 				continue
+			}
+			if o.isEBPFBackend() {
+				o.scheduleProvenanceCookieRetire(r.cookie)
+				if r.protocol == unix.IPPROTO_TCP {
+					continue
+				}
 			}
 			deliver := func() {
 				// A wildcard app socket can back a NAT session using any local

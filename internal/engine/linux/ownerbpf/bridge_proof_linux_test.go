@@ -131,6 +131,28 @@ func (f *bridgeFixture) openDeviceAndCollection(t *testing.T, fault bool, receiv
 	if e != nil || l.Attrs().TxQLen != 500 {
 		t.Fatal("queue readback", e)
 	}
+	// Replace Linux 5.8–5.12 lockless pfifo_fast (TCQ_F_NOLOCK) with locked
+	// pfifo (limit = tx_queue_len = 500) so concurrent multi-CPU sends never
+	// hit the pre-5.13 pfifo_fast qdisc_run_end stuck-packet race.
+	qdiscs, e := netlink.QdiscList(l)
+	if e != nil {
+		t.Fatal("list nsbridge0 qdiscs", e)
+	}
+	for _, q := range qdiscs {
+		if q.Attrs().Parent == netlink.HANDLE_ROOT && q.Type() == "pfifo_fast" {
+			if e = netlink.QdiscReplace(&netlink.GenericQdisc{
+				QdiscAttrs: netlink.QdiscAttrs{
+					LinkIndex: l.Attrs().Index,
+					Parent:    netlink.HANDLE_ROOT,
+					Handle:    netlink.MakeHandle(1, 0),
+				},
+				QdiscType: "pfifo",
+			}); e != nil {
+				t.Fatal("replace nsbridge0 pfifo_fast with locked pfifo", e)
+			}
+			break
+		}
+	}
 	addr, e := netlink.ParseAddr("198.18.0.1/24")
 	if e != nil {
 		t.Fatal(e)

@@ -31,7 +31,8 @@ func runNativeChild(ctx context.Context, ready func(), c Config, log func(string
 	}
 	var server *protocol.Server
 	options := host.Options{
-		Progress: func(stage string) { log("native startup: " + stage) },
+		OwnerBackend: c.OwnerBackend,
+		Progress:     func(stage string) { log("native startup: " + stage) },
 		OpenState: func(id string) (host.State, error) {
 			instance = id
 			if err := host.RetireOutcomes(c.Data, id); err != nil {

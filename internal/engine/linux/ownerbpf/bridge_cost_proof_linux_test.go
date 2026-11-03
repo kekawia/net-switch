@@ -33,6 +33,18 @@ func TestBridgeBurstCost(t *testing.T) {
 				cookies[i] = c
 			}
 			const waves = 64
+			sumCaptures := func() uint64 {
+				var states []CPUState
+				if err := f.b.Collection.Maps["cpu_state"].Lookup(uint32(0), &states); err != nil {
+					t.Fatal(err)
+				}
+				var total uint64
+				for _, s := range states {
+					total += s.Captures
+				}
+				return total
+			}
+			capturesBase := sumCaptures()
 			start := time.Now()
 			var usageBefore, usageAfter unix.Rusage
 			if err := unix.Getrusage(unix.RUSAGE_SELF, &usageBefore); err != nil {
@@ -42,7 +54,10 @@ func TestBridgeBurstCost(t *testing.T) {
 			packets := 0
 			for wave := range waves {
 				finished := make(chan error, 2)
+				quiesceCPU1 := make(chan struct{})
+				quiescedCPU1 := make(chan error, 1)
 				for sender := range 2 {
+					sender := sender
 					go func() {
 						runtime.LockOSThread()
 						defer runtime.UnlockOSThread()
@@ -50,6 +65,9 @@ func TestBridgeBurstCost(t *testing.T) {
 						cpu.Set(sender)
 						if err := unix.SchedSetaffinity(0, &cpu); err != nil {
 							finished <- err
+							if sender == 1 {
+								quiescedCPU1 <- err
+							}
 							return
 						}
 						for packet := range 32 {
@@ -59,10 +77,17 @@ func TestBridgeBurstCost(t *testing.T) {
 							binary.BigEndian.PutUint32(payload[8:], uint32(packet))
 							if err := unix.Sendto(sockets[sender], payload[:], 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
 								finished <- err
+								if sender == 1 {
+									quiescedCPU1 <- err
+								}
 								return
 							}
 						}
 						finished <- nil
+						if sender == 1 {
+							<-quiesceCPU1
+							quiescedCPU1 <- nil
+						}
 					}()
 				}
 				var producerErr error
@@ -70,7 +95,27 @@ func TestBridgeBurstCost(t *testing.T) {
 					producerErr = errors.Join(producerErr, <-finished)
 				}
 				if producerErr != nil {
+					close(quiesceCPU1)
+					<-quiescedCPU1
 					t.Fatal(producerErr)
+				}
+				// Ensure any deferred NET_TX_SOFTIRQ drain has entered net_dev_start_xmit
+				// for all 64 datagrams and both CPUs have exited softirq BH context
+				// (meaning tun_net_xmit completed ptr_ring_produce) before timing the
+				// non-blocking N-packet ReadBurst calls.
+				wantCaptures := capturesBase + uint64((wave+1)*64)
+				capDeadline := time.Now().Add(time.Second)
+				for sumCaptures() < wantCaptures {
+					if time.Now().After(capDeadline) {
+						close(quiesceCPU1)
+						<-quiescedCPU1
+						t.Fatalf("cost precondition: wave=%d captures=%d want=%d", wave, sumCaptures()-capturesBase, (wave+1)*64)
+					}
+					runtime.Gosched()
+				}
+				close(quiesceCPU1)
+				if err := <-quiescedCPU1; err != nil {
+					t.Fatal(err)
 				}
 				var seen [2][32]bool
 				for read := 0; read < 64; read += limit {

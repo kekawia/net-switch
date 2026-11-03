@@ -57,7 +57,7 @@ func validProcessFixture() (ActorKey, ActorEvidence, RawProcessMaterial) {
 func TestIdentityValidationAndContextBracket(t *testing.T) {
 	key, ev, mat := validProcessFixture()
 	val, reason := ValidateProcessIdentity(key, ev, mat)
-	if reason != ReasonValidated || val.Path != "/usr/bin/directsender" || val.AppID != "/usr/bin/directsender" || val.Sandbox != SandboxNone || val.ExeDeleted {
+	if reason != ReasonValidated || val.Path != "/usr/bin/DirectSender" || val.AppID != "/usr/bin/DirectSender" || val.Sandbox != SandboxNone || val.ExeDeleted {
 		t.Fatalf("valid native identity failed: val=%+v reason=%s", val, reason)
 	}
 
@@ -65,7 +65,7 @@ func TestIdentityValidationAndContextBracket(t *testing.T) {
 	matDeleted := mat
 	matDeleted.ExePath = "/usr/bin/DirectSender (deleted)"
 	valDel, reasonDel := ValidateProcessIdentity(key, ev, matDeleted)
-	if reasonDel != ReasonValidated || !valDel.ExeDeleted || valDel.Path != "/usr/bin/directsender" {
+	if reasonDel != ReasonValidated || !valDel.ExeDeleted || valDel.Path != "/usr/bin/DirectSender" {
 		t.Fatalf("unlinked executable validation failed: val=%+v reason=%s", valDel, reasonDel)
 	}
 
@@ -123,7 +123,7 @@ func TestIdentityRegisteredAppImageAndSandboxProofs(t *testing.T) {
 		MountSource: "CoolApp-x86_64.AppImage",
 	})
 	val, reason := ValidateProcessIdentity(key, ev, mat)
-	if reason != ReasonValidated || val.Sandbox != SandboxAppImage || val.AppID != "appimage:coolapp-x86_64" || val.Path != "/opt/apps/coolapp-x86_64.appimage" {
+	if reason != ReasonValidated || val.Sandbox != SandboxAppImage || val.AppID != "appimage:CoolApp-x86_64" || val.Path != "/tmp/.mount_CoolApp123/usr/bin/cool" {
 		t.Fatalf("registered AppImage validation failed: val=%+v reason=%s", val, reason)
 	}
 
@@ -135,7 +135,7 @@ func TestIdentityRegisteredAppImageAndSandboxProofs(t *testing.T) {
 		t.Fatalf("spoofed APPIMAGE env without registered mount got %s, want %s", r, ReasonSandboxUnverified)
 	}
 
-	// 3. Flatpak: /app/bin/foo without verified .flatpak-info fails; with .flatpak-info succeeds.
+	// 3. Flatpak: /app/bin/foo without verified .flatpak-info fails; with .flatpak-info succeeds and preserves case.
 	k3, e3, m3 := validProcessFixture()
 	m3.ExePath = "/app/bin/browser"
 	if _, r := ValidateProcessIdentity(k3, e3, m3); r != ReasonSandboxUnverified {
@@ -146,13 +146,13 @@ func TestIdentityRegisteredAppImageAndSandboxProofs(t *testing.T) {
 		t.Fatalf("unconfined .flatpak-info got %s, want %s", r, ReasonSandboxUnverified)
 	}
 	m3.FlatpakInfoErr = nil
-	appID, err := ParseFlatpakInfo("[Application]\nname=org.mozilla.firefox\n")
+	appID, err := ParseFlatpakInfo("[Application]\nname=org.mozilla.Firefox\n")
 	if err != nil {
 		t.Fatal(err)
 	}
 	m3.FlatpakAppID = appID
 	val3, r3 := ValidateProcessIdentity(k3, e3, m3)
-	if r3 != ReasonValidated || val3.Sandbox != SandboxFlatpak || val3.AppID != "flatpak:org.mozilla.firefox" || val3.Path != "/app/bin/browser" {
+	if r3 != ReasonValidated || val3.Sandbox != SandboxFlatpak || val3.AppID != "flatpak:org.mozilla.Firefox" || val3.Path != "/app/bin/browser" {
 		t.Fatalf("verified Flatpak failed: val=%+v reason=%s", val3, r3)
 	}
 
@@ -177,8 +177,16 @@ func TestIdentityRegisteredAppImageAndSandboxProofs(t *testing.T) {
 		MountSource: "/dev/loop4",
 	})
 	val4, r4 := ValidateProcessIdentity(k4, e4, m4)
-	if r4 != ReasonValidated || val4.Sandbox != SandboxSnap || val4.AppID != "snap:brave" || val4.Path != "brave" {
+	if r4 != ReasonValidated || val4.Sandbox != SandboxSnap || val4.AppID != "snap:brave" || val4.Path != "/snap/brave/240/opt/brave.com/brave/brave" {
 		t.Fatalf("verified Snap failed: val=%+v reason=%s", val4, r4)
+	}
+
+	// 5. Linux native path preserves case sensitivity and normalizes version directories via apppath.Linux.
+	k5, e5, m5 := validProcessFixture()
+	m5.ExePath = "/opt/Example/1.2.3/App"
+	val5, r5 := ValidateProcessIdentity(k5, e5, m5)
+	if r5 != ReasonValidated || val5.Sandbox != SandboxNone || val5.Path != "/opt/Example/1.2.3/App" || val5.AppID != "/opt/Example/*/App" {
+		t.Fatalf("Linux apppath normalization failed: val=%+v reason=%s", val5, r5)
 	}
 }
 
@@ -208,7 +216,7 @@ func TestIdentityRetainedLifecycleAndForkInheritance(t *testing.T) {
 
 	// Forked child of the same app contributing to the same socket cookie does NOT conflict.
 	pktDec := ledger.ResolvePacket(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: key.Cookie}})
-	if pktDec.Status != IdentityKnown || pktDec.Conflicts != 0 || pktDec.Snapshot.AppID != "/usr/bin/directsender" {
+	if pktDec.Status != IdentityKnown || pktDec.Conflicts != 0 || pktDec.Snapshot.AppID != "/usr/bin/DirectSender" {
 		t.Fatalf("same-app fork contribution caused conflict or lost identity: %+v", pktDec)
 	}
 
@@ -242,7 +250,7 @@ func TestIdentitySharedSubmitterAndBudgetBounds(t *testing.T) {
 
 	// Initially cookie 101 is known as App A.
 	dec1 := ledger.ResolvePacket(ReadDecision{Status: ReadCookie, Packet: PacketRecord{Cookie: keyA.Cookie}})
-	if dec1.Status != IdentityKnown || dec1.Snapshot.AppID != "/usr/bin/directsender" {
+	if dec1.Status != IdentityKnown || dec1.Snapshot.AppID != "/usr/bin/DirectSender" {
 		t.Fatalf("expected known App A before shared submitter: %+v", dec1)
 	}
 	ledger.ReleasePacket(dec1.Snapshot)

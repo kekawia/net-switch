@@ -169,12 +169,28 @@ func (r *readySession) step() {
 			r.pending = &d
 		}
 		fresh := !s.closed && n.now().Sub(s.validated) < IdentityMaxAge
-		app := s.owner.AppID
+		sessionOwner := s.owner
+		app := sessionOwner.AppID
 		s.mu.Unlock()
 		if r.pending == nil {
 			break
 		}
 		d := r.pending
+		if validator, ok := n.owners.(platform.ProvenanceDatagramValidator); ok {
+			switch validator.ValidateUDPDatagram(sessionOwner, d.provenance) {
+			case platform.DatagramDrop:
+				n.Dropped.Add(1)
+				n.control.ReleasePending(d.bytes)
+				r.pending = nil
+				continue
+			case platform.DatagramInvalidateOwner:
+				n.Dropped.Add(1)
+				n.control.ReleasePending(d.bytes)
+				r.pending = nil
+				r.finish()
+				return
+			}
+		}
 		if fresh {
 			written, err := r.socket.TryWriteTo(d.payload, d.destination, d.df)
 			if errors.Is(err, platform.ErrWouldBlock) {

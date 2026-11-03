@@ -147,7 +147,7 @@ func (p *Policy) Decide(owner platform.Owner, sourcePort uint16, ipv6 bool, k ui
 	}
 	if lane == "" {
 		lane = p.config.Lines[0].ID
-		if p.config.Combine && sourcePort >= 1024 && p.total != 0 {
+		if p.config.Combine && !owner.Ambiguous && sourcePort >= 1024 && p.total != 0 {
 			position := k * Fibonacci
 			for _, s := range p.slices {
 				if s.last || position < s.end {

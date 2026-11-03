@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -100,13 +102,11 @@ func parseProcStatusCreds(raw string) (uid, gid uint32, err error) {
 // open io_uring instance or runs an io_uring sqpoll/io-wq worker thread.
 func HasAsyncSubmitter(tgid uint32) bool {
 	pidStr := strconv.FormatUint(uint64(tgid), 10)
-	fdEntries, err := os.ReadDir(filepath.Join("/proc", pidStr, "fd"))
-	if err == nil {
-		for _, entry := range fdEntries {
-			target, linkErr := os.Readlink(filepath.Join("/proc", pidStr, "fd", entry.Name()))
-			if linkErr == nil && strings.Contains(target, "[io_uring]") {
-				return true
-			}
+	if mapsFD, err := unix.Open(filepath.Join("/proc", pidStr, "maps"), unix.O_RDONLY|unix.O_CLOEXEC, 0); err == nil {
+		raw, readErr := readBoundedFD(mapsFD, maxProcReadSize)
+		_ = unix.Close(mapsFD)
+		if readErr == nil && bytes.Contains(raw, []byte("[io_uring]")) {
+			return true
 		}
 	}
 	taskEntries, err := os.ReadDir(filepath.Join("/proc", pidStr, "task"))
@@ -122,7 +122,63 @@ func HasAsyncSubmitter(tgid uint32) bool {
 			}
 		}
 	}
+	fdDir, err := unix.Open(filepath.Join("/proc", pidStr, "fd"), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err == nil {
+		dirFile := os.NewFile(uintptr(fdDir), "proc-fd")
+		defer dirFile.Close()
+		var linkBuf [128]byte
+		scanned := 0
+		for {
+			names, readErr := dirFile.Readdirnames(512)
+			for _, name := range names {
+				scanned++
+				if scanned > 8192 {
+					// Fail closed on extreme high-FD processes rather than scanning unboundedly.
+					return true
+				}
+				n, linkErr := unix.Readlinkat(int(dirFile.Fd()), name, linkBuf[:])
+				if linkErr == nil && n > 0 && bytes.Contains(linkBuf[:n], []byte("[io_uring]")) {
+					return true
+				}
+			}
+			if errors.Is(readErr, io.EOF) || readErr != nil || len(names) == 0 {
+				break
+			}
+		}
+	}
 	return false
+}
+
+// IsActorIncarnationAlive reports whether ctx still matches the live, non-zombie
+// process incarnation at /proc/<TGID>.
+func IsActorIncarnationAlive(ctx ExecutionContext) bool {
+	if ctx.TGID == 0 {
+		return false
+	}
+	pidStr := strconv.FormatUint(uint64(ctx.TGID), 10)
+	statBytes, err := os.ReadFile(filepath.Join("/proc", pidStr, "stat"))
+	if err != nil {
+		return false
+	}
+	startTicks, kthread, err := parseProcStat(string(statBytes))
+	if err != nil {
+		return false
+	}
+	if ctx.StartTicks != 0 && startTicks != ctx.StartTicks {
+		return false
+	}
+	if kthread != ctx.KernelThread {
+		return false
+	}
+	if ctx.KernelThread {
+		return true
+	}
+	var exeSt unix.Stat_t
+	if err := unix.Stat(filepath.Join("/proc", pidStr, "exe"), &exeSt); err != nil {
+		return false
+	}
+	dev := EncodeKernelDev(unix.Major(uint64(exeSt.Dev)), unix.Minor(uint64(exeSt.Dev)))
+	return dev == ctx.ExeDev && exeSt.Ino == ctx.ExeIno
 }
 
 // SampleExecutionContext reads one execution-context point sample from /proc/<tgid>.
@@ -374,5 +430,99 @@ func (l *IdentityLedger) SyncActorRecords(records map[ActorKey]ActorEvidence, pr
 			continue
 		}
 		l.EnrichActor(k, ev, mat)
+	}
+}
+
+// SyncQueuedActors processes newly popped O(1) BPF actor-send events, tracking
+// socket-to-actor references for bounded retirement on SOCK_DESTROY and
+// memoizing async-submitter probes per TGID within the batch.
+func (rt *ProvenanceRuntime) SyncQueuedActors(events []QueuedActorEvent) {
+	if rt == nil || len(events) == 0 {
+		return
+	}
+	observedAt := time.Now()
+	sorted := make([]QueuedActorEvent, len(events))
+	copy(sorted, events)
+	sort.Slice(sorted, func(i, j int) bool {
+		a, b := sorted[i].Key, sorted[j].Key
+		if a.Cookie != b.Cookie {
+			return a.Cookie < b.Cookie
+		}
+		if a.TGID != b.TGID {
+			return a.TGID < b.TGID
+		}
+		if a.Start != b.Start {
+			return a.Start < b.Start
+		}
+		return a.Exec < b.Exec
+	})
+
+	maxExecByPID := make(map[pidIncarnation]uint64, len(sorted))
+	for _, item := range sorted {
+		inc := pidIncarnation{tgid: item.Key.TGID, start: item.Key.Start}
+		if item.Key.Exec > maxExecByPID[inc] {
+			maxExecByPID[inc] = item.Key.Exec
+		}
+	}
+
+	asyncByTGID := make(map[uint32]bool)
+	hasAsync := func(tgid uint32) bool {
+		if v, ok := asyncByTGID[tgid]; ok {
+			return v
+		}
+		v := HasAsyncSubmitter(tgid)
+		asyncByTGID[tgid] = v
+		return v
+	}
+
+	if rt.ActiveActorCount() >= (DefaultEngineMaxSnapshots*3)/4 {
+		rt.ReapExitedUnreferencedActors()
+	}
+
+	rt.SyncActors(func(l *IdentityLedger, processed map[ActorKey]bool, track func(ActorKey, ActorIdentityKey, time.Time)) {
+		for _, item := range sorted {
+			k := item.Key
+			ev := item.Evidence
+			if processed[k] {
+				continue
+			}
+			processed[k] = true
+			actorKey := ActorIdentityKey{TGID: k.TGID, StartBoottime: k.Start, ExecID: k.Exec}
+			track(k, actorKey, observedAt)
+			if _, ok := l.actors[actorKey]; ok {
+				if hasAsync(k.TGID) {
+					l.ObserveUnobservableSubmitter(k.Cookie)
+					continue
+				}
+				l.ObserveWarmSend(k, ev)
+				continue
+			}
+			liveExec := maxExecByPID[pidIncarnation{tgid: k.TGID, start: k.Start}]
+			mat, err := SampleProcessMaterial(k.TGID, k.Start, liveExec)
+			if err != nil {
+				if os.IsNotExist(err) || errors.Is(err, unix.ENOENT) || errors.Is(err, unix.ESRCH) {
+					l.ObserveColdUnretained(k, ev)
+					continue
+				}
+				l.recordFailureMetric(ReasonContextChanged)
+				l.applyContributor(k.Cookie, actorKey, nil, ReasonContextChanged)
+				continue
+			}
+			l.EnrichActor(k, ev, mat)
+		}
+	})
+}
+
+// ReapExitedUnreferencedActors releases retained snapshots whose sockets and
+// queued packets have all retired and whose process incarnation is no longer live.
+func (rt *ProvenanceRuntime) ReapExitedUnreferencedActors() {
+	for _, ctx := range rt.UnreferencedActorContexts() {
+		if !IsActorIncarnationAlive(ctx) {
+			rt.ReleaseActorIfUnreferenced(ActorIdentityKey{
+				TGID:          ctx.TGID,
+				StartBoottime: ctx.StartBoottime,
+				ExecID:        ctx.ExecID,
+			})
+		}
 	}
 }

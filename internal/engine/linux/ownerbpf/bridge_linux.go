@@ -49,14 +49,22 @@ type Bridge struct {
 	VerifierStats                                             map[string]string
 	Collection                                                *ebpf.Collection
 	config                                                    BridgeConfig
+	expectedQueue, packetSlots                                uint64
 	links                                                     []link.Link
 	slots, health                                             []byte
 	mu                                                        sync.Mutex
 	activeReads                                               sync.WaitGroup
 	readers                                                   [ReaderLimit]bool
 	next                                                      uint64
-	stopped                                                                bool
+	stopped                                                   bool
 	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord, ReadUnknown atomic.Uint64
+}
+
+func (b *Bridge) PacketSlots() uint64 {
+	if b == nil {
+		return 0
+	}
+	return b.packetSlots
 }
 
 func actualOnlineCPUCount() (uint32, error) {
@@ -108,7 +116,7 @@ func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
 	if err != nil {
 		return nil, loadError("bridge verifier/load", err)
 	}
-	b := &Bridge{Collection: c, config: cfg, VerifierStats: make(map[string]string)}
+	b := &Bridge{Collection: c, config: cfg, expectedQueue: 500, packetSlots: PacketSlots, VerifierStats: make(map[string]string)}
 	defer func() {
 		if err != nil {
 			_ = b.closeObjects()
@@ -171,6 +179,102 @@ func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
 		b.links = append(b.links, l)
 	}
 	// Terminals precede capture. Reverse close detaches capture first.
+	for _, a := range [][2]string{{"consume", "consume_skb"}, {"freed", "kfree_skb"}, {"capture", "net_dev_start_xmit"}} {
+		l, e := link.AttachRawTracepoint(link.RawTracepointOptions{Name: a[1], Program: c.Programs[a[0]]})
+		if e != nil {
+			return nil, fmt.Errorf("raw_tracepoint/%s: %w", a[1], e)
+		}
+		b.links = append(b.links, l)
+	}
+	return b, nil
+}
+
+// LoadEngineBridge loads the embedded production bridge collection sized to
+// P = next_power_of_two(actualQueue+onlineCPUs+ReaderLimit+32), omitting the
+// tracefs-dependent fixture perf_consume program so it operates under CAP_BPF
+// and CAP_PERFMON inside a confined systemd unit without CAP_SYS_ADMIN.
+func LoadEngineBridge(ifindex, netns uint32, epoch, actualQueue uint64) (_ *Bridge, err error) {
+	onlineCount, err := actualOnlineCPUCount()
+	if err != nil {
+		return nil, err
+	}
+	if epoch == 0 || ifindex == 0 || netns == 0 || actualQueue == 0 {
+		return nil, errors.New("invalid engine bridge configuration")
+	}
+	spec, packetSlots, err := PrepareEngineBridgeSpec(actualQueue, uint64(onlineCount), ReaderLimit)
+	if err != nil {
+		return nil, err
+	}
+	cfg := BridgeConfig{
+		ABI:     ProvenanceABI,
+		Enabled: 0,
+		Epoch:   epoch,
+		Ifindex: ifindex,
+		NetNS:   netns,
+		CPUs:    onlineCount,
+		Readers: ReaderLimit,
+	}
+	c, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{Programs: ebpf.ProgramOptions{
+		LogLevel: ebpf.LogLevelBranch | ebpf.LogLevelStats, LogSizeStart: 64 << 10,
+	}})
+	if err != nil {
+		return nil, loadError("engine bridge verifier/load", err)
+	}
+	b := &Bridge{
+		Collection:    c,
+		config:        cfg,
+		expectedQueue: actualQueue,
+		packetSlots:   packetSlots,
+		VerifierStats: make(map[string]string),
+	}
+	defer func() {
+		if err != nil {
+			_ = b.closeObjects()
+		}
+	}()
+	for name, program := range c.Programs {
+		for _, line := range strings.Split(program.VerifierLog, "\n") {
+			if line = strings.TrimSpace(line); strings.HasPrefix(line, "processed ") {
+				b.VerifierStats[name] = strings.Clone(line)
+			}
+		}
+		if b.VerifierStats[name] == "" {
+			return nil, fmt.Errorf("verifier statistics missing for %s", name)
+		}
+		program.VerifierLog = ""
+	}
+	if err = c.Maps["config"].Update(uint32(0), cfg, ebpf.UpdateAny); err != nil {
+		return nil, err
+	}
+	b.slots, err = unix.Mmap(c.Maps["read_slots"].FD(), 0, os.Getpagesize(), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_SHARED)
+	if err != nil {
+		return nil, err
+	}
+	b.health, err = unix.Mmap(c.Maps["health"].FD(), 0, os.Getpagesize(), unix.PROT_READ, unix.MAP_SHARED)
+	if err != nil {
+		return nil, err
+	}
+	root, err := os.Open("/sys/fs/cgroup")
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	var fs unix.Statfs_t
+	if err = unix.Fstatfs(int(root.Fd()), &fs); err != nil {
+		return nil, err
+	}
+	if fs.Type != unix.CGROUP2_SUPER_MAGIC {
+		return nil, errors.New("bridge requires cgroup2 root")
+	}
+	l, err := link.AttachRawLink(link.RawLinkOptions{
+		Target:  int(root.Fd()),
+		Program: c.Programs["init_egress_cookie"],
+		Attach:  ebpf.AttachCGroupInetEgress,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("root cgroup link: %w", err)
+	}
+	b.links = append(b.links, l)
 	for _, a := range [][2]string{{"consume", "consume_skb"}, {"freed", "kfree_skb"}, {"capture", "net_dev_start_xmit"}} {
 		l, e := link.AttachRawTracepoint(link.RawTracepointOptions{Name: a[1], Program: c.Programs[a[0]]})
 		if e != nil {
@@ -269,15 +373,19 @@ func (b *Bridge) Sample() (out [3]CounterSample, err error) {
 func (b *Bridge) Enable(actualQueue uint64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.stopped || actualQueue != 500 {
-		return errors.New("bridge stopped or queue readback differs from proof queue 500")
+	if b.stopped || actualQueue == 0 || actualQueue != b.expectedQueue {
+		return fmt.Errorf("bridge stopped or queue readback %d differs from expected queue %d", actualQueue, b.expectedQueue)
 	}
 	onlineCount, err := actualOnlineCPUCount()
 	if err != nil {
 		return err
 	}
-	if err := ValidateProofCapacity(actualQueue, uint64(onlineCount), ReaderLimit); err != nil {
+	reqSlots, err := RequiredPacketSlots(actualQueue, uint64(onlineCount), ReaderLimit)
+	if err != nil {
 		return err
+	}
+	if reqSlots > b.packetSlots {
+		return fmt.Errorf("provenance queue requires %d packet slots, exceeding allocated %d", reqSlots, b.packetSlots)
 	}
 	b.config.Enabled = 1
 	return b.Collection.Maps["config"].Update(uint32(0), b.config, ebpf.UpdateAny)
@@ -462,6 +570,133 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 		return frames, errors.Join(ErrEpochRebuild, sampleErr, readFailure)
 	}
 	return frames, nil
+}
+
+// ReadBurstInto reads up to min(len(rawBufs), len(sizes), len(decisions)) raw
+// TUN frames into preallocated buffers without per-packet heap allocations,
+// applying the same locked-thread arm/disarm bracket, hardware barrier, and
+// three recursion-counter certification queries as ReadBurst.
+func (r *BridgeReader) ReadBurstInto(fd int, rawBufs [][]byte, sizes []int, decisions []ReadDecision) (int, error) {
+	return r.readBurstInto(fd, rawBufs, sizes, decisions, unix.Read)
+}
+
+func (r *BridgeReader) readBurstInto(fd int, rawBufs [][]byte, sizes []int, decisions []ReadDecision, read func(int, []byte) (int, error)) (int, error) {
+	var started time.Time
+	if r.Measure {
+		started = time.Now()
+		defer func() { r.LastHold = time.Since(started) }()
+	}
+	limit := min(len(rawBufs), min(len(sizes), len(decisions)))
+	if r.closed || uint32(unix.Gettid()) != r.key.TID || limit < 1 || limit > BurstLimit {
+		return 0, errors.New("invalid reader thread/burst bound")
+	}
+	b := r.b
+	b.mu.Lock()
+	stopped := b.stopped
+	if !stopped {
+		b.activeReads.Add(1)
+	}
+	b.mu.Unlock()
+	if stopped {
+		return 0, fmt.Errorf("%w: reader publication gate already stopped", ErrEpochRebuild)
+	}
+	defer b.activeReads.Done()
+
+	count := 0
+	var readFailure error
+	for count < limit {
+		if health := b.Faults(); health != 0 || r.sequence == ^uint64(0) {
+			readFailure = fmt.Errorf("%w: before syscall health=%d sequence=%d", ErrEpochRebuild, health, r.sequence)
+			break
+		}
+		buf := rawBufs[count]
+		if len(buf) == 0 {
+			readFailure = errors.New("empty burst buffer")
+			break
+		}
+		r.sequence++
+		r.slot.Completion = ReadCompletion{}
+		r.slot.Packet = PacketRecord{}
+		r.slot.Control = ReadControl{ABI: ProvenanceABI, Registration: r.reg.Generation, Epoch: r.reg.Epoch, Sequence: r.sequence}
+		atomic.StoreUint64(&r.slot.Control.Armed, 1)
+		n, e := read(fd, buf)
+		atomic.StoreUint64(&r.slot.Control.Armed, 0)
+		_ = atomic.LoadUint64(&r.slot.Completion.Count)
+		snapshot := *r.slot
+		if r.reg.Flags == 0 && snapshot.Completion.Count != 0 {
+			if err := b.Collection.Maps["readers"].Lookup(r.key, &r.reg); err != nil {
+				readFailure = err
+				break
+			}
+		}
+		decision := CheckRead(
+			ReadBinding{Slot: r.reg.Slot, Ifindex: r.reg.Ifindex, NetNS: r.reg.NetNS, Registration: r.reg.Generation, Epoch: r.reg.Epoch, Sequence: r.sequence},
+			r.reg, snapshot, n, e, b.Faults(),
+		)
+		if n > 0 && e == nil {
+			sizes[count] = n
+			decisions[count] = decision
+			count++
+			switch decision.Status {
+			case ReadMissing:
+				b.DeliveredWithoutRecord.Add(1)
+			case ReadUnknown:
+				b.ReadUnknown.Add(1)
+			}
+		}
+		if decision.Rebuild {
+			readFailure = errors.Join(ErrEpochRebuild, e)
+			break
+		}
+		if errors.Is(e, unix.EAGAIN) || errors.Is(e, unix.EINTR) {
+			break
+		}
+		if e != nil {
+			readFailure = e
+			break
+		}
+		if n == 0 {
+			break
+		}
+	}
+
+	valid := true
+	var sampleErr error
+	if !r.SkipPostCheck && (count > 0 || readFailure != nil) {
+		var sampleStart time.Time
+		if r.Measure {
+			sampleStart = time.Now()
+		}
+		burstBarrier()
+		var after [3]CounterSample
+		after, sampleErr = b.Sample()
+		if r.Measure {
+			r.LastSample = time.Since(sampleStart)
+		}
+		valid = r.guard.Certify(after, sampleErr)
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !valid {
+		b.UnknownRecursion.Add(1)
+		b.AffectedPackets.Add(uint64(count))
+		for i := 0; i < count; i++ {
+			if decisions[i].Status != ReadMissing {
+				decisions[i] = ReadDecision{Status: "attribution_unknown_recursion", Rebuild: true}
+			}
+		}
+	}
+	if !valid || b.Faults() != 0 || readFailure != nil || b.stopped {
+		b.stopped = true
+		for i := 0; i < count; i++ {
+			if decisions[i].Status == ReadCookie {
+				decisions[i] = ReadDecision{Status: ReadEpochFault, Rebuild: true}
+			}
+		}
+		return count, errors.Join(ErrEpochRebuild, sampleErr, readFailure)
+	}
+	return count, nil
 }
 
 // Publish fences old reader batches against another reader's stop. The callback

@@ -11,6 +11,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified by Net Switch, 2026-11-02: retain immutable packet provenance across clones and fragment reassembly.
+
 package stack
 
 import (
@@ -177,6 +179,10 @@ type PacketBuffer struct {
 	// onRelease is a function to be run when the packet buffer is no longer
 	// referenced (released back to the pool).
 	onRelease func() `state:"nosave"`
+
+	// NetSwitchProvenance retains an immutable caller-owned provenance envelope
+	// across clones, deep copies, and receive-side fragment reassembly.
+	NetSwitchProvenance any `state:"nosave"`
 }
 
 // NewPacketBuffer creates a new PacketBuffer with opts.
@@ -405,6 +411,7 @@ func (pk *PacketBuffer) Clone() *PacketBuffer {
 	newPk.RXChecksumValidated = pk.RXChecksumValidated
 	newPk.NetworkPacketInfo = pk.NetworkPacketInfo
 	newPk.tuple = pk.tuple
+	newPk.NetSwitchProvenance = pk.NetSwitchProvenance
 	newPk.InitRefs()
 	return newPk
 }
@@ -447,6 +454,7 @@ func (pk *PacketBuffer) CloneToInbound() *PacketBuffer {
 	newPk.reserved = pk.AvailableHeaderBytes()
 	newPk.Mark = pk.Mark
 	newPk.tuple = pk.tuple
+	newPk.NetSwitchProvenance = pk.NetSwitchProvenance
 	return newPk
 }
 
@@ -483,6 +491,7 @@ func (pk *PacketBuffer) DeepCopyForForwarding(reservedHeaderBytes int) *PacketBu
 	newPk.tuple = pk.tuple
 	newPk.Mark = pk.Mark
 	newPk.InputNICID = pk.InputNICID
+	newPk.NetSwitchProvenance = pk.NetSwitchProvenance
 
 	return newPk
 }
@@ -697,8 +706,48 @@ func (d PacketData) MergeBuffer(b *buffer.Buffer) {
 // MergeFragment appends the data portion of frag to dst. It modifies
 // frag and frag should not be used again.
 func MergeFragment(dst, frag *PacketBuffer) {
+	dst.NetSwitchProvenance = MergeNetSwitchProvenance(dst.NetSwitchProvenance, frag.NetSwitchProvenance)
 	frag.buf.TrimFront(int64(frag.dataOffset()))
 	dst.buf.Merge(&frag.buf)
+}
+
+// NetSwitchProvenanceMerger conservatively merges receive-side fragment
+// provenance envelopes.
+type NetSwitchProvenanceMerger interface {
+	MergeNetSwitchProvenance(other any) any
+}
+
+// NetSwitchMissingProvenanceProvider supplies the conservative unknown
+// provenance envelope when one fragment carries provenance and a peer
+// fragment has nil provenance.
+type NetSwitchMissingProvenanceProvider interface {
+	NetSwitchMissingProvenance() any
+}
+
+// MergeNetSwitchProvenance combines two fragment provenance envelopes
+// conservatively. When only one fragment carries provenance, it degrades to
+// NetSwitchMissingProvenance() if implemented so a missing fragment never
+// inherits another fragment's known owner.
+func MergeNetSwitchProvenance(a, b any) any {
+	if a == nil && b == nil {
+		return nil
+	}
+	if a == nil {
+		if p, ok := b.(NetSwitchMissingProvenanceProvider); ok {
+			return p.NetSwitchMissingProvenance()
+		}
+		return nil
+	}
+	if b == nil {
+		if p, ok := a.(NetSwitchMissingProvenanceProvider); ok {
+			return p.NetSwitchMissingProvenance()
+		}
+		return nil
+	}
+	if m, ok := a.(NetSwitchProvenanceMerger); ok {
+		return m.MergeNetSwitchProvenance(b)
+	}
+	return nil
 }
 
 // ReadFrom moves at most count bytes from the beginning of src to the end
