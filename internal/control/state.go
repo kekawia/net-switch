@@ -82,6 +82,11 @@ func (c *Core) outrankingLocked() (map[string]any, []map[string]any) {
 	return main, others
 }
 func baseName(path string) string {
+	for _, prefix := range []string{"flatpak:", "snap:", "appimage:"} {
+		if strings.HasPrefix(path, prefix) {
+			return strings.TrimPrefix(path, prefix)
+		}
+	}
 	path = strings.ReplaceAll(path, "/", `\`)
 	parts := strings.Split(path, `\`)
 	name := parts[len(parts)-1]
@@ -90,21 +95,29 @@ func baseName(path string) string {
 	}
 	return name
 }
-func (c *Core) describeLocked(path string) map[string]any {
-	key := apps.AppKey(path)
-	name := baseName(path)
+func (c *Core) describeLocked(path, identity string) map[string]any {
+	target := path
+	if identity != "" {
+		target = identity
+	}
+	key := c.appKey(target)
+	name := baseName(target)
+	if name == "" {
+		name = baseName(path)
+	}
+	windowsServices := c.pathRules().Separator == `\` && key == `c:\windows\system32\svchost.exe`
 	switchable, reconnectable := true, true
 	if key == "unknown" {
 		name = "Unknown app"
 		switchable = false
 		reconnectable = false
-	} else if key == `c:\windows\system32\svchost.exe` {
+	} else if windowsServices {
 		name = "Windows services"
 		reconnectable = false
 	}
 	info := c.info[key]
-	c.queueInfoLocked([]string{path})
-	if v := js.Text(info["name"]); v != "" && key != `c:\windows\system32\svchost.exe` {
+	c.queueInfoLocked([]string{target})
+	if v := js.Text(info["name"]); v != "" && !windowsServices {
 		name = v
 	}
 	return map[string]any{"name": name, "hasIcon": js.Truth(info["icon"]), "switchable": switchable, "reconnectable": reconnectable}
@@ -209,8 +222,8 @@ func (c *Core) State() map[string]any {
 			candidates = append(candidates, map[string]any{"alias": a["alias"], "label": lines.LineLabel(a), "kind": a["kind"], "ssid": ssid})
 		}
 	}
-	for _, a := range apps.MergeRows(c.tracker.Snapshot(c.pinsLocked()), c.outside, c.pinsLocked()) {
-		row := c.describeLocked(a.Path)
+	for _, a := range apps.MergeRowsWith(c.tracker.Snapshot(c.pinsLocked()), c.outside, c.pinsLocked(), c.pathRules()) {
+		row := c.describeLocked(a.Path, a.Identity)
 		row["key"] = a.Key
 		row["path"] = a.Path
 		row["line"] = a.Line
@@ -226,8 +239,12 @@ func (c *Core) State() map[string]any {
 			row["identity"] = a.Identity
 		}
 		if a.Line != nil {
+			trackedIdentity := a.Identity
+			if trackedIdentity == "" && c.pathRules().Separator == "/" {
+				trackedIdentity = c.trackedSandboxAtPathLocked(a.Path)
+			}
 			for _, p := range c.pinsLocked() {
-				if apps.AppKey(p.Path) == a.Key && apps.PinNeedsReselection(p, a.Identity) {
+				if c.appKey(p.Path) == a.Key && apps.PinNeedsReselection(p, trackedIdentity) {
 					row["pinNeedsReselection"] = true
 				}
 			}

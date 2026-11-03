@@ -159,7 +159,7 @@ func TestLinuxWatcherStepsAndCookieIdentity(t *testing.T) {
 		},
 	}
 	ownersMap := map[uint32]procOwner{
-		11: {pid: 50, start: 777, path: "/usr/bin/curl"},
+		11: {pid: 50, start: 777, path: "/app/bin/game", appID: "flatpak:org.example.Game"},
 		12: {pid: 60, start: 888, path: "/opt/netswitch/NETSWITCH-ENGINE"},
 		13: {pid: 70, start: 999, path: "/opt/netswitch/netswitch-engine"},
 	}
@@ -201,7 +201,7 @@ func TestLinuxWatcherStepsAndCookieIdentity(t *testing.T) {
 		t.Fatalf("tick 0 line: %+v", line)
 	}
 	first := line.Outside[0]
-	if first.PID != 50 || first.Path != "/usr/bin/curl" || first.ProcessStarted != "777:101" ||
+	if first.PID != 50 || first.Path != "/app/bin/game" || first.AppID != "flatpak:org.example.Game" || first.ProcessStarted != "777:101" ||
 		first.Created != "2026-11-03T12:00:00.1234567Z" || first.Down == nil || *first.Down != 5000 || *first.Up != 300 {
 		t.Fatalf("tick 0 first entry: %+v", first)
 	}

@@ -449,6 +449,54 @@ func readAppImageEnvAndBacking(tgid uint32) (appImageEnv, appDirEnv string, back
 	return appImageEnv, appDirEnv, nil
 }
 
+// InspectLiveProcessAppID resolves the verified engine identity for a live
+// process incarnation holding a pre-existing outside socket. If the process
+// incarnation changes during sampling or sandbox verification fails, it returns
+// "", leaving the caller with unattributed path fallback rather than guessing a
+// shared sandbox identity.
+func InspectLiveProcessAppID(tgid uint32, startTicks uint64, rawExe string) string {
+	if tgid == 0 || startTicks == 0 {
+		return ""
+	}
+	rawExe = strings.TrimSpace(strings.TrimSuffix(rawExe, " (deleted)"))
+	if rawExe == "" || !strings.HasPrefix(rawExe, "/") {
+		return ""
+	}
+	cleanExe := path.Clean(rawExe)
+	pidStr := strconv.FormatUint(uint64(tgid), 10)
+	devBefore, inoBefore, err := statExeIdentity(pidStr)
+	if err != nil || inoBefore == 0 {
+		return ""
+	}
+	mountBytes, err := os.ReadFile(filepath.Join("/proc", pidStr, "mountinfo"))
+	if err != nil {
+		return ""
+	}
+	mounts, rootBefore, err := ParseMountInfo(string(mountBytes))
+	if err != nil || rootBefore <= 0 {
+		return ""
+	}
+	flatpakID, flatpakErr := readConfinedFlatpakInfo(tgid)
+	appImgEnv, appDirEnv, backing := readAppImageEnvAndBacking(tgid)
+	statAfterBytes, err := os.ReadFile(filepath.Join("/proc", pidStr, "stat"))
+	if err != nil {
+		return ""
+	}
+	afterTicks, kthread, err := parseProcStat(string(statAfterBytes))
+	if err != nil || kthread || afterTicks != startTicks {
+		return ""
+	}
+	devAfter, inoAfter, err := statExeIdentity(pidStr)
+	if err != nil || devAfter != devBefore || inoAfter != inoBefore {
+		return ""
+	}
+	_, appID, ok := resolveSandboxIdentity(cleanExe, flatpakID, flatpakErr, mounts, devBefore, appImgEnv, appDirEnv, backing)
+	if !ok {
+		return ""
+	}
+	return appID
+}
+
 // SampleProcessMaterial collects a bracketed before/after /proc sample along
 // with confined Flatpak, Snap and Registered-AppImage verification material.
 func SampleProcessMaterial(tgid uint32, startBoottime, execID uint64) (RawProcessMaterial, error) {

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/apppath"
+	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/platform"
 	linuxplatform "github.com/AyoubAchour/net-switch/internal/platform/linux"
 	"github.com/AyoubAchour/net-switch/internal/platform/worker"
@@ -207,8 +209,10 @@ func DesktopCall(_ context.Context, op string, args map[string]any) (any, error)
 					hidden = hidden || line == "Hidden=true" || line == "NoDisplay=true"
 				}
 				f.Close()
-				if !hidden && name != "" && command != "" {
-					list = append(list, map[string]any{"name": name, "path": strings.Fields(command)[0], "key": filepath.Base(path)})
+				fields := strings.Fields(command)
+				if !hidden && name != "" && len(fields) > 0 {
+					execPath := fields[0]
+					list = append(list, map[string]any{"name": name, "path": execPath, "key": apps.AppKeyWith(execPath, apppath.Linux)})
 				}
 			}
 		}

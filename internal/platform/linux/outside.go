@@ -180,6 +180,7 @@ type procOwner struct {
 	pid   uint32
 	start uint64
 	path  string
+	appID string
 }
 
 type linuxSource struct {
@@ -263,6 +264,9 @@ func newLinuxWatcher(engine string, src linuxSource) *outside.Watcher[diagSocket
 		},
 		ProcessPath: func(pid uint32) string {
 			return ownersByPID[pid].path
+		},
+		ProcessAppID: func(pid uint32) string {
+			return ownersByPID[pid].appID
 		},
 		ProcessStart: func(pid uint32, row *diagSocket) string {
 			o := ownersByPID[pid]

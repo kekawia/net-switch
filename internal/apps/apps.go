@@ -15,7 +15,24 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/apppath"
 )
 
-func AppKey(path string) string     { return apppath.Key(path) }
+func defaultRules(rules apppath.Rules) apppath.Rules {
+	if rules.Separator == "" {
+		return apppath.Windows
+	}
+	return rules
+}
+
+func AppKey(path string) string { return apppath.Key(path) }
+func AppKeyWith(value string, rules apppath.Rules) string {
+	if value == "" {
+		return "unknown"
+	}
+	rules = defaultRules(rules)
+	if rules.Separator == "/" && SandboxIdentity(value) {
+		return value
+	}
+	return apppath.KeyWith(value, rules)
+}
 func LineOutbound(id string) string { return "line-" + id }
 func LaneSelector(id string) string { return "lane-" + id }
 
@@ -118,10 +135,14 @@ func ParsePins(data []byte) (Pins, error) {
 	return result, nil
 }
 func (pins Pins) normalized() ([]string, map[string]Pin) {
+	return pins.NormalizedWith(apppath.Windows)
+}
+func (pins Pins) NormalizedWith(rules apppath.Rules) ([]string, map[string]Pin) {
+	rules = defaultRules(rules)
 	order := []string{}
 	result := map[string]Pin{}
 	for _, pin := range pins {
-		key := AppKey(pin.Path)
+		key := AppKeyWith(pin.Path, rules)
 		if _, ok := result[key]; !ok {
 			order = append(order, key)
 		}
@@ -227,6 +248,7 @@ type app struct {
 }
 type Tracker struct {
 	IdleKeepMS int64
+	rules      apppath.Rules
 	previous   map[string]Rate
 	items      map[string]*app
 	order      []string
@@ -235,12 +257,16 @@ type Tracker struct {
 }
 
 func NewTracker(options ...int64) *Tracker {
+	return NewTrackerWithRules(apppath.Windows, options...)
+}
+func NewTrackerWithRules(rules apppath.Rules, options ...int64) *Tracker {
 	idleKeepMS := int64(10 * 60000)
 	if len(options) > 0 {
 		idleKeepMS = options[0]
 	}
-	return &Tracker{IdleKeepMS: idleKeepMS, previous: map[string]Rate{}, items: map[string]*app{}, order: []string{}, LineRates: map[string]Rate{}}
+	return &Tracker{IdleKeepMS: idleKeepMS, rules: defaultRules(rules), previous: map[string]Rate{}, items: map[string]*app{}, order: []string{}, LineRates: map[string]Rate{}}
 }
+func (t *Tracker) trackerRules() apppath.Rules { return defaultRules(t.rules) }
 func (t *Tracker) Reset() {
 	t.previous = map[string]Rate{}
 	for _, a := range t.items {
@@ -264,9 +290,13 @@ func (t *Tracker) Ingest(connections []Connection, now int64) {
 	perApp := map[string]*app{}
 	order := []string{}
 	lineBytes := map[string]Rate{}
+	rules := t.trackerRules()
 	for _, c := range connections {
 		path := c.Metadata.ProcessPath
-		key := AppKey(path)
+		key := AppKeyWith(path, rules)
+		if rules.Separator == "/" && c.AppID != "" {
+			key = AppKeyWith(c.AppID, rules)
+		}
 		line := "unknown"
 		if id := ConnectionLine(&c); id != nil {
 			line = *id
@@ -363,6 +393,17 @@ func (t *Tracker) IdentityOf(key string) string {
 	return ""
 }
 
+// SandboxAtPath returns a tracked sandbox identity seen at pathKey, if any.
+func (t *Tracker) SandboxAtPath(pathKey string) string {
+	rules := t.trackerRules()
+	for _, key := range t.order {
+		if a := t.items[key]; a != nil && a.Identity != "" && AppKeyWith(a.Path, rules) == pathKey {
+			return a.Identity
+		}
+	}
+	return ""
+}
+
 func row(key string, a *app, pin *Pin) Row {
 	r := Row{Key: key, Path: a.Path, Identity: a.Identity, Rate: total(a.Lines, a.LineOrder), LineDown: map[string]float64{}, SortScore: a.SortScore, Connections: map[string]int{}}
 	if pin != nil {
@@ -378,7 +419,8 @@ func row(key string, a *app, pin *Pin) Row {
 	return r
 }
 func (t *Tracker) Snapshot(pins Pins) []Row {
-	order, normalized := pins.normalized()
+	rules := t.trackerRules()
+	order, normalized := pins.NormalizedWith(rules)
 	result := []Row{}
 	shown := map[string]bool{}
 	for _, key := range t.order {
@@ -389,9 +431,10 @@ func (t *Tracker) Snapshot(pins Pins) []Row {
 		} else if a.Identity != "" {
 			// A sandbox pin is stored under the engine's identity, not the
 			// shared path; it belongs to the tracked app with that identity.
-			if p, ok := normalized[AppKey(a.Identity)]; ok {
+			idKey := AppKeyWith(a.Identity, rules)
+			if p, ok := normalized[idKey]; ok {
 				pin = &p
-				shown[AppKey(a.Identity)] = true
+				shown[idKey] = true
 			}
 		}
 		result = append(result, row(key, a, pin))
@@ -399,7 +442,11 @@ func (t *Tracker) Snapshot(pins Pins) []Row {
 	for _, key := range order {
 		if t.items[key] == nil && !shown[key] {
 			p := normalized[key]
-			result = append(result, row(key, &app{Path: p.Path}, &p))
+			idle := &app{Path: p.Path}
+			if rules.Separator == "/" && SandboxIdentity(p.Path) {
+				idle.Identity = p.Path
+			}
+			result = append(result, row(key, idle, &p))
 		}
 	}
 	return result
@@ -426,6 +473,7 @@ func (t *Tracker) ConnectionIDsOffLine(key, line string) []string {
 type OutsideSample struct {
 	ID            string   `json:"id"`
 	Path          string   `json:"path"`
+	AppID         string   `json:"appId,omitempty"`
 	Line          string   `json:"line"`
 	Down          *float64 `json:"down"`
 	Up            *float64 `json:"up"`
@@ -436,7 +484,7 @@ type OutsideID struct {
 	Line string
 }
 type OutsideApp struct {
-	Key, Path               string
+	Key, Path, Identity     string
 	Lines                   map[string]Rate
 	LineOrder               []string
 	Connections             int
@@ -452,13 +500,19 @@ type OutsideRow struct {
 	Rate          *Rate          `json:"rate"`
 }
 type OutsideTracker struct {
+	rules    apppath.Rules
 	previous map[string]Rate
 	items    map[string]*OutsideApp
 	order    []string
 	lastAt   *int64
 }
 
-func NewOutsideTracker() *OutsideTracker { o := &OutsideTracker{}; o.Reset(); return o }
+func NewOutsideTracker() *OutsideTracker { return NewOutsideTrackerWithRules(apppath.Windows) }
+func NewOutsideTrackerWithRules(rules apppath.Rules) *OutsideTracker {
+	o := &OutsideTracker{rules: defaultRules(rules)}
+	o.Reset()
+	return o
+}
 func (o *OutsideTracker) Reset() {
 	o.previous = map[string]Rate{}
 	o.items = map[string]*OutsideApp{}
@@ -466,6 +520,15 @@ func (o *OutsideTracker) Reset() {
 	o.lastAt = nil
 }
 func (o *OutsideTracker) Get(key string) *OutsideApp { return o.items[key] }
+func (o *OutsideTracker) SandboxAtPath(pathKey string) string {
+	rules := defaultRules(o.rules)
+	for _, key := range o.order {
+		if a := o.items[key]; a != nil && a.Identity != "" && AppKeyWith(a.Path, rules) == pathKey {
+			return a.Identity
+		}
+	}
+	return ""
+}
 func (o *OutsideTracker) Entries() []*OutsideApp {
 	result := []*OutsideApp{}
 	for _, key := range o.order {
@@ -481,13 +544,20 @@ func (o *OutsideTracker) Ingest(samples []OutsideSample, now int64) {
 	next := map[string]Rate{}
 	items := map[string]*OutsideApp{}
 	order := []string{}
+	rules := defaultRules(o.rules)
 	for _, s := range samples {
-		key := AppKey(s.Path)
+		key := AppKeyWith(s.Path, rules)
+		if rules.Separator == "/" && s.AppID != "" {
+			key = AppKeyWith(s.AppID, rules)
+		}
 		a := items[key]
 		if a == nil {
 			a = &OutsideApp{Key: key, Path: s.Path, Lines: map[string]Rate{}, BeforeRouting: true}
 			items[key] = a
 			order = append(order, key)
+		}
+		if SandboxIdentity(s.AppID) {
+			a.Identity = s.AppID
 		}
 		a.Connections++
 		a.IDs = append(a.IDs, OutsideID{s.ID, s.Line})
@@ -549,7 +619,10 @@ func (o *OutsideTracker) IDsOf(key string) []string {
 	return result
 }
 func MergeRows(routed []Row, outside *OutsideTracker, pins Pins) []Row {
-	_, normalized := pins.normalized()
+	return MergeRowsWith(routed, outside, pins, apppath.Windows)
+}
+func MergeRowsWith(routed []Row, outside *OutsideTracker, pins Pins, rules apppath.Rules) []Row {
+	_, normalized := pins.NormalizedWith(rules)
 	result := append([]Row{}, routed...)
 	seen := map[string]bool{}
 	for _, r := range result {
@@ -561,8 +634,13 @@ func MergeRows(routed []Row, outside *OutsideTracker, pins Pins) []Row {
 			var pin *Pin
 			if p, ok := normalized[key]; ok {
 				pin = &p
+			} else if a.Identity != "" {
+				idKey := AppKeyWith(a.Identity, rules)
+				if p, ok := normalized[idKey]; ok {
+					pin = &p
+				}
 			}
-			result = append(result, row(key, &app{Path: a.Path}, pin))
+			result = append(result, row(key, &app{Path: a.Path, Identity: a.Identity}, pin))
 		}
 	}
 	for i := range result {
@@ -578,6 +656,9 @@ func MergeRows(routed []Row, outside *OutsideTracker, pins Pins) []Row {
 		}
 		if !active {
 			r.Path = extra.Path
+		}
+		if r.Identity == "" && extra.Identity != "" {
+			r.Identity = extra.Identity
 		}
 		sum := total(extra.Lines, extra.LineOrder)
 		r.Rate.Down += sum.Down

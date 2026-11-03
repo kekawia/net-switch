@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 )
 
@@ -38,7 +37,7 @@ func (c *Core) lookupInfo(paths []string) {
 	batch := append([]string{}, c.infoPending[:count]...)
 	c.infoPending = c.infoPending[count:]
 	for _, path := range batch {
-		key := strings.ToLower(path)
+		key := c.infoAttemptKey(path)
 		c.infoAttempted[key] = true
 		delete(c.infoQueued, key)
 	}
@@ -60,9 +59,12 @@ func (c *Core) lookupInfo(paths []string) {
 		}
 		for _, v := range array(result) {
 			item := js.Object(v)
-			path := js.Text(item["path"])
-			if path != "" {
-				c.info[apps.AppKey(path)] = item
+			target := js.Text(item["identity"])
+			if target == "" {
+				target = js.Text(item["path"])
+			}
+			if target != "" {
+				c.info[c.appKey(target)] = item
 			}
 		}
 		c.mu.Unlock()
@@ -70,10 +72,11 @@ func (c *Core) lookupInfo(paths []string) {
 	})
 }
 func (c *Core) queueInfoLocked(paths []string) {
+	windows := c.pathRules().Separator == `\`
 	for _, path := range paths {
-		key := strings.ToLower(path)
-		app := apps.AppKey(path)
-		if path == "" || strings.EqualFold(baseName(path), "svchost") || c.infoAttempted[key] || c.infoQueued[key] || js.Truth(c.info[app]["icon"]) {
+		key := c.infoAttemptKey(path)
+		app := c.appKey(path)
+		if path == "" || (windows && strings.EqualFold(baseName(path), "svchost")) || c.infoAttempted[key] || c.infoQueued[key] || js.Truth(c.info[app]["icon"]) {
 			continue
 		}
 		c.infoPending = append(c.infoPending, path)
@@ -111,9 +114,12 @@ func (c *Core) InstalledApps(ctx context.Context) (any, error) {
 	c.mu.Lock()
 	for _, v := range array(v) {
 		item := js.Object(v)
-		path := js.Text(item["path"])
-		paths = append(paths, path)
-		item["hasIcon"] = js.Truth(c.info[apps.AppKey(path)]["icon"])
+		target := js.Text(item["identity"])
+		if target == "" {
+			target = js.Text(item["path"])
+		}
+		paths = append(paths, target)
+		item["hasIcon"] = js.Truth(c.info[c.appKey(target)]["icon"])
 	}
 	c.mu.Unlock()
 	c.lookupInfo(paths)

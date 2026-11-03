@@ -97,9 +97,12 @@ func (c *Core) Poll(ctx context.Context) error {
 	}
 	c.tracker.Ingest(routed, now)
 	c.mu.Unlock()
+	rules := c.pathRules()
 	paths := []string{}
 	for _, connection := range connections {
-		if connection.Metadata.ProcessPath != "" {
+		if rules.Separator == "/" && apps.SandboxIdentity(connection.AppID) {
+			paths = append(paths, connection.AppID)
+		} else if connection.Metadata.ProcessPath != "" {
 			paths = append(paths, connection.Metadata.ProcessPath)
 		}
 	}
