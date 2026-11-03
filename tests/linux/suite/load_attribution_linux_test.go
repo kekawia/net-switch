@@ -15,15 +15,12 @@ import (
 )
 
 // runBurstJudgement runs judgeBurstSession on one sample as the real case
-// would: declared in the catalogue, through the harness, under kind.
+// would: unblocked in the 1.0 catalogue, through the harness, under kind.
 func runBurstJudgement(t *testing.T, kind harness.EngineKind, exact bool, f engine.Flow, sessions int, seen map[string]int) (*harness.Report, *harness.Case) {
 	const id = "udp.fifty-destinations-one-session"
-	c := &harness.Case{ID: id, Title: "burst", Label: harness.Parity, ReleaseBlocker: loadAttributionBlocker(id)}
-	if c.ReleaseBlocker == "" {
-		t.Fatal("udp.fifty-destinations-one-session left the release catalogue")
-	}
+	c := &harness.Case{ID: id, Title: "burst", Label: harness.Parity}
 	c.Run = func(test *harness.T) {
-		e := &Env{T: test, deferAttribution: kind == harness.V1}
+		e := &Env{T: test}
 		e.judgeBurstSession(exact, f, sessions, 4242, seen)
 	}
 	return harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: kind, OutDir: t.TempDir(), Console: io.Discard}), c
@@ -33,46 +30,38 @@ func publicEndpoint(line engine.LineID, port uint16) string {
 	return netip.AddrPortFrom(topo.Line(line).Public4, port).String()
 }
 
-// The sample from PR #85's CI job 120593704124: one endpoint, but on main
-// line a from an unknown session. Every hard check passes, the owner check is
-// declared and recorded as failed with the old combined verdict, PR CI goes
-// on, and the release gate still refuses the case.
-func TestFiftyDestinationsUnknownOwnerOnMainIsDeclaredYetBlocksRelease(t *testing.T) {
+// The sample from PR #85's CI job 120593704124: one endpoint, on main line a
+// from an unknown session. The four consistency checks still pass so the failure
+// is never misdiagnosed as a port change, while the missing charlie identity
+// fails 1.0 hard.
+func TestFiftyDestinationsUnknownOwnerOnMainFailsHard(t *testing.T) {
 	unknown := engine.Flow{Protocol: "udp", Lane: "a", Line: "a"}
 	report, c := runBurstJudgement(t, harness.V1, true, unknown, 1, map[string]int{publicEndpoint("a", 40000): 50})
-	if report.JobFailed || len(report.Cases) != 1 || report.Cases[0].Outcome != harness.ReleaseBlocked {
-		t.Fatalf("an unknown session on main failed PR CI or escaped its declaration: %+v", report)
+	if !report.JobFailed || len(report.Cases) != 1 || report.Cases[0].Outcome != harness.Fail {
+		t.Fatalf("an unknown session on main did not fail 1.0 hard: %+v", report)
 	}
-	hard, release := 0, 0
-	for _, check := range report.Cases[0].Checks {
-		if !check.ReleaseBlocker {
-			hard++
-			if !check.OK {
-				t.Errorf("a hard check failed on the declared sample: %s", check.Message)
-			}
-			continue
+	checks := report.Cases[0].Checks
+	if len(checks) != 5 {
+		t.Fatalf("expected 5 mandatory checks, got %d: %+v", len(checks), checks)
+	}
+	for i, check := range checks {
+		if check.ReleaseBlocker {
+			t.Fatalf("unexpected release-blocker check at %d: %+v", i, check)
 		}
-		release++
-		if check.OK || !strings.Contains(check.Message, "would pass: false") {
-			t.Errorf("the owner check hid its miss or the old verdict: ok=%t %s", check.OK, check.Message)
+		if i < 4 && !check.OK {
+			t.Errorf("consistency check %d failed on explicit unknown sample: %s", i, check.Message)
+		}
+		if i == 4 && (check.OK || !strings.Contains(check.Message, "charlie's session owner is identified") || !strings.Contains(check.Message, "would pass: false")) {
+			t.Errorf("owner check did not fail hard with diagnostic verdict: %+v", check)
 		}
 	}
-	if hard != 4 || release != 1 {
-		t.Fatalf("expected 4 hard checks and 1 release check, got %d and %d: %+v", hard, release, report.Cases[0].Checks)
-	}
-	detail := report.Cases[0].Detail()
-	if !strings.Contains(detail, "threshold failed: charlie's session owner is identified") {
-		t.Fatalf("the report doesn't say the owner was the miss: %s", detail)
-	}
-	if err := harness.CheckRelease([]*harness.Case{c}); err == nil || !strings.Contains(err.Error(), c.ID+": release-blocker:") {
-		t.Fatalf("the release gate let the declared burst case through: %v", err)
+	if err := harness.CheckRelease([]*harness.Case{c}); err != nil {
+		t.Fatalf("release gate rejected unblocked burst case: %v", err)
 	}
 }
 
-// The declaration covers an absent owner only. A nonempty wrong identity,
-// charlie identified but routed off line c, servers disagreeing with the
-// engine's own route, more than one public endpoint or more than one session
-// all fail PR CI as before.
+// Every wrong identity, wrong line, server mismatch, multiple endpoint or
+// multiple session sample fails hard, while the identified line-c sample passes.
 func TestFiftyDestinationsWrongOwnerLineOrEndpointsStayHard(t *testing.T) {
 	charlie, alpha := AppPath("charlie"), AppPath("alpha")
 	onC := engine.Flow{Protocol: "udp", App: charlie, AppID: charlie, PID: 4242, Lane: "c", Line: "c"}
@@ -99,22 +88,20 @@ func TestFiftyDestinationsWrongOwnerLineOrEndpointsStayHard(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			report, _ := runBurstJudgement(t, harness.V1, true, test.flow, test.sessions, test.seen)
 			if !report.JobFailed || report.Cases[0].Outcome != harness.Fail {
-				t.Fatalf("declared attribution waived a hard failure: %+v", report.Cases[0])
+				t.Fatalf("hard failure did not fail the job: %+v", report.Cases[0])
 			}
 			if strings.Contains(report.Cases[0].Detail(), "threshold") {
-				t.Fatalf("the report blamed the release measurement instead of the hard failure: %s", report.Cases[0].Detail())
+				t.Fatalf("unexpected release-blocker threshold wording: %s", report.Cases[0].Detail())
 			}
 		})
 	}
-	// Control: the correct sample is still a declared measurement, not a pass,
-	// with the owner check met and the old combined verdict true.
 	report, _ := runBurstJudgement(t, harness.V1, true, onC, 1, map[string]int{c: 50})
-	if report.JobFailed || report.Cases[0].Outcome != harness.ReleaseBlocked {
-		t.Fatalf("the correct sample isn't a declared measurement: %+v", report.Cases[0])
+	if report.JobFailed || report.Cases[0].Outcome != harness.Pass {
+		t.Fatalf("the identified line-c sample did not pass cleanly: %+v", report.Cases[0])
 	}
-	for _, check := range report.Cases[0].Checks {
-		if !check.OK || (check.ReleaseBlocker && !strings.Contains(check.Message, "would pass: true")) {
-			t.Fatalf("the correct sample failed a check or lost its old verdict: %+v", check)
+	for i, check := range report.Cases[0].Checks {
+		if !check.OK || check.ReleaseBlocker || (i == 4 && !strings.Contains(check.Message, "would pass: true")) {
+			t.Fatalf("the identified sample failed a check or lost its diagnostic verdict: %+v", check)
 		}
 	}
 }
@@ -132,20 +119,19 @@ func TestFiftyDestinationsBaselineKeepsLineCHard(t *testing.T) {
 	}
 }
 
-func TestPostFaultAttributionFailsInsideADeclaredLoadCase(t *testing.T) {
-	c := &harness.Case{ID: "overload.unknown-owner-limits", Title: "recovery", Label: harness.Requires10, ReleaseBlocker: loadAttributionBlocker("overload.unknown-owner-limits")}
+func TestUnderLoadAttributionFailsHard(t *testing.T) {
+	c := &harness.Case{ID: "overload.unknown-owner-limits", Title: "recovery", Label: harness.Requires10}
 	c.Run = func(test *harness.T) {
-		e := &Env{T: test, deferAttribution: true}
-		e.withSteadyAttribution(func() { e.checkLoadIdentity(false, "post-fault owner is still unknown") })
-		e.checkLoadIdentity(true, "the separate under-load measurement remains declared")
+		e := &Env{T: test, inspectLoad: true}
+		e.checkLoadIdentity(false, "under-load or post-fault owner is unknown")
 	}
 	report := harness.Run(context.Background(), []*harness.Case{c}, harness.NewReport(), harness.Options{Kind: harness.V1, OutDir: t.TempDir(), Console: io.Discard})
 	if !report.JobFailed || len(report.Cases) != 1 || report.Cases[0].Outcome != harness.Fail {
-		t.Fatalf("unknown recovery owner passed PR CI: %+v", report)
+		t.Fatalf("unknown owner under load passed 1.0 CI: %+v", report)
 	}
 	checks := report.Cases[0].Checks
-	if len(checks) != 2 || checks[0].ReleaseBlocker || !checks[1].ReleaseBlocker {
-		t.Fatalf("recovery escaped its hard scope or swallowed the load declaration: %+v", checks)
+	if len(checks) != 1 || checks[0].OK || checks[0].ReleaseBlocker {
+		t.Fatalf("expected one failed mandatory check, got: %+v", checks)
 	}
 }
 

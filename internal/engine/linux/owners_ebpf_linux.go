@@ -242,9 +242,6 @@ func unwrapNativeTun(dev platform.TunDevice) (*Tun, bool) {
 
 func (o *Owners) AttachProvenance(ctx context.Context, dev platform.TunDevice) (bool, error) {
 	if !o.isEBPFBackend() {
-		if os.Getenv("NETSWITCH_BENCH_EBPF_INSTRUMENTATION_ONLY") == "1" {
-			return o.attachInstrumentationOnly(dev)
-		}
 		return false, nil
 	}
 	tun, ok := unwrapNativeTun(dev)
@@ -309,52 +306,6 @@ func (o *Owners) AttachProvenance(ctx context.Context, dev platform.TunDevice) (
 
 	tun.AttachProvenanceReader(&ebpfBridgeBurstSource{owners: o, bridge: bridge}, o.onProvenanceBurst)
 	return true, nil
-}
-
-// attachInstrumentationOnly loads and enables the production eBPF bridge and
-// sender probe while keeping userspace on the non-provenance TUN pump and
-// proc-fallback scanner so 3-way benchmarks isolate kernel BPF hook cost.
-func (o *Owners) attachInstrumentationOnly(dev platform.TunDevice) (bool, error) {
-	tun, ok := unwrapNativeTun(dev)
-	if !ok || tun == nil {
-		return false, errors.New("NETSWITCH_BENCH_EBPF_INSTRUMENTATION_ONLY requires native Linux *Tun device")
-	}
-	_ = o.CloseProvenance()
-
-	epoch := o.ebpf.nextEpoch.Add(1)
-	bridge, err := ownerbpf.LoadEngineBridge(uint32(tun.Ifindex()), tun.NetNSInode(), epoch, uint64(tun.TxQLen()))
-	if err != nil {
-		return false, fmt.Errorf("load instrumentation-only eBPF bridge: %w", err)
-	}
-	probe, err := ownerbpf.LoadEngineSenderProbe("/sys/fs/cgroup", ownerbpf.DefaultEngineMaxActors, ownerbpf.DefaultEngineActorEventQueue)
-	if err != nil {
-		_ = bridge.Close()
-		return false, fmt.Errorf("load instrumentation-only eBPF sender probe: %w", err)
-	}
-	if err := probe.Enable(); err != nil {
-		_ = probe.Close()
-		_ = bridge.Close()
-		return false, fmt.Errorf("enable instrumentation-only eBPF sender probe: %w", err)
-	}
-	if err := bridge.Enable(uint64(tun.TxQLen())); err != nil {
-		_ = probe.Disable()
-		_ = probe.Close()
-		_ = bridge.Close()
-		return false, fmt.Errorf("enable instrumentation-only eBPF bridge: %w", err)
-	}
-
-	o.ebpf.bridgeDeliveredBase.Store(0)
-	o.ebpf.bridgeReadUnknownBase.Store(0)
-	o.ebpf.bridgeUnknownRecursionBase.Store(0)
-	o.ebpf.bridgeFaultsBase.Store(0)
-
-	o.ebpf.mu.Lock()
-	o.ebpf.stopped = false
-	o.ebpf.tun = tun
-	o.ebpf.bridge = bridge
-	o.ebpf.probe = probe
-	o.ebpf.mu.Unlock()
-	return false, nil
 }
 
 func (o *Owners) rebuildProvenanceEpoch(

@@ -3,14 +3,13 @@
 package suite
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 )
 
-func TestOnlyLoadAttributionGatesAreReleaseBlockers(t *testing.T) {
-	want := map[string]bool{
+func TestReleaseCatalogueHasNoBlockersOrPendingGates(t *testing.T) {
+	formerlyDeferred := map[string]bool{
 		"overload.udp-sessions-per-app":      false,
 		"overload.udp-sessions-total":        false,
 		"overload.tcp-connection-storm":      false,
@@ -27,37 +26,30 @@ func TestOnlyLoadAttributionGatesAreReleaseBlockers(t *testing.T) {
 		"protocol.flows-pagination":          false,
 		"capacity.mixed-caps":                false,
 		"udp.fifty-destinations-one-session": false,
-	}
-	if len(want) != 16 {
-		t.Fatalf("the release catalogue has %d entries, the documented count is 16", len(want))
+		"lookup.gate-terminal":               false,
+		"lookup.gate-app-scope":              false,
 	}
 	cases := Cases(Config{})
+	if len(cases) == 0 {
+		t.Fatal("empty suite catalogue")
+	}
 	for _, c := range cases {
-		if c.ReleaseBlocker == "" {
-			continue
+		if c.ReleaseBlocker != "" {
+			t.Errorf("unexpected release blocker on %s: %s", c.ID, c.ReleaseBlocker)
 		}
-		if _, ok := want[c.ID]; !ok {
-			t.Fatalf("unexpected release deferral: %s", c.ID)
+		if c.Label == harness.Pending {
+			t.Errorf("unexpected pending gate %s: %s", c.ID, c.Waits)
 		}
-		want[c.ID] = true
+		if _, ok := formerlyDeferred[c.ID]; ok {
+			formerlyDeferred[c.ID] = true
+		}
 	}
-	for id, present := range want {
+	for id, present := range formerlyDeferred {
 		if !present {
-			t.Errorf("load-attribution blocker missing from the release catalogue: %s", id)
+			t.Errorf("mandatory attribution/lookup case missing from suite catalogue: %s", id)
 		}
 	}
-	err := harness.CheckRelease(cases)
-	if err == nil {
-		t.Fatal("unfinished eBPF attribution passed the release gate")
-	}
-	for id := range want {
-		if !strings.Contains(err.Error(), id+": release-blocker:") {
-			t.Errorf("release command omitted %s: %v", id, err)
-		}
-	}
-	for _, id := range []string{"lookup.gate-terminal", "lookup.gate-app-scope"} {
-		if loadAttributionBlocker(id) != "" {
-			t.Errorf("steady lookup gate was deferred: %s", id)
-		}
+	if err := harness.CheckRelease(cases); err != nil {
+		t.Fatalf("release gate rejected qualified 1.0 catalogue: %v", err)
 	}
 }

@@ -125,15 +125,11 @@ func burstSession(flows []engine.Flow, localPort int) (engine.Flow, int) {
 //
 // Hard, on every engine: exactly one session for the socket, and one public
 // endpoint across all 50 servers. Hard on 1.0 as well: the session is either
-// this charlie process on line c or fully unknown on main, nothing in between
-// (a nonempty wrong identity, or charlie routed off line c, is never
-// deferred), and the line the servers saw is the line the engine says it
-// decided. The release check is only whether that decision identified
-// charlie: on PR #85's CI (job 120593704124) the proc fallback's holder scan
-// hit its deadline behind 10,000 open files, the session was admitted
-// unknown and pinned to main line a, and all 50 servers saw one endpoint
-// there. The old single message ("1 different") read like a port change.
-// The old combined verdict is recorded from the same sample.
+// this charlie process on line c or fully unknown on main, nothing in between,
+// the line the servers saw is the line the engine says it decided, and the
+// session identifies charlie while 10,000 files are open (retaining the split
+// diagnostic checks so an unknown admission is never confused with a port
+// change, while still failing 1.0 hard).
 //
 // exact says whether the engine reports app identity and PID per flow (1.0);
 // the baseline doesn't, so there the servers' line is the only evidence.

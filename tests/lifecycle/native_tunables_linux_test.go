@@ -180,7 +180,7 @@ func prepareNativeTunables(t *testing.T) func(*testing.T, *nativeClient) {
 			if ebpfCap.TunName != name || ebpfCap.TunTxQLen != 16384 || ebpfCap.NetNSInode == 0 {
 				t.Fatalf("unexpected installed engine TUN/netns metadata: %+v", ebpfCap)
 			}
-			if ebpfCap.PacketSlots < 32768 || ebpfCap.SocketSlots != 131072 {
+			if ebpfCap.PacketSlots < 32768 || ebpfCap.SocketSlots != 524288 {
 				t.Fatalf("unexpected production eBPF map sizing: %+v", ebpfCap)
 			}
 			if ebpfCap.CapturedActorEvents < 1 || ebpfCap.CapturedCookie == 0 || ebpfCap.CapturedTGID == 0 {

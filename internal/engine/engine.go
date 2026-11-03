@@ -379,14 +379,14 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	}
 	finish()
 	finish = phase("flow-close")
-	if e.cancel != nil {
-		e.cancel()
-	}
 	var stopProv error
 	if e.provAttached {
 		if ctrl, ok := e.deps.Owners.(platform.ProvenanceController); ok {
 			stopProv = ctrl.StopProvenance()
 		}
+	}
+	if e.cancel != nil {
+		e.cancel()
 	}
 	if e.testProxy != nil {
 		e.testProxy.Close()

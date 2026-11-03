@@ -177,7 +177,5 @@ func (e *Env) exactCapacity(label string, held, target int, unknownRefusals uint
 	e.T.Check(explained, "%s: the whole exact-cap shortfall is accounted for by distinct unknown-overflow refusals (%d missing, at least %d unknown refusals)", label, shortfall, unknownRefusals)
 	e.T.Logf("CAP OLD VERDICT %s: held=%d target=%d old-exact-count=%t; shortfall=%d attribution-accounted=%t",
 		label, held, target, old, shortfall, explained)
-	if explained {
-		e.T.ReleaseCheck(old, "%s reaches exactly %d (%d held, %d missing due to attribution; eBPF pending under section 5.6)", label, target, held, shortfall)
-	}
+	e.T.Check(old, "%s reaches exactly %d (%d held, %d missing)", label, target, held, shortfall)
 }

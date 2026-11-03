@@ -227,10 +227,6 @@ func describeSessions(names []string, all map[string]sessions) string {
 // overloaded engine stalls other flows (the baseline went 3.2 s without an
 // answer under 9,000 handshakes at once).
 func (e *Env) keptOpen(label string, s Stream, want engine.LineID) {
-	if e.deferAttribution {
-		e.T.Logf("%s: original survival-and-all-on-%s check would pass: %t", label, want,
-			s.Connected && s.ClosedAt == 0 && s.Pongs > 0 && StreamLines(s)[want] == s.Pongs)
-	}
 	want = e.streamLine(s, want)
 	lines := StreamLines(s)
 	e.T.Check(s.Connected && s.ClosedAt == 0 && s.Pongs > 0 && lines[want] == s.Pongs,

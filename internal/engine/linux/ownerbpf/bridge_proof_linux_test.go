@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -952,12 +953,22 @@ func TestBridgeReadLifetimes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: 2000, Limit: 100})
+	latencyUs := uint32(500)
+	if verifiedFloor58Profile() && runtime.GOARCH == "arm64" {
+		latencyUs = 5000
+	}
+	q := netlink.NewNetem(netlink.QdiscAttrs{LinkIndex: l.Attrs().Index, Handle: netlink.MakeHandle(1, 0), Parent: netlink.HANDLE_ROOT}, netlink.NetemQdiscAttrs{Latency: latencyUs, Limit: 100})
 	if err := netlink.QdiscReplace(q); err != nil {
 		t.Fatal(err)
 	}
 	holdCtl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 8}
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), holdCtl, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	runtime.GC()
+	oldGC := debug.SetGCPercent(-1)
+	if err := setProofPriority(10); err != nil {
+		debug.SetGCPercent(oldGC)
 		t.Fatal(err)
 	}
 	var bgSendErr error
@@ -972,6 +983,11 @@ func TestBridgeReadLifetimes(t *testing.T) {
 		atomic.StoreUint64(&f.r.slot.Control.Armed, 1)
 		return unix.Read(fd, dst)
 	})
+	schedErr := setProofPriority(0)
+	debug.SetGCPercent(oldGC)
+	if schedErr != nil {
+		t.Fatal(schedErr)
+	}
 	if bgSendErr != nil {
 		t.Fatal(bgSendErr)
 	}
