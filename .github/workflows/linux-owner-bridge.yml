@@ -3,7 +3,10 @@ on:
   workflow_call:
   pull_request:
     paths:
+      - 'internal/apppath/**'
+      - 'internal/engine/platform/**'
       - 'internal/engine/linux/ownerbpf/**'
+      - 'internal/jsvalue/**'
       - 'tests/linux/ownerproof/**'
       - 'scripts/generate-owner-bpf.mjs'
       - 'scripts/build-owner-floor-guest.mjs'
@@ -11,6 +14,8 @@ on:
       - '.github/workflows/linux-owner-bridge.yml'
       - 'docs/linux-owner-*.md'
       - 'docs/linux-owner-*.json'
+      - 'go.mod'
+      - 'vendor/**'
 permissions:
   contents: read
 jobs:
