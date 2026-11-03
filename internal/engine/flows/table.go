@@ -72,43 +72,75 @@ type Gauges struct {
 	TCPBytes, PendingBytes, SnapshotBytes, TotalsSnapshotBytes                                        int64
 	Rejected, DroppedNotices, Admitted, LookupCount, LookupMisses, LookupAmbiguous, LookupNanoseconds uint64
 }
+const (
+	rejectPerAppPerSec    = 1000
+	rejectGlobalPerSec    = 5000
+	rejectReservePerApp   = 500
+	rejectReserveGlobal   = 2500
+	rejectRetransmitGrace = 1500 * time.Millisecond
+)
+
+type waitingReject struct {
+	app        string
+	droppedSec int64
+	expiresAt  time.Time
+}
+
 type counts struct{ flows, udp int }
 type Table struct {
-	applyMu              sync.Mutex
-	mu                   sync.Mutex
-	limits               Limits
-	now                  func() time.Time
-	store                StateStore
-	policy               *policy.Policy
-	applied              *policy.Applied
-	epoch, nextID, point uint64
-	k                    atomic.Uint64
-	flows                map[uint64]*ticket
-	apps                 map[string]counts
-	lineRefs             map[string]int // resolved admissions; native socket pins cover closing tails
-	totals               Totals
-	accountingIDs        map[accountIdentity]uint64
-	nextAccounting       uint64
-	gauges               Gauges
-	snapshots            map[uint64]*snapshot
-	totalSnapshots       map[uint64]*totalsSnapshot
-	nextSnapshot         uint64
-	rejectSecond         int64
-	timeWaitLogSecond    int64
-	rejectTotal          int
-	rejectApps           map[string]int
-	events               chan flowapi.Event
-	eventsDropped        atomic.Uint64
-	pendingBytes         atomic.Int64
-	udpReadBytes         atomic.Int64
-	replyBytes           atomic.Int64
-	replyPeakBytes       atomic.Int64
-	pendingPeakBytes     atomic.Int64
-	doubleReleases       atomic.Uint64
+	applyMu                sync.Mutex
+	mu                     sync.Mutex
+	limits                 Limits
+	now                    func() time.Time
+	store                  StateStore
+	policy                 *policy.Policy
+	applied                *policy.Applied
+	epoch, nextID, point   uint64
+	k                      atomic.Uint64
+	flows                  map[uint64]*ticket
+	apps                   map[string]counts
+	lineRefs               map[string]int // resolved admissions; native socket pins cover closing tails
+	totals                 Totals
+	accountingIDs          map[accountIdentity]uint64
+	nextAccounting         uint64
+	gauges                 Gauges
+	snapshots              map[uint64]*snapshot
+	totalSnapshots         map[uint64]*totalsSnapshot
+	nextSnapshot           uint64
+	rejectSecond           int64
+	timeWaitLogSecond      int64
+	rejectTotal            int
+	rejectApps             map[string]int
+	rejectWaiting          map[platform.Tuple]waitingReject
+	rejectWaitingApps      map[string]int
+	rejectPriorGlobal      int
+	rejectPriorApps        map[string]int
+	rejectWaitingNextSweep time.Time
+	events                 chan flowapi.Event
+	eventsDropped          atomic.Uint64
+	pendingBytes           atomic.Int64
+	udpReadBytes           atomic.Int64
+	replyBytes             atomic.Int64
+	replyPeakBytes         atomic.Int64
+	pendingPeakBytes       atomic.Int64
+	doubleReleases         atomic.Uint64
 }
 
 func New(l Limits, store StateStore) *Table {
-	return &Table{limits: l, now: time.Now, store: store, flows: map[uint64]*ticket{}, apps: map[string]counts{}, totals: Totals{Apps: map[string]Bytes{}, Lines: map[string]Bytes{}}, snapshots: map[uint64]*snapshot{}, rejectApps: map[string]int{}, events: make(chan flowapi.Event, 64)}
+	return &Table{
+		limits:            l,
+		now:               time.Now,
+		store:             store,
+		flows:             map[uint64]*ticket{},
+		apps:              map[string]counts{},
+		totals:            Totals{Apps: map[string]Bytes{}, Lines: map[string]Bytes{}},
+		snapshots:         map[uint64]*snapshot{},
+		rejectApps:        map[string]int{},
+		rejectWaiting:     map[platform.Tuple]waitingReject{},
+		rejectWaitingApps: map[string]int{},
+		rejectPriorApps:   map[string]int{},
+		events:            make(chan flowapi.Event, 64),
+	}
 }
 func (t *Table) SetEpoch(epoch uint64) {
 	t.mu.Lock()
@@ -119,6 +151,11 @@ func (t *Table) SetEpoch(epoch uint64) {
 		for id := range t.totalSnapshots {
 			t.dropTotalsSnapshot(id)
 		}
+		clear(t.rejectWaiting)
+		clear(t.rejectWaitingApps)
+		t.rejectPriorGlobal = 0
+		clear(t.rejectPriorApps)
+		t.rejectWaitingNextSweep = time.Time{}
 	}
 	t.epoch = epoch
 }
@@ -327,6 +364,9 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 		t.lineRefs = map[string]int{}
 	}
 	t.lineRefs[d.Line]++
+	if !udp {
+		t.clearRejectWaitingLocked(platform.Tuple{Source: f.record.Source, Destination: f.record.Destination})
+	}
 	t.k.Add(1)
 	t.gauges.Admitted++
 	return d, nil
@@ -594,19 +634,171 @@ func (t *Table) ReleaseReply(n int) {
 		}
 	}
 }
+func (t *Table) clearRejectWaitingLocked(tuple platform.Tuple) {
+	_, _ = t.deleteRejectWaitingLocked(tuple)
+}
+
+func (t *Table) deleteRejectWaitingLocked(tuple platform.Tuple) (waitingReject, bool) {
+	if len(t.rejectWaiting) == 0 {
+		return waitingReject{}, false
+	}
+	w, ok := t.rejectWaiting[tuple]
+	if !ok {
+		return waitingReject{}, false
+	}
+	delete(t.rejectWaiting, tuple)
+	if w.app != "" {
+		if n := t.rejectWaitingApps[w.app] - 1; n <= 0 {
+			delete(t.rejectWaitingApps, w.app)
+		} else {
+			t.rejectWaitingApps[w.app] = n
+		}
+	}
+	if w.droppedSec < t.rejectSecond {
+		t.rejectPriorGlobal--
+		if w.app != "" {
+			if n := t.rejectPriorApps[w.app] - 1; n <= 0 {
+				delete(t.rejectPriorApps, w.app)
+			} else {
+				t.rejectPriorApps[w.app] = n
+			}
+		}
+	}
+	if len(t.rejectWaiting) == 0 {
+		t.rejectWaitingNextSweep = time.Time{}
+	}
+	return w, true
+}
+
+func (t *Table) recordRejectWaitingLocked(tuple platform.Tuple, app string, droppedSec int64, expiresAt time.Time) {
+	if len(t.rejectWaiting) >= rejectReserveGlobal || (app != "" && t.rejectWaitingApps[app] >= rejectReservePerApp) {
+		return
+	}
+	t.rejectWaiting[tuple] = waitingReject{app: app, droppedSec: droppedSec, expiresAt: expiresAt}
+	if app != "" {
+		t.rejectWaitingApps[app]++
+	}
+	if droppedSec < t.rejectSecond {
+		t.rejectPriorGlobal++
+		if app != "" {
+			t.rejectPriorApps[app]++
+		}
+	}
+	if t.rejectWaitingNextSweep.IsZero() || expiresAt.Before(t.rejectWaitingNextSweep) {
+		t.rejectWaitingNextSweep = expiresAt
+	}
+}
+
+func (t *Table) sweepRejectWaitingLocked(now time.Time) {
+	var earliest time.Time
+	for tuple, w := range t.rejectWaiting {
+		if !now.Before(w.expiresAt) {
+			t.deleteRejectWaitingLocked(tuple)
+			continue
+		}
+		if earliest.IsZero() || w.expiresAt.Before(earliest) {
+			earliest = w.expiresAt
+		}
+	}
+	if len(t.rejectWaiting) == 0 {
+		t.rejectWaitingNextSweep = time.Time{}
+		return
+	}
+	minNext := now.Add(10 * time.Millisecond)
+	if earliest.Before(minNext) {
+		earliest = minNext
+	}
+	t.rejectWaitingNextSweep = earliest
+}
+
+func (t *Table) rebuildRejectPriorLocked(now time.Time) {
+	t.rejectPriorGlobal = 0
+	clear(t.rejectPriorApps)
+	var earliest time.Time
+	for tuple, w := range t.rejectWaiting {
+		if !now.Before(w.expiresAt) {
+			delete(t.rejectWaiting, tuple)
+			if w.app != "" {
+				if n := t.rejectWaitingApps[w.app] - 1; n <= 0 {
+					delete(t.rejectWaitingApps, w.app)
+				} else {
+					t.rejectWaitingApps[w.app] = n
+				}
+			}
+			continue
+		}
+		if w.droppedSec < t.rejectSecond {
+			t.rejectPriorGlobal++
+			if w.app != "" {
+				t.rejectPriorApps[w.app]++
+			}
+		}
+		if earliest.IsZero() || w.expiresAt.Before(earliest) {
+			earliest = w.expiresAt
+		}
+	}
+	if len(t.rejectWaiting) == 0 {
+		t.rejectWaitingNextSweep = time.Time{}
+		return
+	}
+	minNext := now.Add(10 * time.Millisecond)
+	if earliest.Before(minNext) {
+		earliest = minNext
+	}
+	t.rejectWaitingNextSweep = earliest
+}
+
 func (t *Table) AllowReject(app string) bool {
+	return t.AllowRejectTuple(app, platform.Tuple{})
+}
+
+func (t *Table) AllowRejectTuple(app string, tuple platform.Tuple) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	sec := t.now().Unix()
+	now := t.now()
+	sec := now.Unix()
 	if sec != t.rejectSecond {
 		t.rejectSecond = sec
 		t.rejectTotal = 0
 		clear(t.rejectApps)
+		t.rebuildRejectPriorLocked(now)
+	} else if !t.rejectWaitingNextSweep.IsZero() && !now.Before(t.rejectWaitingNextSweep) {
+		t.sweepRejectWaitingLocked(now)
 	}
+
+	recordApp := app
+	if tuple != (platform.Tuple{}) {
+		if w, ok := t.deleteRejectWaitingLocked(tuple); ok && now.Before(w.expiresAt) {
+			if recordApp == "" {
+				recordApp = w.app
+			}
+			if w.droppedSec < sec {
+				if t.rejectTotal >= rejectGlobalPerSec || (app != "" && t.rejectApps[app] >= rejectPerAppPerSec) {
+					t.recordRejectWaitingLocked(tuple, recordApp, sec, now.Add(rejectRetransmitGrace))
+					t.gauges.DroppedNotices++
+					return false
+				}
+				t.rejectTotal++
+				if app != "" {
+					t.rejectApps[app]++
+				}
+				t.Emit(flowapi.Event{Type: "log", Message: "flow rejected", App: app})
+				return true
+			}
+		}
+	}
+
 	// Before attribution there is no app bucket: empty is not one shared
 	// application. Otherwise five apps at 800/s are incorrectly throttled
 	// together to 1,000/s when the total flow/session cap is reached.
-	if t.rejectTotal >= 5000 || (app != "" && t.rejectApps[app] >= 1000) {
+	priorApp := 0
+	if app != "" {
+		priorApp = t.rejectPriorApps[app]
+	}
+	if t.rejectTotal+t.rejectPriorGlobal >= rejectGlobalPerSec || (app != "" && t.rejectApps[app]+priorApp >= rejectPerAppPerSec) {
+		if tuple != (platform.Tuple{}) {
+			t.recordRejectWaitingLocked(tuple, recordApp, sec, now.Add(rejectRetransmitGrace))
+		}
 		t.gauges.DroppedNotices++
 		return false
 	}

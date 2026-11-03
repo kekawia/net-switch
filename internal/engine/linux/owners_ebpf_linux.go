@@ -56,6 +56,8 @@ type ebpfOwnerStats struct {
 	Epoch                        uint64                     `json:"epoch"`
 	EpochPoisoned                bool                       `json:"epochPoisoned"`
 	EpochRebuilds                uint64                     `json:"epochRebuilds"`
+	EpochRebuildDrained          uint64                     `json:"epochRebuildDrained"`
+	EpochRebuildNanos            uint64                     `json:"epochRebuildNanos"`
 	ProbePoisoned                bool                       `json:"probePoisoned"`
 	NoIOUringActive              bool                       `json:"noIOUringActive"`
 	BPFMapBytes                  uint64                     `json:"bpfMapBytes"`
@@ -106,8 +108,10 @@ type ebpfOwnerState struct {
 	bridgeReadUnknownBase      atomic.Uint64
 	bridgeUnknownRecursionBase atomic.Uint64
 	bridgeFaultsBase           atomic.Uint64
+	epochRebuildDrainedBase    atomic.Uint64
 
 	epochRebuilds            atomic.Uint64
+	epochRebuildNanos        atomic.Uint64
 	tcpKnown                 atomic.Uint64
 	tcpUnknownIdentity       atomic.Uint64
 	tcpConflicting           atomic.Uint64
@@ -149,16 +153,22 @@ func (o *Owners) ebpfStats() *ebpfOwnerStats {
 	readUnknown := o.ebpf.bridgeReadUnknownBase.Load()
 	unknownRec := o.ebpf.bridgeUnknownRecursionBase.Load()
 	faults := o.ebpf.bridgeFaultsBase.Load()
+	rebuildDrained := o.ebpf.epochRebuildDrainedBase.Load()
 	if b := o.ebpf.bridge; b != nil {
 		delivered += b.DeliveredWithoutRecord.Load()
 		readUnknown += b.ReadUnknown.Load()
 		unknownRec += b.UnknownRecursion.Load()
 		faults += b.Faults()
 	}
+	if tun := o.ebpf.tun; tun != nil {
+		rebuildDrained += tun.EpochRebuildDrained()
+	}
 	o.ebpf.mu.Unlock()
 
 	out := &ebpfOwnerStats{
 		EpochRebuilds:                o.ebpf.epochRebuilds.Load(),
+		EpochRebuildDrained:          rebuildDrained,
+		EpochRebuildNanos:            o.ebpf.epochRebuildNanos.Load(),
 		BridgeDeliveredWithoutRecord: delivered,
 		BridgeReadUnknown:            readUnknown,
 		BridgeUnknownRecursion:       unknownRec,
@@ -312,6 +322,7 @@ func (o *Owners) rebuildProvenanceEpoch(
 	tun *Tun,
 	closeOldReader func() error,
 ) (provenanceBurstSource, func(func() error) error, error) {
+	rebuildStarted := time.Now()
 	if tun == nil {
 		return nil, nil, errors.New("cannot rebuild nil provenance TUN")
 	}
@@ -380,6 +391,7 @@ func (o *Owners) rebuildProvenanceEpoch(
 			return fmt.Errorf("enable rebuilt eBPF provenance bridge: %w", err)
 		}
 		o.ebpf.epochRebuilds.Add(1)
+		o.ebpf.epochRebuildNanos.Add(uint64(max(time.Since(rebuildStarted), 0)))
 		return nil
 	}
 	return &ebpfBridgeBurstSource{owners: o, bridge: newBridge}, enableNew, nil
@@ -440,6 +452,9 @@ func (o *Owners) CloseProvenance() error {
 	probe := o.ebpf.probe
 	rt := o.ebpf.runtime
 	o.foldBridgeStatsLocked(bridge)
+	if tun != nil {
+		o.ebpf.epochRebuildDrainedBase.Add(tun.EpochRebuildDrained())
+	}
 	o.ebpf.tun = nil
 	o.ebpf.bridge = nil
 	o.ebpf.probe = nil

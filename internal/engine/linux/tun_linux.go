@@ -58,6 +58,7 @@ type Tun struct {
 	next, count, mtu   int
 	readErrors         atomic.Uint64
 	readBackoffs       atomic.Uint64
+	epochRebuildDrains atomic.Uint64
 	readBackoff        time.Duration
 	closedRead         error
 	ioDone             <-chan struct{}
@@ -249,10 +250,11 @@ func openTun(v tunObject) (*Tun, error) {
 	ok = true
 	return t, nil
 }
-func (t *Tun) MTU() int           { return t.mtu }
-func (t *Tun) Ifindex() int       { return t.index }
-func (t *Tun) TxQLen() int        { return t.txqlen }
-func (t *Tun) NetNSInode() uint32 { return t.netns }
+func (t *Tun) MTU() int                    { return t.mtu }
+func (t *Tun) Ifindex() int                { return t.index }
+func (t *Tun) TxQLen() int                 { return t.txqlen }
+func (t *Tun) NetNSInode() uint32          { return t.netns }
+func (t *Tun) EpochRebuildDrained() uint64 { return t.epochRebuildDrains.Load() }
 
 func (t *Tun) DrainNonblock() error {
 	t.readMu.Lock()
@@ -261,18 +263,38 @@ func (t *Tun) DrainNonblock() error {
 }
 
 func (t *Tun) drainNonblockLocked() error {
+	_, err := t.drainNonblockCountLocked()
+	return err
+}
+
+func (t *Tun) drainRebuildLocked() error {
+	drained, err := t.drainNonblockCountLocked()
+	if drained > 0 {
+		t.epochRebuildDrains.Add(drained)
+	}
+	return err
+}
+
+func (t *Tun) drainNonblockCountLocked() (uint64, error) {
 	if t.rawConn == nil {
-		return nil
+		return 0, nil
 	}
 	scratch := t.writeBuffer[:]
 	if len(t.bufs) > 0 && len(t.bufs[0]) > len(scratch) {
 		scratch = t.bufs[0]
 	}
-	var drainErr error
+	var (
+		drained  uint64
+		drainErr error
+	)
 	ctlErr := t.rawConn.Control(func(fd uintptr) {
 		for {
 			_, err := unix.Read(int(fd), scratch)
-			if err == nil || errors.Is(err, unix.EINTR) {
+			if err == nil {
+				drained++
+				continue
+			}
+			if errors.Is(err, unix.EINTR) {
 				continue
 			}
 			if errors.Is(err, unix.EAGAIN) {
@@ -283,9 +305,9 @@ func (t *Tun) drainNonblockLocked() error {
 		}
 	})
 	if ctlErr != nil {
-		return ctlErr
+		return drained, ctlErr
 	}
-	return drainErr
+	return drained, drainErr
 }
 
 func (t *Tun) AttachProvenanceReader(
@@ -389,7 +411,7 @@ func (t *Tun) rebuildProvenanceEpochLocked(rebuilder provenanceEpochRebuilder) e
 		return err
 	}
 	if enableNew != nil {
-		if err := enableNew(t.drainNonblockLocked); err != nil {
+		if err := enableNew(t.drainRebuildLocked); err != nil {
 			_ = newCloseReader()
 			return err
 		}
@@ -408,7 +430,7 @@ func (t *Tun) Stats() any {
 	if s == nil {
 		return nil
 	}
-	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped, "readDrops": t.readErrors.Load(), "readBackoffs": t.readBackoffs.Load()}
+	return map[string]uint64{"ingressPackets": s.TxPackets, "ingressDropped": s.TxDropped, "egressPackets": s.RxPackets, "egressDropped": s.RxDropped, "readDrops": t.readErrors.Load(), "readBackoffs": t.readBackoffs.Load(), "epochRebuildDrained": t.epochRebuildDrains.Load()}
 }
 func (t *Tun) BindIOContext(ctx context.Context) {
 	t.ioDone = ctx.Done()

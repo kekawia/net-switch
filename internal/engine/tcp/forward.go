@@ -160,6 +160,13 @@ func tuple(id stack.TransportEndpointID) platform.Tuple {
 	return platform.Tuple{Source: netip.AddrPortFrom(src, id.RemotePort), Destination: netip.AddrPortFrom(dst, id.LocalPort)}
 }
 
+func (f *Forwarder) allowReject(app string, t platform.Tuple) bool {
+	if tc, ok := f.control.(flowapi.TupleRejectController); ok {
+		return tc.AllowRejectTuple(app, t)
+	}
+	return f.control.AllowReject(app)
+}
+
 func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) bool {
 	h := header.TCP(p.TransportHeader().Slice())
 	if len(h) < header.TCPMinimumSize {
@@ -222,7 +229,7 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 	t := tuple(id)
 	reject := func() {
 		f.Rejected.Add(1)
-		if f.control.AllowReject("") {
+		if f.allowReject("", t) {
 			f.out.Send(packet.Reset(t.Destination, t.Source, 0, h.SequenceNumber()+1+uint32(p.Data().Size()), true))
 		}
 	}
@@ -278,12 +285,13 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		complete(false)
 	}
 	owner := platform.Owner{}
+	t := tuple(id)
 	defer func() {
 		if owned && closeAdmissionEnabled {
 			ticket.Retire()
 		}
 		if !pending.completed.Load() {
-			complete(f.control.AllowReject(owner.AppID))
+			complete(f.allowReject(owner.AppID, t))
 		}
 	}()
 	ctx, cancel := context.WithCancel(f.ctx)
@@ -294,7 +302,6 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		}
 	}()
 	ticket.SetCancel(cancel)
-	t := tuple(id)
 	// 50 ms unless the platform's lookup needs longer: Windows holds a SYN
 	// for a fresh owner-table read under overload (spec 5.6) and applies the
 	// 50 ms bound itself otherwise.
