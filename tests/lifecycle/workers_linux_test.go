@@ -74,7 +74,7 @@ func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 			continue
 		}
 		args := strings.Split(strings.TrimRight(string(command), "\x00"), "\x00")
-		if len(args) != 3 || args[1] != "worker" || (args[2] != "network" && args[2] != "meters") {
+		if !validWorkerArgs(args, filepath.Join(directory, "netswitch-engine"), func(a, b string) bool { return a == b }) {
 			continue
 		}
 		fd, err := unix.PidfdOpen(int(pid), 0)

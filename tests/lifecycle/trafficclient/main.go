@@ -21,7 +21,7 @@ const marker = "other-user"
 const request = "ping " + marker + "\n"
 
 func main() {
-	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" || os.Getenv("NETSWITCH_LIFECYCLE_CI") != "1" || len(os.Args) != 2 {
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" || os.Getenv("NETSWITCH_LIFECYCLE_CI") != "1" || (len(os.Args) != 2 && len(os.Args) != 3) {
 		os.Exit(2)
 	}
 	if err := run(); err != nil {
@@ -30,7 +30,16 @@ func main() {
 	}
 }
 func run() error {
-	conn, err := net.DialTimeout("tcp4", os.Args[1], 5*time.Second)
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	bound := len(os.Args) == 3
+	if bound {
+		ip := net.ParseIP(os.Args[2])
+		if ip == nil || ip.To4() == nil {
+			return fmt.Errorf("invalid bind IPv4 %q", os.Args[2])
+		}
+		dialer.LocalAddr = &net.TCPAddr{IP: ip}
+	}
+	conn, err := dialer.Dial("tcp4", os.Args[1])
 	if err != nil {
 		return err
 	}
@@ -46,7 +55,16 @@ func run() error {
 	if err := validReply(line); err != nil {
 		return err
 	}
+	conn.SetDeadline(time.Time{})
 	fmt.Println("ready")
+	if bound {
+		go func() {
+			var b [1]byte
+			if _, err := conn.Read(b[:]); err != nil {
+				fmt.Println("aborted")
+			}
+		}()
+	}
 	_, err = io.Copy(io.Discard, os.Stdin)
 	return err
 }

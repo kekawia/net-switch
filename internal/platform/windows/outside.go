@@ -5,12 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math/bits"
-	"net/netip"
-	"os"
-	"regexp"
-	"slices"
-	"strings"
 	"time"
+
+	"github.com/AyoubAchour/net-switch/internal/platform/outside"
 )
 
 // Connections that go around the routing engine, with their byte counts from
@@ -19,36 +16,10 @@ import (
 // step: the connection list is read every fifth second, and the counters of
 // the connections found are read every second.
 
-type outsideEntry struct {
-	ID             string  `json:"id"`
-	PID            uint32  `json:"pid"`
-	Path           string  `json:"path"`
-	Local          string  `json:"local"`
-	Created        string  `json:"created"`
-	ProcessStarted string  `json:"processStarted,omitempty"`
-	Down           *uint64 `json:"down"`
-	Up             *uint64 `json:"up"`
-}
+type outsideEntry = outside.Entry
+type outsideLine = outside.Line
 
-type outsideLine struct {
-	Estats  bool           `json:"estats"`
-	Outside []outsideEntry `json:"outside"`
-}
-
-// The connection list is read this often, in seconds.
-const rescanEvery = 5
-
-// Local addresses that aren't on either line: loopback, unbound, and the
-// routing engine's own tunnel.
-var skipLocal = map[string]bool{"127.0.0.1": true, "0.0.0.0": true, "198.18.0.1": true}
-
-// Remote addresses on a local network, loopback, link-local, multicast and
-// broadcast. The same pattern the PowerShell version matched.
-var privateRemote = regexp.MustCompile(`^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|22[4-9]\.|23[0-9]\.|255\.)`)
-
-func ignored(local, remote string) bool {
-	return skipLocal[local] || privateRemote.MatchString(remote)
-}
+func ignored(local, remote string) bool { return outside.Ignored(local, remote) }
 
 // One row of the connection table.
 type tcpConnection struct {
@@ -87,7 +58,7 @@ func formatCreated(filetime int64) string {
 // The owner and start time are part of the id too, so a reused address and
 // port is never mistaken for the old connection.
 func connectionID(local string, localPort uint16, remote string, remotePort uint16, pid uint32, created string) string {
-	return fmt.Sprintf("%s:%d>%s:%d|%d|%s", local, localPort, remote, remotePort, pid, created)
+	return outside.ConnectionID(local, localPort, remote, remotePort, pid, created)
 }
 
 // What the watcher asks Windows. Tests replace it.
@@ -101,97 +72,48 @@ type tcpSystem struct {
 	read   func(row *mibTcpRow) (down, up uint64, ok bool)
 }
 
-type trackedConnection struct {
-	entry    outsideEntry
-	row      mibTcpRow
-	measured bool
-}
-
 type outsideWatcher struct {
-	engine  string
-	system  tcpSystem
-	tick    int
-	tracked map[string]*trackedConnection
+	*outside.Watcher[mibTcpRow]
 }
 
 func newOutsideWatcher(engine string, system tcpSystem) *outsideWatcher {
-	return &outsideWatcher{engine: engine, system: system, tracked: map[string]*trackedConnection{}}
+	var start func(uint32, *mibTcpRow) string
+	if system.processStart != nil {
+		start = func(pid uint32, _ *mibTcpRow) string { return system.processStart(pid) }
+	}
+	return &outsideWatcher{
+		Watcher: outside.NewWatcher(engine, outside.System[mibTcpRow]{
+			Estats:       system.estats,
+			CaseFoldPath: true,
+			Connections: func() ([]outside.Connection[mibTcpRow], error) {
+				rows, err := system.connections()
+				if err != nil {
+					return nil, err
+				}
+				out := make([]outside.Connection[mibTcpRow], len(rows))
+				for i, c := range rows {
+					out[i] = outside.Connection[mibTcpRow]{
+						Established: c.state == tcpStateEstablished,
+						Local:       c.local,
+						LocalPort:   c.localPort,
+						Remote:      c.remote,
+						RemotePort:  c.remotePort,
+						PID:         c.pid,
+						Created:     formatCreated(c.created),
+						Row:         c.row(),
+					}
+				}
+				return out, nil
+			},
+			ProcessPath:  system.processPath,
+			ProcessStart: start,
+			Enable:       func(row *mibTcpRow) bool { return system.enable(row) == 0 },
+			Read:         system.read,
+		}),
+	}
 }
 
-func (w *outsideWatcher) sample() outsideLine {
-	if w.tick%rescanEvery == 0 {
-		w.rescan()
-	}
-	w.tick++
-	line := outsideLine{Estats: w.system.estats, Outside: make([]outsideEntry, 0, len(w.tracked))}
-	ids := make([]string, 0, len(w.tracked))
-	for id := range w.tracked {
-		ids = append(ids, id)
-	}
-	slices.Sort(ids)
-	for _, id := range ids {
-		tracked := w.tracked[id]
-		entry := tracked.entry
-		if tracked.measured {
-			if down, up, ok := w.system.read(&tracked.row); ok {
-				entry.Down, entry.Up = &down, &up
-			}
-		}
-		line.Outside = append(line.Outside, entry)
-	}
-	return line
-}
-
-func (w *outsideWatcher) rescan() {
-	connections, err := w.system.connections()
-	if err != nil {
-		// A failed read doesn't mean the connections closed: keep them.
-		fmt.Fprintf(os.Stderr, "can't read the connection table: %v\n", err)
-		return
-	}
-	paths := map[uint32]string{}
-	seen := map[string]bool{}
-	for _, c := range connections {
-		if c.state != tcpStateEstablished {
-			continue
-		}
-		local, remote := netip.AddrFrom4(c.local).String(), netip.AddrFrom4(c.remote).String()
-		if ignored(local, remote) {
-			continue
-		}
-		path, known := paths[c.pid]
-		if !known {
-			path = w.system.processPath(c.pid)
-			paths[c.pid] = path
-		}
-		// The engine's own connections are the routed traffic itself. Windows
-		// paths ignore case, as PowerShell's -eq did.
-		if w.engine != "" && strings.EqualFold(path, w.engine) {
-			continue
-		}
-		created := formatCreated(c.created)
-		id := connectionID(local, c.localPort, remote, c.remotePort, c.pid, created)
-		seen[id] = true
-		if w.tracked[id] != nil {
-			continue
-		}
-		row := c.row()
-		measured := w.system.estats && w.system.enable(&row) == 0
-		w.tracked[id] = &trackedConnection{
-			entry:    outsideEntry{ID: id, PID: c.pid, Path: path, Local: local, Created: created},
-			row:      row,
-			measured: measured,
-		}
-		if w.system.processStart != nil {
-			w.tracked[id].entry.ProcessStarted = w.system.processStart(c.pid)
-		}
-	}
-	for id := range w.tracked {
-		if !seen[id] {
-			delete(w.tracked, id)
-		}
-	}
-}
+func (w *outsideWatcher) sample() outsideLine { return w.Sample() }
 
 const (
 	afInet = 2

@@ -941,6 +941,154 @@ func TestRealServices(t *testing.T) {
 			t.Fatal("replacement did not retire the old outcome", old, current)
 		}
 	})
+	t.Run("outside-connections-and-reconnect", func(t *testing.T) {
+		if runtime.GOOS != "linux" {
+			t.Skip("Linux sock_diag outside stream and SOCK_DESTROY reconnect")
+		}
+		addBody, _ := json.Marshal(map[string]string{"alias": fixture.churnLine})
+		code, b := api(t, session.URL, session.Token, "POST", "/api/lines/add", string(addBody))
+		if code != 200 {
+			t.Fatal("add second line for outside reconnect", code, string(b))
+		}
+		var addedState struct {
+			Lines []lines.Line `json:"lines"`
+		}
+		if err := json.Unmarshal(b, &addedState); err != nil || len(addedState.Lines) != 2 {
+			t.Fatal("two-line state precondition", err, string(b))
+		}
+		secondID := addedState.Lines[1].ID
+		defer func() {
+			removeBody, _ := json.Marshal(map[string]string{"id": secondID})
+			rc, rb := api(t, session.URL, session.Token, "POST", "/api/lines/remove", string(removeBody))
+			if rc != 200 {
+				t.Errorf("remove second line cleanup failed: %d %s", rc, rb)
+			}
+		}()
+
+		// Keep a routed stream open concurrently so the engine owns a live
+		// fwmark socket to the same target and must still be excluded from outside.
+		routed := routedStream(t, ctx, fixture)
+		defer routed.Close()
+		fixture.exchange(t, routed)
+
+		appPath := filepath.Join(dir, binary("lifecycle-other-app"))
+		engineExe := filepath.Join(dir, binary("netswitch-engine"))
+		process := other.command(appPath, fixture.target, "192.168.1.2")
+		input, err := process.StdinPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		output, err := process.StdoutPipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var diagnostics bytes.Buffer
+		process.Stderr = &diagnostics
+		if err := process.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { input.Close(); _ = process.Process.Kill(); _ = process.Wait() })
+		reader := bufio.NewReader(output)
+		readyLine, err := reader.ReadString('\n')
+		if err != nil || strings.TrimSpace(readyLine) != "ready" {
+			t.Fatal("bound outside app did not start", err, readyLine, diagnostics.String())
+		}
+
+		var appKey string
+		wait(t, "bound non-TUN socket reported in outside state", 15*time.Second, func() bool {
+			status, sb := api(t, session.URL, session.Token, "GET", "/api/state", "")
+			if status != 200 {
+				return false
+			}
+			var state struct {
+				Apps []struct {
+					Key     string `json:"key"`
+					Path    string `json:"path"`
+					Outside *struct {
+						Connections int            `json:"connections"`
+						ByLine      map[string]int `json:"byLine"`
+						Measured    bool           `json:"measured"`
+					} `json:"outside"`
+				} `json:"apps"`
+			}
+			if json.Unmarshal(sb, &state) != nil {
+				return false
+			}
+			for _, app := range state.Apps {
+				if app.Path == engineExe && app.Outside != nil {
+					t.Fatalf("engine executable leaked into outside connections: %+v", app)
+				}
+				if app.Path == appPath && app.Outside != nil && app.Outside.Connections == 1 && app.Outside.ByLine["a1"] == 1 && app.Outside.Measured {
+					appKey = app.Key
+					return true
+				}
+			}
+			return false
+		})
+
+		pinBody, _ := json.Marshal(map[string]any{"path": appPath, "line": secondID})
+		if code, b := api(t, session.URL, session.Token, "POST", "/api/app-line", string(pinBody)); code != 200 {
+			t.Fatal("pin outside app to second line", code, string(b))
+		}
+		reconnectBody, _ := json.Marshal(map[string]string{"key": appKey})
+		code, b = api(t, session.URL, session.Token, "POST", "/api/reconnect", string(reconnectBody))
+		if code != 200 {
+			t.Fatal("reconnect outside app", code, string(b))
+		}
+		var rec struct {
+			Closed int    `json:"closed"`
+			Failed int    `json:"failed"`
+			Gone   int    `json:"gone"`
+			Reason string `json:"reason"`
+		}
+		if err := json.Unmarshal(b, &rec); err != nil {
+			t.Fatal(err, string(b))
+		}
+		if rec.Reason != "" || rec.Closed != 1 || rec.Failed != 0 || rec.Gone != 0 {
+			t.Fatalf("unexpected outside reconnect result: %+v (%s)", rec, b)
+		}
+
+		aborted := make(chan string, 1)
+		go func() {
+			line, _ := reader.ReadString('\n')
+			aborted <- strings.TrimSpace(line)
+		}()
+		select {
+		case got := <-aborted:
+			if got != "aborted" {
+				t.Fatalf("bound socket reported %q, want aborted; stderr=%s", got, diagnostics.String())
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("bound socket was not aborted by SOCK_DESTROY; stderr=%s", diagnostics.String())
+		}
+
+		// The routed stream to the same remote endpoint must remain intact.
+		fixture.exchange(t, routed)
+
+		wait(t, "closed outside socket removed after rescan", 10*time.Second, func() bool {
+			status, sb := api(t, session.URL, session.Token, "GET", "/api/state", "")
+			if status != 200 {
+				return false
+			}
+			var state struct {
+				Apps []struct {
+					Path    string `json:"path"`
+					Outside *struct {
+						Connections int `json:"connections"`
+					} `json:"outside"`
+				} `json:"apps"`
+			}
+			if json.Unmarshal(sb, &state) != nil {
+				return false
+			}
+			for _, app := range state.Apps {
+				if app.Path == appPath && app.Outside != nil && app.Outside.Connections > 0 {
+					return false
+				}
+			}
+			return true
+		})
+	})
 	t.Run("enrollment-preserves-routing-and-same-owner-is-noop", func(t *testing.T) {
 		resetControlRecoveryWindow(t)
 		before := getStatus(t, c)

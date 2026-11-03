@@ -15,19 +15,31 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/platform"
+	linuxplatform "github.com/AyoubAchour/net-switch/internal/platform/linux"
 	"github.com/AyoubAchour/net-switch/internal/platform/worker"
 )
 
-type linuxPlatform struct{ workers worker.Supervisor }
+type linuxPlatform struct {
+	workers    worker.Supervisor
+	enginePath string
+}
 
 func nativePlatform(c Config, log func(string)) platform.System {
-	return &linuxPlatform{workers: worker.Supervisor{Executable: filepath.Join(c.Directory, "netswitch-engine"), Log: func(err error) { log(err.Error()) }}}
+	exe := filepath.Join(c.Directory, "netswitch-engine")
+	return &linuxPlatform{
+		workers:    worker.Supervisor{Executable: exe, Log: func(err error) { log(err.Error()) }},
+		enginePath: exe,
+	}
 }
 func (p *linuxPlatform) Call(ctx context.Context, op string, args map[string]any) (any, error) {
 	return p.workers.Once(ctx, op, args)
 }
 func (p *linuxPlatform) Stream(ctx context.Context, mode string, emit func([]byte), report func(error)) {
-	p.workers.Stream(ctx, mode, nil, emit, report)
+	var args []string
+	if mode == "outside" {
+		args = []string{"--engine", p.enginePath}
+	}
+	p.workers.Stream(ctx, mode, args, emit, report)
 }
 func linuxCall(op string, args map[string]any) (any, error) {
 	switch op {
@@ -120,6 +132,10 @@ func linuxCall(op string, args map[string]any) (any, error) {
 		return map[string]any{"adapters": adapters, "defaultRoutes": routes, "readAt": time.Now().UnixMilli(), "policy": nil}, nil
 	case "line-check":
 		return map[string]any{"outcome": "engineUnavailable", "delay": nil}, nil
+	case "close-tcp":
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		return linuxplatform.CloseTCP(ctx, args)
 	case "stop-process":
 		// Guarded adapter children cannot survive the engine service on Linux.
 		// Never kill a PID from a previous boot or a legacy untrusted PID file.
@@ -144,7 +160,11 @@ func Worker(args []string) int {
 		}
 		return 0
 	}
+	if len(args) >= 1 && args[0] == "outside" {
+		return linuxplatform.RunOutside(args[1:])
+	}
 	if len(args) == 1 && (args[0] == "network" || args[0] == "meters") {
+		go linuxplatform.WatchStdinEOF()
 		for {
 			value, err := linuxCall(args[0], nil)
 			if err != nil {

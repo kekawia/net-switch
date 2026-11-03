@@ -431,7 +431,11 @@ func (c *Core) reconnect(ctx context.Context, key string) (map[string]any, error
 		codes = append(codes, fmt.Sprint(code))
 	}
 	c.log("reconnect %s: closed %d, failed %d (codes %s), already gone %d", key, closed, failed, strings.Join(codes, ","), gone)
-	return map[string]any{"closed": closed, "failed": failed, "gone": gone}, nil
+	out := map[string]any{"closed": closed, "failed": failed, "gone": gone}
+	if reason := js.Text(m["reason"]); reason != "" {
+		out["reason"] = reason
+	}
+	return out, nil
 }
 func (c *Core) changeSettings(ctx context.Context, b map[string]any) error {
 	for _, key := range []string{"checkForUpdates", "autostart"} {
