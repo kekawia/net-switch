@@ -19,10 +19,12 @@ import (
 )
 
 const (
-	pfKthread       = 0x00200000
-	maxProcReadSize = 64 << 10
-	maxAsyncFDScan  = 262144
-	procPIDInitIno  = 0xEFFFFFFC
+	pfKthread             = 0x00200000
+	maxProcReadSize       = 64 << 10
+	maxMapsFallbackBytes  = 4 << 20
+	maxEnvironStreamBytes = 8 << 20
+	maxAsyncFDScan        = 262144
+	procPIDInitIno        = 0xEFFFFFFC
 )
 
 func readBoundedFD(fd int, maxBytes int) ([]byte, error) {
@@ -239,6 +241,36 @@ func procRootHasZeroAsyncSubmitters() bool {
 	return true
 }
 
+func statExeIdentity(pidStr string) (dev, ino uint64, err error) {
+	var exeSt unix.Stat_t
+	err = unix.Stat(filepath.Join("/proc", pidStr, "exe"), &exeSt)
+	if err == nil {
+		return EncodeKernelDev(unix.Major(uint64(exeSt.Dev)), unix.Minor(uint64(exeSt.Dev))), exeSt.Ino, nil
+	}
+	if !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EPERM) {
+		return 0, 0, err
+	}
+	rawExeLink, linkErr := os.Readlink(filepath.Join("/proc", pidStr, "exe"))
+	if linkErr != nil {
+		return 0, 0, err
+	}
+	mapsFD, openErr := unix.Open(filepath.Join("/proc", pidStr, "maps"), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	if openErr != nil {
+		return 0, 0, err
+	}
+	mapsFile := os.NewFile(uintptr(mapsFD), "proc-maps-exe")
+	rawMaps, readErr := io.ReadAll(io.LimitReader(mapsFile, maxMapsFallbackBytes+1))
+	_ = mapsFile.Close()
+	if readErr != nil || len(rawMaps) > maxMapsFallbackBytes {
+		return 0, 0, err
+	}
+	mappedDev, mappedIno, ok := parseProcMapsExeIdentity(string(rawMaps), rawExeLink)
+	if !ok {
+		return 0, 0, err
+	}
+	return mappedDev, mappedIno, nil
+}
+
 // IsActorIncarnationAlive reports whether ctx still matches the live, non-zombie
 // process incarnation at /proc/<TGID>.
 func IsActorIncarnationAlive(ctx ExecutionContext) bool {
@@ -263,12 +295,11 @@ func IsActorIncarnationAlive(ctx ExecutionContext) bool {
 	if ctx.KernelThread {
 		return true
 	}
-	var exeSt unix.Stat_t
-	if err := unix.Stat(filepath.Join("/proc", pidStr, "exe"), &exeSt); err != nil {
+	dev, ino, err := statExeIdentity(pidStr)
+	if err != nil {
 		return false
 	}
-	dev := EncodeKernelDev(unix.Major(uint64(exeSt.Dev)), unix.Minor(uint64(exeSt.Dev)))
-	return dev == ctx.ExeDev && exeSt.Ino == ctx.ExeIno
+	return dev == ctx.ExeDev && ino == ctx.ExeIno
 }
 
 // SampleExecutionContext reads one execution-context point sample from /proc/<tgid>.
@@ -304,12 +335,12 @@ func SampleExecutionContext(tgid uint32, startBoottime, execID uint64) (Executio
 	ctx.UID = uid
 	ctx.GID = gid
 
-	var exeSt unix.Stat_t
-	if err := unix.Stat(filepath.Join("/proc", pidStr, "exe"), &exeSt); err != nil {
+	exeDev, exeIno, err := statExeIdentity(pidStr)
+	if err != nil {
 		return ExecutionContext{}, nil, err
 	}
-	ctx.ExeDev = EncodeKernelDev(unix.Major(uint64(exeSt.Dev)), unix.Minor(uint64(exeSt.Dev)))
-	ctx.ExeIno = exeSt.Ino
+	ctx.ExeDev = exeDev
+	ctx.ExeIno = exeIno
 
 	var mntSt, netSt, pidSt unix.Stat_t
 	if err := unix.Stat(filepath.Join("/proc", pidStr, "ns", "mnt"), &mntSt); err != nil {
@@ -382,18 +413,11 @@ func readAppImageEnvAndBacking(tgid uint32) (appImageEnv, appDirEnv string, back
 	if err != nil {
 		return "", "", nil
 	}
-	raw, readErr := readBoundedFD(envFD, maxProcReadSize)
-	_ = unix.Close(envFD)
-	if readErr != nil || len(raw) == 0 {
+	envFile := os.NewFile(uintptr(envFD), "proc-environ")
+	appImageEnv, appDirEnv, ok := parseAppImageEnviron(envFile, maxEnvironStreamBytes)
+	_ = envFile.Close()
+	if !ok || (appImageEnv == "" && appDirEnv == "") {
 		return "", "", nil
-	}
-	for _, entry := range bytes.Split(raw, []byte{0}) {
-		s := string(entry)
-		if strings.HasPrefix(s, "APPIMAGE=") {
-			appImageEnv = strings.TrimPrefix(s, "APPIMAGE=")
-		} else if strings.HasPrefix(s, "APPDIR=") {
-			appDirEnv = strings.TrimPrefix(s, "APPDIR=")
-		}
 	}
 	cleanImg := path.Clean(strings.TrimSpace(appImageEnv))
 	if !strings.HasPrefix(cleanImg, "/") {
@@ -583,16 +607,14 @@ func (rt *ProvenanceRuntime) SyncQueuedActorsWithOptions(events []QueuedActorEve
 		rt.ReapExitedUnreferencedActors()
 	}
 
-	rt.SyncActors(func(l *IdentityLedger, processed map[ActorKey]bool, track func(ActorKey, ActorIdentityKey, time.Time)) {
+	rt.SyncActors(func(l *IdentityLedger, track func(ActorKey, time.Time) bool) {
 		for _, item := range sorted {
 			k := item.Key
 			ev := item.Evidence
-			if processed[k] {
+			if !track(k, observedAt) {
 				continue
 			}
-			processed[k] = true
 			actorKey := ActorIdentityKey{TGID: k.TGID, StartBoottime: k.Start, ExecID: k.Exec}
-			track(k, actorKey, observedAt)
 			if _, ok := l.actors[actorKey]; ok {
 				if hasAsync(k.TGID) {
 					l.ObserveUnobservableSubmitter(k.Cookie)

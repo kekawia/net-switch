@@ -215,7 +215,7 @@ func LoadEngineBridge(ifindex, netns uint32, epoch, actualQueue uint64) (_ *Brid
 		Readers: ReaderLimit,
 	}
 	c, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{Programs: ebpf.ProgramOptions{
-		LogLevel: ebpf.LogLevelBranch | ebpf.LogLevelStats, LogSizeStart: 64 << 10,
+		LogSizeStart: 64 << 10,
 	}})
 	if err != nil {
 		return nil, loadError("engine bridge verifier/load", err)
@@ -225,24 +225,12 @@ func LoadEngineBridge(ifindex, netns uint32, epoch, actualQueue uint64) (_ *Brid
 		config:        cfg,
 		expectedQueue: actualQueue,
 		packetSlots:   packetSlots,
-		VerifierStats: make(map[string]string),
 	}
 	defer func() {
 		if err != nil {
 			_ = b.closeObjects()
 		}
 	}()
-	for name, program := range c.Programs {
-		for _, line := range strings.Split(program.VerifierLog, "\n") {
-			if line = strings.TrimSpace(line); strings.HasPrefix(line, "processed ") {
-				b.VerifierStats[name] = strings.Clone(line)
-			}
-		}
-		if b.VerifierStats[name] == "" {
-			return nil, fmt.Errorf("verifier statistics missing for %s", name)
-		}
-		program.VerifierLog = ""
-	}
 	if err = c.Maps["config"].Update(uint32(0), cfg, ebpf.UpdateAny); err != nil {
 		return nil, err
 	}
@@ -391,7 +379,12 @@ func (b *Bridge) Enable(actualQueue uint64) error {
 	return b.Collection.Maps["config"].Update(uint32(0), b.config, ebpf.UpdateAny)
 }
 
-func (b *Bridge) Faults() uint64 { return atomic.LoadUint64((*uint64)(unsafe.Pointer(&b.health[0]))) }
+func (b *Bridge) Faults() uint64 {
+	if b == nil || len(b.health) < 8 {
+		return 0
+	}
+	return atomic.LoadUint64((*uint64)(unsafe.Pointer(&b.health[0])))
+}
 
 type BridgeReader struct {
 	Measure              bool

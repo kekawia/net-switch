@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 )
@@ -62,26 +63,54 @@ type envelopePin struct {
 	retained  bool
 }
 
-type socketActorAssoc struct {
-	key     ActorKey
-	actorID ActorIdentityKey
+var runtimeMonoOrigin = time.Now()
+
+func monoSinceOrigin(t time.Time) int64 {
+	if t.IsZero() {
+		t = time.Now()
+	}
+	return int64(t.Sub(runtimeMonoOrigin))
 }
+
+type cookieActorRef struct {
+	start uint64
+	exec  uint64
+	tgid  uint32
+	_     uint32
+}
+
+// trackedCookie is a 40-byte pointer-free (noscan) map value holding the
+// cookie's earliest observation timestamp, current netlink sweep mark, and
+// inline first actor incarnation so single-actor sockets allocate zero slices.
+type trackedCookie struct {
+	observedMono int64
+	first        cookieActorRef
+	liveSweep    uint32
+	hasFirst     bool
+	_            [3]byte
+}
+
+var (
+	_ [40 - unsafe.Sizeof(trackedCookie{})]byte
+	_ [unsafe.Sizeof(trackedCookie{}) - 40]byte
+)
 
 // ProvenanceRuntime coordinates thread-safe actor/socket lifecycle updates on
 // an IdentityLedger and SocketSlotTable while allowing forwarding decisions to
 // validate pinned socket-slot generations atomically without locks or syscalls.
 type ProvenanceRuntime struct {
-	mu              sync.Mutex
-	closed          bool
-	epoch           atomic.Uint64
-	epochPoisoned   atomic.Bool
-	ledger          *IdentityLedger
-	slots           *SocketSlotTable
-	classifier      *KernelControlClassifier
-	processed       map[ActorKey]bool
-	cookieActors    map[uint64][]socketActorAssoc
-	cookieObserved  map[uint64]time.Time
-	actorRefCookies map[ActorIdentityKey]int
+	mu                sync.Mutex
+	closed            bool
+	epoch             atomic.Uint64
+	epochPoisoned     atomic.Bool
+	ledger            *IdentityLedger
+	slots             *SocketSlotTable
+	classifier        *KernelControlClassifier
+	processed         map[ActorKey]bool
+	cookies           map[uint64]trackedCookie
+	multiCookieActors map[uint64][]cookieActorRef
+	actorRefCookies   map[ActorIdentityKey]int
+	liveSweepSeq      uint32
 }
 
 func NewProvenanceRuntime(epoch uint64, ledger *IdentityLedger, slots *SocketSlotTable) *ProvenanceRuntime {
@@ -99,9 +128,7 @@ func NewProvenanceRuntime(epoch uint64, ledger *IdentityLedger, slots *SocketSlo
 		ledger:          ledger,
 		slots:           slots,
 		classifier:      NewKernelControlClassifier(),
-		processed:       make(map[ActorKey]bool),
-		cookieActors:    make(map[uint64][]socketActorAssoc),
-		cookieObserved:  make(map[uint64]time.Time),
+		cookies:         make(map[uint64]trackedCookie, min(slots.MaxSlots, 4096)),
 		actorRefCookies: make(map[ActorIdentityKey]int),
 	}
 	rt.epoch.Store(epoch)
@@ -139,8 +166,31 @@ func (rt *ProvenanceRuntime) SetEpoch(epoch uint64) {
 	rt.mu.Unlock()
 }
 
-// AdvanceEpoch transitions rt to a new strictly larger epoch during a quiesced
-// live bridge/probe rebuild. Any previously acquired ProvenanceEnvelope on the
+// AdvanceBridgeEpoch transitions rt to a new strictly larger packet-capture
+// epoch during a quiesced live Bridge reload while keeping the uninterrupted
+// AcceptedSenderProbe, IdentityLedger, and SocketSlotTable intact. Any
+// previously acquired ProvenanceEnvelope immediately fails ValidateForwarding
+// (rt.epoch != e.Epoch -> MissingCookie), while existing live sockets retain
+// their validated slot ownership for packets captured in the new Bridge epoch.
+// AdvanceBridgeEpoch never clears an already-poisoned epoch.
+func (rt *ProvenanceRuntime) AdvanceBridgeEpoch(newEpoch uint64) {
+	if rt == nil {
+		return
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	if rt.closed {
+		return
+	}
+	if cur := rt.epoch.Load(); newEpoch <= cur {
+		newEpoch = cur + 1
+	}
+	rt.epoch.Store(newEpoch)
+	rt.syncEpochPoisonedLocked()
+}
+
+// AdvanceEpoch transitions rt to a new strictly larger epoch during a full
+// live bridge+probe reset. Any previously acquired ProvenanceEnvelope on the
 // Go heap immediately sees rt.epoch.Load() != e.Epoch (returning MissingCookie)
 // while its mmap slot and IdentitySnapshot pins remain valid until GC cleanup.
 func (rt *ProvenanceRuntime) AdvanceEpoch(newEpoch uint64) {
@@ -174,6 +224,9 @@ func (rt *ProvenanceRuntime) AdvanceEpoch(newEpoch uint64) {
 		}
 	}
 	if rt.ledger != nil {
+		if rt.ledger.stagedCork != nil {
+			clear(rt.ledger.stagedCork)
+		}
 		for cookie, st := range rt.ledger.sockets {
 			owner := st.Owner
 			st.Owner = nil
@@ -188,9 +241,13 @@ func (rt *ProvenanceRuntime) AdvanceEpoch(newEpoch uint64) {
 			rt.ledger.tryReclaimSnapshot(snap)
 		}
 	}
-	clear(rt.processed)
-	clear(rt.cookieActors)
-	clear(rt.cookieObserved)
+	if rt.processed != nil {
+		clear(rt.processed)
+	}
+	clear(rt.cookies)
+	if rt.multiCookieActors != nil {
+		clear(rt.multiCookieActors)
+	}
 	clear(rt.actorRefCookies)
 	rt.classifier = NewKernelControlClassifier()
 }
@@ -292,33 +349,60 @@ func (rt *ProvenanceRuntime) ReleaseSocket(cookie uint64) {
 	_, _ = rt.RetireSocket(cookie)
 }
 
-func (rt *ProvenanceRuntime) trackSocketActorLocked(key ActorKey, actorID ActorIdentityKey, observedAt time.Time) {
+func (rt *ProvenanceRuntime) trackSocketActorLocked(key ActorKey, observedAt time.Time) bool {
 	if key.Cookie == 0 {
-		return
+		return false
 	}
-	if observedAt.IsZero() {
-		observedAt = time.Now()
-	}
-	if prev, ok := rt.cookieObserved[key.Cookie]; !ok || observedAt.Before(prev) {
-		rt.cookieObserved[key.Cookie] = observedAt
+	obsMono := monoSinceOrigin(observedAt)
+	tc, exists := rt.cookies[key.Cookie]
+	if !exists {
+		tc = trackedCookie{observedMono: obsMono}
+	} else if obsMono < tc.observedMono {
+		tc.observedMono = obsMono
 	}
 	rt.classifier.RecordUserspaceSocket(key.Cookie)
-	for _, existing := range rt.cookieActors[key.Cookie] {
-		if existing.key == key {
-			return
+
+	ref := cookieActorRef{
+		start: key.Start,
+		exec:  key.Exec,
+		tgid:  key.TGID,
+	}
+	if tc.hasFirst && tc.first == ref {
+		rt.cookies[key.Cookie] = tc
+		return false
+	}
+	if extras := rt.multiCookieActors[key.Cookie]; len(extras) > 0 {
+		for _, existing := range extras {
+			if existing == ref {
+				rt.cookies[key.Cookie] = tc
+				return false
+			}
 		}
 	}
-	rt.cookieActors[key.Cookie] = append(rt.cookieActors[key.Cookie], socketActorAssoc{
-		key:     key,
-		actorID: actorID,
-	})
-	if actorID.TGID != 0 {
+	if !tc.hasFirst {
+		tc.hasFirst = true
+		tc.first = ref
+		rt.cookies[key.Cookie] = tc
+	} else {
+		rt.cookies[key.Cookie] = tc
+		if rt.multiCookieActors == nil {
+			rt.multiCookieActors = make(map[uint64][]cookieActorRef)
+		}
+		rt.multiCookieActors[key.Cookie] = append(rt.multiCookieActors[key.Cookie], ref)
+	}
+	if key.TGID != 0 {
+		actorID := ActorIdentityKey{
+			TGID:          key.TGID,
+			StartBoottime: key.Start,
+			ExecID:        key.Exec,
+		}
 		rt.actorRefCookies[actorID]++
 	}
+	return true
 }
 
 // RetireSocket releases cookie's retained SocketSlotTable entry, removes its
-// processed ActorKeys, and returns both the BPF actor keys to delete from
+// tracked ActorKeys, and returns both the BPF actor keys to delete from
 // Maps["actors"] and any ActorIdentityKeys whose live-socket reference count
 // just reached zero.
 func (rt *ProvenanceRuntime) RetireSocket(cookie uint64) ([]ActorKey, []ActorIdentityKey) {
@@ -328,26 +412,54 @@ func (rt *ProvenanceRuntime) RetireSocket(cookie uint64) ([]ActorKey, []ActorIde
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	rt.ledger.ReleaseSocket(cookie)
-	delete(rt.cookieObserved, cookie)
-	assocs := rt.cookieActors[cookie]
-	delete(rt.cookieActors, cookie)
-	if len(assocs) == 0 {
+	rt.classifier.ForgetSocket(cookie)
+	tc, ok := rt.cookies[cookie]
+	delete(rt.cookies, cookie)
+	var extras []cookieActorRef
+	if rt.multiCookieActors != nil {
+		extras = rt.multiCookieActors[cookie]
+		delete(rt.multiCookieActors, cookie)
+	}
+	if (!ok || !tc.hasFirst) && len(extras) == 0 {
 		return nil, nil
 	}
-	keys := make([]ActorKey, 0, len(assocs))
+	total := len(extras)
+	if ok && tc.hasFirst {
+		total++
+	}
+	keys := make([]ActorKey, 0, total)
 	var unreferenced []ActorIdentityKey
-	for _, a := range assocs {
-		keys = append(keys, a.key)
-		delete(rt.processed, a.key)
-		if a.actorID.TGID != 0 {
-			rem := rt.actorRefCookies[a.actorID] - 1
+	retireRef := func(r cookieActorRef) {
+		ak := ActorKey{
+			Cookie: cookie,
+			Start:  r.start,
+			Exec:   r.exec,
+			TGID:   r.tgid,
+		}
+		keys = append(keys, ak)
+		if rt.processed != nil {
+			delete(rt.processed, ak)
+		}
+		if r.tgid != 0 {
+			actorID := ActorIdentityKey{
+				TGID:          r.tgid,
+				StartBoottime: r.start,
+				ExecID:        r.exec,
+			}
+			rem := rt.actorRefCookies[actorID] - 1
 			if rem <= 0 {
-				delete(rt.actorRefCookies, a.actorID)
-				unreferenced = append(unreferenced, a.actorID)
+				delete(rt.actorRefCookies, actorID)
+				unreferenced = append(unreferenced, actorID)
 			} else {
-				rt.actorRefCookies[a.actorID] = rem
+				rt.actorRefCookies[actorID] = rem
 			}
 		}
+	}
+	if ok && tc.hasFirst {
+		retireRef(tc.first)
+	}
+	for _, r := range extras {
+		retireRef(r)
 	}
 	return keys, unreferenced
 }
@@ -407,7 +519,7 @@ func (rt *ProvenanceRuntime) TrackedCookieCount() int {
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	return len(rt.cookieObserved)
+	return len(rt.cookies)
 }
 
 func (rt *ProvenanceRuntime) ActiveActorCount() int {
@@ -419,6 +531,63 @@ func (rt *ProvenanceRuntime) ActiveActorCount() int {
 	return len(rt.ledger.actors)
 }
 
+// BeginCookieLiveSweep advances the runtime's sweep generation so callers can
+// stream live socket cookies from netlink in small stack batches without
+// allocating a live-cookie map or socketRow slice.
+func (rt *ProvenanceRuntime) BeginCookieLiveSweep() uint32 {
+	if rt == nil {
+		return 0
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	rt.liveSweepSeq++
+	if rt.liveSweepSeq == 0 {
+		for cookie, tc := range rt.cookies {
+			tc.liveSweep = 0
+			rt.cookies[cookie] = tc
+		}
+		rt.liveSweepSeq = 1
+	}
+	return rt.liveSweepSeq
+}
+
+// MarkCookiesLive marks any tracked cookies present in cookies as seen during
+// sweep without allocating entries for untracked sockets.
+func (rt *ProvenanceRuntime) MarkCookiesLive(cookies []uint64, sweep uint32) {
+	if rt == nil || sweep == 0 || len(cookies) == 0 {
+		return
+	}
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	for _, cookie := range cookies {
+		if tc, ok := rt.cookies[cookie]; ok && tc.liveSweep != sweep {
+			tc.liveSweep = sweep
+			rt.cookies[cookie] = tc
+		}
+	}
+}
+
+// CollectDeadCookies returns tracked cookies observed strictly before started
+// that were not marked during sweep.
+func (rt *ProvenanceRuntime) CollectDeadCookies(started time.Time, sweep uint32) []uint64 {
+	if rt == nil || sweep == 0 {
+		return nil
+	}
+	cutoff := monoSinceOrigin(started)
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	var dead []uint64
+	for cookie, tc := range rt.cookies {
+		if tc.observedMono >= cutoff {
+			continue
+		}
+		if tc.liveSweep != sweep {
+			dead = append(dead, cookie)
+		}
+	}
+	return dead
+}
+
 // ReconcileLiveCookies returns tracked cookies observed strictly before started
 // that are absent from live, ensuring missed netlink destroy notifications
 // never leak socket slots, BPF actor rows, or retained snapshots.
@@ -426,11 +595,12 @@ func (rt *ProvenanceRuntime) ReconcileLiveCookies(started time.Time, live map[ui
 	if rt == nil {
 		return nil
 	}
+	cutoff := monoSinceOrigin(started)
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	var dead []uint64
-	for cookie, obs := range rt.cookieObserved {
-		if !obs.Before(started) {
+	for cookie, tc := range rt.cookies {
+		if tc.observedMono >= cutoff {
 			continue
 		}
 		if _, ok := live[cookie]; !ok {
@@ -440,15 +610,15 @@ func (rt *ProvenanceRuntime) ReconcileLiveCookies(started time.Time, live map[ui
 	return dead
 }
 
-// SyncActors runs fn under rt.mu with access to the ledger, processed-actor map,
-// and socket-actor association tracker.
-func (rt *ProvenanceRuntime) SyncActors(fn func(ledger *IdentityLedger, processed map[ActorKey]bool, track func(key ActorKey, actorID ActorIdentityKey, observedAt time.Time))) {
+// SyncActors runs fn under rt.mu with access to the ledger and the compact
+// socket-actor association tracker (which reports false on duplicate ActorKeys).
+func (rt *ProvenanceRuntime) SyncActors(fn func(ledger *IdentityLedger, track func(key ActorKey, observedAt time.Time) bool)) {
 	if rt == nil || fn == nil {
 		return
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
-	fn(rt.ledger, rt.processed, rt.trackSocketActorLocked)
+	fn(rt.ledger, rt.trackSocketActorLocked)
 	rt.syncEpochPoisonedLocked()
 }
 
@@ -471,13 +641,16 @@ func (rt *ProvenanceRuntime) RecordKernelControlSocket(ev KernelControlEvidence)
 }
 
 // WithLedger runs fn under rt.mu with direct access to the underlying ledger
-// and processed-actor map (for Linux /proc actor enrichment).
+// and lazily-allocated processed-actor map (for full-map proof tests).
 func (rt *ProvenanceRuntime) WithLedger(fn func(ledger *IdentityLedger, processed map[ActorKey]bool)) {
 	if rt == nil || fn == nil {
 		return
 	}
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
+	if rt.processed == nil {
+		rt.processed = make(map[ActorKey]bool)
+	}
 	fn(rt.ledger, rt.processed)
 	rt.syncEpochPoisonedLocked()
 }
@@ -541,7 +714,7 @@ func (rt *ProvenanceRuntime) LookupLiveCookieOwner(cookie uint64) (platform.Owne
 	if slotCookie != cookie {
 		return platform.Owner{Generation: gen}, IdentityUnknown, false
 	}
-	if (flags&SocketSlotConflicting) != 0 || m.lastReason == ReasonConflictingApp {
+	if (flags&SocketSlotConflicting) != 0 || codeToReason(m.lastReasonCode) == ReasonConflictingApp {
 		return platform.Owner{Generation: gen, Ambiguous: true}, IdentityConflicting, true
 	}
 	if v1 == v2 && v1 != 0 && c1 == 0 && c2 == 0 && (flags&SocketSlotValid) != 0 &&
@@ -588,8 +761,10 @@ func (rt *ProvenanceRuntime) AcquirePacket(pkt []byte, readDec ReadDecision) *Pr
 	rt.mu.Lock()
 	epoch := rt.epoch.Load()
 	if readDec.Status == ReadCookie && !readDec.Rebuild && readDec.Packet.Cookie != 0 {
-		if _, ok := rt.cookieObserved[readDec.Packet.Cookie]; !ok {
-			rt.cookieObserved[readDec.Packet.Cookie] = time.Now()
+		if _, ok := rt.cookies[readDec.Packet.Cookie]; !ok {
+			rt.cookies[readDec.Packet.Cookie] = trackedCookie{
+				observedMono: monoSinceOrigin(time.Now()),
+			}
 		}
 	}
 	fwd := rt.ledger.ResolvePacketEnvelope(readDec)

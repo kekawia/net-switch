@@ -292,11 +292,12 @@ jobs:
           --quic "$RUNNER_TEMP/nsquic"
           --app-uid "$(id -u)" --app-gid "$(id -g)" --run "$RUN_FILTER"
       - name: Run same-host backend overhead and 7c6692a fallback comparisons
-        if: ${{ !cancelled() && (matrix.runner == 'ubuntu-24.04' || matrix.runner == 'ubuntu-26.04') && inputs.run == '' && inputs.engine_build == '' && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
+        if: ${{ !cancelled() && (matrix.runner == 'ubuntu-24.04' || matrix.runner == 'ubuntu-26.04') && inputs.run == '' && (inputs.engine_build == '' || inputs.engine_build == 'all') && steps.harness.outcome == 'success' && steps.quic.outcome == 'success' }}
         env:
           GOFLAGS: -mod=vendor
         run: |
-          mkdir -p "$RUNNER_TEMP/acceptance/comparisons"
+          sudo mkdir -p "$RUNNER_TEMP/acceptance/comparisons"
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/acceptance/comparisons"
           for mode in proc_disabled proc_instrumented ebpf_full; do
             extra_env=()
             case "$mode" in

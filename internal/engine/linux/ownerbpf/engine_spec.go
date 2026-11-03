@@ -13,18 +13,19 @@ const (
 	bpfMapFlagMmapable = 0x400
 
 	// DefaultEngineMaxActors and DefaultEngineMaxSocketSlots size the production
-	// eBPF actor map and mmap socket-slot table to cover simultaneous 65,536 TCP
-	// flows + 16,384 UDP sessions + burst refusal headroom within the attribution
-	// memory budget.
-	DefaultEngineMaxActors      uint32 = 131072
-	DefaultEngineMaxSocketSlots int    = 131072
+	// eBPF actor map and mmap socket-slot table to cover host-wide sockets across
+	// client, engine-relay, refused, and peer namespaces (~200k simultaneous burst
+	// sockets in mixed-caps/overload fixtures) without map/slot poisoning while
+	// keeping userspace Go heap metadata compact (~10 MiB).
+	DefaultEngineMaxActors      uint32 = 524288
+	DefaultEngineMaxSocketSlots int    = 524288
 	DefaultEngineMaxSnapshots   int    = 16384
 	DefaultEngineMaxBlobBytes   int    = 1 << 20
 
 	// DefaultEngineActorEventQueue sizes the lockless-signaled new-actor BPF
 	// queue drained per burst; if a burst ever exceeds it, counters[6] triggers
 	// a full actors-map catchup without losing any retained actor record.
-	DefaultEngineActorEventQueue uint32 = 16384
+	DefaultEngineActorEventQueue uint32 = 65536
 
 	MaxEnginePacketSlots uint64 = 1 << 20
 )

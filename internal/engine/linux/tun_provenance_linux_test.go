@@ -538,8 +538,7 @@ func TestTunProvenanceLiveEpochRebuildRecoversWithoutAdmittingFaultedBurst(t *te
 			if closeOldReader != nil {
 				_ = closeOldReader()
 			}
-			rt.AdvanceEpoch(2)
-			_ = enrichTunTestActor(t, rt, 0x99, 4301, 500_000_000, "/usr/bin/AppRebuild")
+			rt.AdvanceBridgeEpoch(2)
 			return epoch2Src, func(drainLocked func() error) error {
 				drainedDuringRebuild = true
 				return drainLocked()

@@ -18,7 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const provenanceCookieRetireGrace = 250 * time.Millisecond
+const provenanceCookieRetireGrace = 150 * time.Millisecond
 
 func ebpfBackendSupported() bool { return true }
 
@@ -87,6 +87,7 @@ type ebpfOwnerStats struct {
 
 type ebpfOwnerState struct {
 	mu          sync.Mutex
+	stopped     bool
 	nextEpoch   atomic.Uint64
 	tun         *Tun
 	bridge      *ownerbpf.Bridge
@@ -95,9 +96,16 @@ type ebpfOwnerState struct {
 	maintCancel context.CancelFunc
 	maintWG     sync.WaitGroup
 	reconcileCh chan struct{}
+	retireCh    chan struct{}
 
-	retireMu      sync.Mutex
-	pendingRetire map[uint64]time.Time
+	retireMu                  sync.Mutex
+	pendingRetire             map[uint64]time.Time
+	lastPressureReconcileNano atomic.Int64
+
+	bridgeDeliveredBase        atomic.Uint64
+	bridgeReadUnknownBase      atomic.Uint64
+	bridgeUnknownRecursionBase atomic.Uint64
+	bridgeFaultsBase           atomic.Uint64
 
 	epochRebuilds            atomic.Uint64
 	tcpKnown                 atomic.Uint64
@@ -117,6 +125,16 @@ type ebpfOwnerState struct {
 	actorDrainErrors         atomic.Uint64
 }
 
+func (o *Owners) foldBridgeStatsLocked(b *ownerbpf.Bridge) {
+	if b == nil {
+		return
+	}
+	o.ebpf.bridgeDeliveredBase.Add(b.DeliveredWithoutRecord.Load())
+	o.ebpf.bridgeReadUnknownBase.Add(b.ReadUnknown.Load())
+	o.ebpf.bridgeUnknownRecursionBase.Add(b.UnknownRecursion.Load())
+	o.ebpf.bridgeFaultsBase.Add(b.Faults())
+}
+
 func (o *Owners) ebpfCurrent() (*ownerbpf.ProvenanceRuntime, *ownerbpf.AcceptedSenderProbe, *ownerbpf.Bridge, *Tun) {
 	o.ebpf.mu.Lock()
 	defer o.ebpf.mu.Unlock()
@@ -124,24 +142,42 @@ func (o *Owners) ebpfCurrent() (*ownerbpf.ProvenanceRuntime, *ownerbpf.AcceptedS
 }
 
 func (o *Owners) ebpfStats() *ebpfOwnerStats {
-	rt, probe, bridge, _ := o.ebpfCurrent()
+	o.ebpf.mu.Lock()
+	rt := o.ebpf.runtime
+	probe := o.ebpf.probe
+	delivered := o.ebpf.bridgeDeliveredBase.Load()
+	readUnknown := o.ebpf.bridgeReadUnknownBase.Load()
+	unknownRec := o.ebpf.bridgeUnknownRecursionBase.Load()
+	faults := o.ebpf.bridgeFaultsBase.Load()
+	if b := o.ebpf.bridge; b != nil {
+		delivered += b.DeliveredWithoutRecord.Load()
+		readUnknown += b.ReadUnknown.Load()
+		unknownRec += b.UnknownRecursion.Load()
+		faults += b.Faults()
+	}
+	o.ebpf.mu.Unlock()
+
 	out := &ebpfOwnerStats{
-		EpochRebuilds:            o.ebpf.epochRebuilds.Load(),
-		TCPKnown:                 o.ebpf.tcpKnown.Load(),
-		TCPUnknownIdentity:       o.ebpf.tcpUnknownIdentity.Load(),
-		TCPConflicting:           o.ebpf.tcpConflicting.Load(),
-		TCPMissingCookie:         o.ebpf.tcpMissingCookie.Load(),
-		TCPKernelControl:         o.ebpf.tcpKernelControl.Load(),
-		UDPKnown:                 o.ebpf.udpKnown.Load(),
-		UDPUnknownIdentity:       o.ebpf.udpUnknownIdentity.Load(),
-		UDPConflicting:           o.ebpf.udpConflicting.Load(),
-		UDPMissingCookie:         o.ebpf.udpMissingCookie.Load(),
-		UDPKernelControl:         o.ebpf.udpKernelControl.Load(),
-		UDPDatagramDrops:         o.ebpf.udpDatagramDrops.Load(),
-		UDPDatagramInvalidations: o.ebpf.udpDatagramInvalidations.Load(),
-		RetiredCookies:           o.ebpf.retiredCookies.Load(),
-		ReconciledDeadCookies:    o.ebpf.reconciledDeadCookies.Load(),
-		ActorDrainErrors:         o.ebpf.actorDrainErrors.Load(),
+		EpochRebuilds:                o.ebpf.epochRebuilds.Load(),
+		BridgeDeliveredWithoutRecord: delivered,
+		BridgeReadUnknown:            readUnknown,
+		BridgeUnknownRecursion:       unknownRec,
+		BridgeFaults:                 faults,
+		TCPKnown:                     o.ebpf.tcpKnown.Load(),
+		TCPUnknownIdentity:           o.ebpf.tcpUnknownIdentity.Load(),
+		TCPConflicting:               o.ebpf.tcpConflicting.Load(),
+		TCPMissingCookie:             o.ebpf.tcpMissingCookie.Load(),
+		TCPKernelControl:             o.ebpf.tcpKernelControl.Load(),
+		UDPKnown:                     o.ebpf.udpKnown.Load(),
+		UDPUnknownIdentity:           o.ebpf.udpUnknownIdentity.Load(),
+		UDPConflicting:               o.ebpf.udpConflicting.Load(),
+		UDPMissingCookie:             o.ebpf.udpMissingCookie.Load(),
+		UDPKernelControl:             o.ebpf.udpKernelControl.Load(),
+		UDPDatagramDrops:             o.ebpf.udpDatagramDrops.Load(),
+		UDPDatagramInvalidations:     o.ebpf.udpDatagramInvalidations.Load(),
+		RetiredCookies:               o.ebpf.retiredCookies.Load(),
+		ReconciledDeadCookies:        o.ebpf.reconciledDeadCookies.Load(),
+		ActorDrainErrors:             o.ebpf.actorDrainErrors.Load(),
 	}
 	if rt != nil {
 		out.Epoch = rt.Epoch()
@@ -151,12 +187,6 @@ func (o *Owners) ebpfStats() *ebpfOwnerStats {
 	if probe != nil {
 		out.ProbePoisoned = probe.IsPoisoned()
 		out.NoIOUringActive = probe.NoIOUringActive()
-	}
-	if bridge != nil {
-		out.BridgeDeliveredWithoutRecord = bridge.DeliveredWithoutRecord.Load()
-		out.BridgeReadUnknown = bridge.ReadUnknown.Load()
-		out.BridgeUnknownRecursion = bridge.UnknownRecursion.Load()
-		out.BridgeFaults = bridge.Faults()
 	}
 	if mapBytes, mapCount, err := ReadSelfBPFMapMemlockBytes(); err == nil {
 		out.BPFMapBytes = mapBytes
@@ -261,13 +291,20 @@ func (o *Owners) AttachProvenance(ctx context.Context, dev platform.TunDevice) (
 	o.ebpf.retireMu.Lock()
 	o.ebpf.pendingRetire = make(map[uint64]time.Time)
 	o.ebpf.retireMu.Unlock()
+	o.ebpf.lastPressureReconcileNano.Store(0)
+	o.ebpf.bridgeDeliveredBase.Store(0)
+	o.ebpf.bridgeReadUnknownBase.Store(0)
+	o.ebpf.bridgeUnknownRecursionBase.Store(0)
+	o.ebpf.bridgeFaultsBase.Store(0)
 
 	o.ebpf.mu.Lock()
+	o.ebpf.stopped = false
 	o.ebpf.tun = tun
 	o.ebpf.bridge = bridge
 	o.ebpf.probe = probe
 	o.ebpf.runtime = rt
 	o.ebpf.reconcileCh = make(chan struct{}, 1)
+	o.ebpf.retireCh = make(chan struct{}, 1)
 	o.ebpf.mu.Unlock()
 
 	tun.AttachProvenanceReader(&ebpfBridgeBurstSource{owners: o, bridge: bridge}, o.onProvenanceBurst)
@@ -306,7 +343,13 @@ func (o *Owners) attachInstrumentationOnly(dev platform.TunDevice) (bool, error)
 		return false, fmt.Errorf("enable instrumentation-only eBPF bridge: %w", err)
 	}
 
+	o.ebpf.bridgeDeliveredBase.Store(0)
+	o.ebpf.bridgeReadUnknownBase.Store(0)
+	o.ebpf.bridgeUnknownRecursionBase.Store(0)
+	o.ebpf.bridgeFaultsBase.Store(0)
+
 	o.ebpf.mu.Lock()
+	o.ebpf.stopped = false
 	o.ebpf.tun = tun
 	o.ebpf.bridge = bridge
 	o.ebpf.probe = probe
@@ -318,71 +361,74 @@ func (o *Owners) rebuildProvenanceEpoch(
 	tun *Tun,
 	closeOldReader func() error,
 ) (provenanceBurstSource, func(func() error) error, error) {
-	if err := o.StopProvenance(); err != nil {
-		return nil, nil, fmt.Errorf("quiesce faulted provenance epoch: %w", err)
+	if tun == nil {
+		return nil, nil, errors.New("cannot rebuild nil provenance TUN")
+	}
+	o.ebpf.mu.Lock()
+	stopped := o.ebpf.stopped
+	oldBridge := o.ebpf.bridge
+	probe := o.ebpf.probe
+	rt := o.ebpf.runtime
+	o.ebpf.mu.Unlock()
+	if stopped || rt == nil || probe == nil {
+		return nil, nil, errors.New("provenance stopped or detached before epoch rebuild")
+	}
+
+	if oldBridge != nil {
+		_ = oldBridge.Stop()
 	}
 	if closeOldReader != nil {
 		_ = closeOldReader()
 	}
 
 	o.ebpf.mu.Lock()
-	oldBridge := o.ebpf.bridge
-	oldProbe := o.ebpf.probe
-	rt := o.ebpf.runtime
-	o.ebpf.bridge = nil
-	o.ebpf.probe = nil
-	o.ebpf.reconcileCh = nil
+	if o.ebpf.bridge == oldBridge {
+		o.foldBridgeStatsLocked(oldBridge)
+		o.ebpf.bridge = nil
+	}
+	stopped = o.ebpf.stopped
 	o.ebpf.mu.Unlock()
 
 	if oldBridge != nil {
 		_ = oldBridge.Close()
 	}
-	if oldProbe != nil {
-		_ = oldProbe.Close()
-	}
-	if rt == nil || tun == nil {
-		return nil, nil, errors.New("cannot rebuild nil provenance runtime or TUN")
+	if stopped {
+		return nil, nil, errors.New("provenance stopped during epoch rebuild")
 	}
 
 	newEpoch := o.ebpf.nextEpoch.Add(1)
-	rt.AdvanceEpoch(newEpoch)
+	rt.AdvanceBridgeEpoch(newEpoch)
 
 	newBridge, err := ownerbpf.LoadEngineBridge(uint32(tun.Ifindex()), tun.NetNSInode(), newEpoch, uint64(tun.TxQLen()))
 	if err != nil {
 		return nil, nil, fmt.Errorf("reload eBPF provenance bridge for epoch %d: %w", newEpoch, err)
 	}
-	newProbe, err := ownerbpf.LoadEngineSenderProbe("/sys/fs/cgroup", ownerbpf.DefaultEngineMaxActors, ownerbpf.DefaultEngineActorEventQueue)
-	if err != nil {
-		_ = newBridge.Close()
-		return nil, nil, fmt.Errorf("reload eBPF sender probe for epoch %d: %w", newEpoch, err)
-	}
-
-	o.ebpf.retireMu.Lock()
-	o.ebpf.pendingRetire = make(map[uint64]time.Time)
-	o.ebpf.retireMu.Unlock()
 
 	o.ebpf.mu.Lock()
+	if o.ebpf.stopped || o.ebpf.runtime != rt || o.ebpf.probe == nil {
+		o.ebpf.mu.Unlock()
+		_ = newBridge.Close()
+		return nil, nil, errors.New("provenance stopped during bridge reload")
+	}
 	o.ebpf.bridge = newBridge
-	o.ebpf.probe = newProbe
-	o.ebpf.reconcileCh = make(chan struct{}, 1)
 	o.ebpf.mu.Unlock()
 
 	enableNew := func(drainLocked func() error) error {
-		if err := newProbe.Enable(); err != nil {
-			return fmt.Errorf("enable rebuilt eBPF sender probe: %w", err)
-		}
 		if drainLocked != nil {
 			if err := drainLocked(); err != nil {
-				_ = newProbe.Disable()
 				return fmt.Errorf("drain uncertified TUN frames during epoch rebuild: %w", err)
 			}
 		}
+		o.ebpf.mu.Lock()
+		aborted := o.ebpf.stopped || o.ebpf.bridge != newBridge
+		o.ebpf.mu.Unlock()
+		if aborted {
+			return errors.New("provenance stopped before enabling rebuilt bridge")
+		}
 		if err := newBridge.Enable(uint64(tun.TxQLen())); err != nil {
-			_ = newProbe.Disable()
 			return fmt.Errorf("enable rebuilt eBPF provenance bridge: %w", err)
 		}
 		o.ebpf.epochRebuilds.Add(1)
-		o.startProvenanceMaintenance()
 		return nil
 	}
 	return &ebpfBridgeBurstSource{owners: o, bridge: newBridge}, enableNew, nil
@@ -413,6 +459,7 @@ func (o *Owners) EnableProvenance() error {
 
 func (o *Owners) StopProvenance() error {
 	o.ebpf.mu.Lock()
+	o.ebpf.stopped = true
 	cancel := o.ebpf.maintCancel
 	o.ebpf.maintCancel = nil
 	probe := o.ebpf.probe
@@ -441,11 +488,13 @@ func (o *Owners) CloseProvenance() error {
 	bridge := o.ebpf.bridge
 	probe := o.ebpf.probe
 	rt := o.ebpf.runtime
+	o.foldBridgeStatsLocked(bridge)
 	o.ebpf.tun = nil
 	o.ebpf.bridge = nil
 	o.ebpf.probe = nil
 	o.ebpf.runtime = nil
 	o.ebpf.reconcileCh = nil
+	o.ebpf.retireCh = nil
 	o.ebpf.mu.Unlock()
 
 	o.ebpf.retireMu.Lock()
@@ -487,6 +536,13 @@ func (o *Owners) drainPendingActors(rt *ownerbpf.ProvenanceRuntime, probe *owner
 	}
 	if len(events) > 0 {
 		rt.SyncQueuedActorsWithOptions(events, probe.NoIOUringActive())
+		if rt.TrackedCookieCount() >= ownerbpf.DefaultEngineMaxSocketSlots/4 {
+			nowNano := time.Now().UnixNano()
+			last := o.ebpf.lastPressureReconcileNano.Load()
+			if nowNano-last >= int64(250*time.Millisecond) && o.ebpf.lastPressureReconcileNano.CompareAndSwap(last, nowNano) {
+				o.requestProvenanceReconcile()
+			}
+		}
 	}
 	if probe.IsPoisoned() {
 		rt.PoisonEpoch()
@@ -521,11 +577,26 @@ func (o *Owners) scheduleProvenanceCookieRetire(cookie uint64) {
 		if _, exists := o.ebpf.pendingRetire[cookie]; !exists {
 			o.ebpf.pendingRetire[cookie] = time.Now()
 		}
-		flushNow = len(o.ebpf.pendingRetire) >= 8192
+		flushNow = len(o.ebpf.pendingRetire) >= 2048
 	}
 	o.ebpf.retireMu.Unlock()
 	if flushNow {
-		o.requestProvenanceReconcile()
+		o.requestProvenanceRetireSweep()
+	}
+}
+
+func (o *Owners) requestProvenanceRetireSweep() {
+	if !o.isEBPFBackend() {
+		return
+	}
+	o.ebpf.mu.Lock()
+	ch := o.ebpf.retireCh
+	o.ebpf.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -595,28 +666,38 @@ func (o *Owners) reconcileProvenanceLiveCookies(ctx context.Context) {
 	if rt.TrackedCookieCount() > 0 {
 		started := time.Now().Add(-provenanceCookieRetireGrace)
 		dumpCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
-		live := make(map[uint64]struct{}, 256)
-		complete := true
+		sweep := rt.BeginCookieLiveSweep()
+		var batch [256]uint64
+		nBatch := 0
+		flushBatch := func() {
+			if nBatch > 0 {
+				rt.MarkCookiesLive(batch[:nBatch], sweep)
+				nBatch = 0
+			}
+		}
+		complete := sweep != 0
 		for _, fam := range []int{unix.AF_INET, unix.AF_INET6} {
+			if !complete {
+				break
+			}
 			for _, proto := range []int{unix.IPPROTO_UDP, unix.IPPROTO_TCP} {
-				rows, err := diagDump(dumpCtx, fam, proto, netip.AddrPort{})
+				err := diagStreamCookies(dumpCtx, fam, proto, func(cookie uint64) {
+					batch[nBatch] = cookie
+					nBatch++
+					if nBatch == len(batch) {
+						flushBatch()
+					}
+				})
+				flushBatch()
 				if err != nil {
 					complete = false
 					break
 				}
-				for _, r := range rows {
-					if r.cookie != 0 {
-						live[r.cookie] = struct{}{}
-					}
-				}
-			}
-			if !complete {
-				break
 			}
 		}
 		cancel()
 		if complete {
-			dead := rt.ReconcileLiveCookies(started, live)
+			dead := rt.CollectDeadCookies(started, sweep)
 			for _, cookie := range dead {
 				o.ebpf.retireMu.Lock()
 				delete(o.ebpf.pendingRetire, cookie)
@@ -633,19 +714,20 @@ func (o *Owners) reconcileProvenanceLiveCookies(ctx context.Context) {
 
 func (o *Owners) startProvenanceMaintenance() {
 	o.ebpf.mu.Lock()
-	if o.ebpf.maintCancel != nil {
+	if o.ebpf.maintCancel != nil || o.ebpf.stopped {
 		o.ebpf.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	o.ebpf.maintCancel = cancel
 	reconcileCh := o.ebpf.reconcileCh
+	retireCh := o.ebpf.retireCh
 	o.ebpf.maintWG.Add(1)
 	o.ebpf.mu.Unlock()
 
 	go func() {
 		defer o.ebpf.maintWG.Done()
-		retireTicker := time.NewTicker(provenanceCookieRetireGrace)
+		retireTicker := time.NewTicker(100 * time.Millisecond)
 		defer retireTicker.Stop()
 		reconcileTicker := time.NewTicker(2 * time.Second)
 		defer reconcileTicker.Stop()
@@ -655,6 +737,8 @@ func (o *Owners) startProvenanceMaintenance() {
 				return
 			case now := <-retireTicker.C:
 				o.sweepPendingCookieRetires(now)
+			case <-retireCh:
+				o.sweepPendingCookieRetires(time.Now())
 			case <-reconcileTicker.C:
 				o.sweepPendingCookieRetires(time.Now())
 				o.reconcileProvenanceLiveCookies(ctx)
