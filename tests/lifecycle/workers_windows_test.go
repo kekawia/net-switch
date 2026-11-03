@@ -68,7 +68,7 @@ func findWorkers(t *testing.T, parent uint32, directory string) []workerRef {
 			t.Logf("worker command line %d unavailable: %v", entry.ProcessID, err)
 			continue
 		}
-		if len(args) != 3 || args[1] != "worker" || (args[2] != "network" && args[2] != "meters" && args[2] != "outside") {
+		if !validWorkerArgs(args, filepath.Join(directory, "netswitch-engine.exe"), strings.EqualFold) {
 			windows.CloseHandle(h)
 			continue
 		}
