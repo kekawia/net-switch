@@ -433,12 +433,17 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 		}
 		next[line.ID] = lineState{ID: line.ID, Name: name, Interface: line.Interface, MatchAddresses: slices.Clone(line.Addresses), Index: index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n), lease: &lineLease{}}
 	}
-	old, oldConfigured := p.lines, p.configured
+	old, oldConfigured, oldBindings := p.lines, p.configured, p.bindings.Load()
 	p.lines = next
 	p.configured = wanted
 	if err := p.reconcileRetry(ctx); err != nil {
 		p.lines = old
 		p.configured = oldConfigured
+		if p.capturing {
+			p.bindings.Store(nil)
+		} else {
+			p.bindings.Store(oldBindings)
+		}
 		if p.capturing && p.Fatal != nil {
 			go p.Fatal(fmt.Errorf("cannot reconcile line revision safely: %w", err))
 		}
@@ -701,6 +706,12 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 	if len(unavailable) > 0 && len(unavailable) == len(p.lines) {
 		return fmt.Errorf("no unambiguous line remains: %v", unavailable)
 	}
+	// Publish updated line reachability after installing new routes/selectors
+	// and before removing stale default routes or syncing the journal. Otherwise
+	// a concurrent SO_BINDTOIFINDEX dial can observe a removed table default
+	// route while Default4/Default6 is still true and stall on Linux's on-link
+	// ARP fallback in ip_route_output_key_hash_rcu.
+	p.publishBindings()
 	// New addresses select their table before old address selectors disappear.
 	for _, kind := range []string{"rule", "route", "binding"} {
 		for key, object := range p.owned {
