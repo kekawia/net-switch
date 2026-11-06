@@ -137,6 +137,144 @@ func setTasks(a map[string]any) error {
 	})
 	return err
 }
+type LegacyTasksSnapshot struct {
+	Present     bool   `json:"present"`
+	SignInReady bool   `json:"signInReady"`
+	ServerXML   string `json:"serverXml,omitempty"`
+	ServerLogon int    `json:"serverLogon,omitempty"`
+	SignInXML   string `json:"signInXml,omitempty"`
+	SignInLogon int    `json:"signInLogon,omitempty"`
+	OwnerSID    string `json:"ownerSid,omitempty"`
+}
+
+func SnapshotLegacyTasks() (LegacyTasksSnapshot, error) {
+	v, err := comThread(func() (any, error) {
+		var out LegacyTasksSnapshot
+		s, err := taskService()
+		if err != nil {
+			return out, err
+		}
+		defer s.release()
+		folder, err := s.object("GetFolder", 1, `\Net Switch`)
+		if err != nil {
+			if missingCOM(err) {
+				return out, nil
+			}
+			return out, err
+		}
+		defer folder.release()
+		readOne := func(name string) (string, int, bool, string, error) {
+			task, err := folder.object("GetTask", 1, name)
+			if err != nil {
+				if missingCOM(err) {
+					return "", 0, false, "", nil
+				}
+				return "", 0, false, "", err
+			}
+			defer task.release()
+			xmlText, err := task.text("Xml")
+			if err != nil {
+				return "", 0, false, "", err
+			}
+			enabledVal, err := task.call("Enabled", 2)
+			if err != nil {
+				return "", 0, false, "", err
+			}
+			enabled := enabledVal.vt == 11 && enabledVal.data != 0
+			enabledVal.clear()
+			logon := 3
+			userID := ""
+			if def, dErr := task.object("Definition", 2); dErr == nil {
+				if principal, pErr := def.object("Principal", 2); pErr == nil {
+					if n, nErr := principal.number("LogonType"); nErr == nil && n != 0 {
+						logon = n
+					}
+					if uid, uErr := principal.text("UserId"); uErr == nil {
+						userID = strings.TrimSpace(uid)
+					}
+					principal.release()
+				}
+				def.release()
+			}
+			return xmlText, logon, enabled, userID, nil
+		}
+		serverXML, serverLogon, _, serverUID, err := readOne("Server")
+		if err != nil {
+			return out, err
+		}
+		signInXML, signInLogon, signInEnabled, signInUID, err := readOne("Sign-in")
+		if err != nil {
+			return out, err
+		}
+		out.ServerXML = serverXML
+		out.ServerLogon = serverLogon
+		out.SignInXML = signInXML
+		out.SignInLogon = signInLogon
+		out.Present = serverXML != "" || signInXML != ""
+		out.SignInReady = signInXML != "" && signInEnabled
+		if signInUID != "" {
+			out.OwnerSID = signInUID
+		} else if serverUID != "" {
+			out.OwnerSID = serverUID
+		}
+		return out, nil
+	})
+	if err != nil {
+		return LegacyTasksSnapshot{}, err
+	}
+	return v.(LegacyTasksSnapshot), nil
+}
+
+func RemoveLegacyTasks() error {
+	return setTasks(map[string]any{"on": false})
+}
+
+func RestoreLegacyTasks(snap LegacyTasksSnapshot) error {
+	if !snap.Present {
+		return RemoveLegacyTasks()
+	}
+	_, err := comThread(func() (any, error) {
+		s, err := taskService()
+		if err != nil {
+			return nil, err
+		}
+		defer s.release()
+		root, err := s.object("GetFolder", 1, `\`)
+		if err != nil {
+			return nil, err
+		}
+		defer root.release()
+		folder, err := root.object("GetFolder", 1, "Net Switch")
+		if err != nil {
+			if !missingCOM(err) {
+				return nil, err
+			}
+			folder, err = root.object("CreateFolder", 1, "Net Switch")
+			if err != nil {
+				return nil, err
+			}
+		}
+		defer folder.release()
+		restoreOne := func(name, xmlText string, logon int) error {
+			if xmlText == "" {
+				if err := folder.discard("DeleteTask", 1, name, 0); err != nil && !missingCOM(err) {
+					return err
+				}
+				return nil
+			}
+			if logon == 0 {
+				logon = 3
+			}
+			return folder.discard("RegisterTask", 1, name, xmlText, 6, nil, nil, logon, nil)
+		}
+		if err := restoreOne("Server", snap.ServerXML, snap.ServerLogon); err != nil {
+			return nil, err
+		}
+		return nil, restoreOne("Sign-in", snap.SignInXML, snap.SignInLogon)
+	})
+	return err
+}
+
 func RunServerTask() error {
 	_, err := comThread(func() (any, error) {
 		s, err := taskService()

@@ -213,6 +213,18 @@ func unitFiles(c Config) map[string]string {
 	}
 	return units
 }
+func InstallOrReplace(ctx context.Context, c Config) error {
+	for _, name := range []string{Control, Engine} {
+		_ = Stop(ctx, name)
+	}
+	_ = systemctl(ctx, "disable", "--now", "netswitch.socket")
+	for _, name := range []string{"netswitch.service", "netswitch-engine.service", "netswitch.socket"} {
+		if err := os.Remove(filepath.Join("/etc/systemd/system", name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return Install(c)
+}
 func Uninstall(ctx context.Context) error {
 	for _, name := range []string{Control, Engine} {
 		if err := Stop(ctx, name); err != nil {

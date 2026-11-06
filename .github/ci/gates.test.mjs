@@ -23,7 +23,7 @@ const expected = {
   ci: {
     'windows-acceptance': 'legacy_windows', testisp: 'testisp',
     'go1-windows': 'go_windows', 'go1-linux': 'go_linux', wintun: 'wintun', linux: 'node',
-    'linux-helper': 'helper', 'test-node-22': 'node', 'test-node-24': 'node', installer: 'installer', arm64: 'node',
+    'linux-helper': 'helper', 'test-node-22': 'node', 'test-node-24': 'node', installer: 'installer', 'installer-arm64': 'installer', arm64: 'node',
     'control-security': 'investigation', 'testisp-reproduction': 'investigation', 'golist-oracle': 'oracle',
     'wintun-integrity': 'investigation', 'wintun-payload-pilot': 'investigation', 'wintun-boundaries': 'investigation',
   },
