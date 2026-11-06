@@ -595,7 +595,7 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	if err != nil || l.Attrs().Statistics == nil {
 		t.Fatal(err)
 	}
-	latencyUs := uint32(500)
+	latencyUs := uint32(2000)
 	if verifiedFloor58Profile() && runtime.GOARCH == "arm64" {
 		latencyUs = 5000
 	}
@@ -613,12 +613,48 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	}
 	defer func() { _ = unix.Munmap(faultBuf) }()
 
-	// Arm netem's HRTIMER_MODE_ABS_PINNED watchdog on f.cpu (Latency=500us native/KVM, 5000us arm64 TCG)
-	// inside readBurst's callback (after the 64KiB buffer allocation has already completed)
-	// immediately before entering the kfree_skb hold on f.cpu, under SCHED_FIFO so CFS
-	// preemption cannot consume the netem delay before unix.Read enters the kernel. Even when
-	// preemption is disabled on f.cpu, the hrtimer hardirq fires on f.cpu and
-	// runs NET_TX_SOFTIRQ on irq_exit in the interrupted reader task's context.
+	// Pre-build an off-heap sendmmsg batch page so all 8 background drops arm
+	// netem's HRTIMER_MODE_ABS_PINNED watchdog in a single raw syscall (Latency=2000us
+	// native/KVM against ~12ms expanded proof_hold, 5000us arm64 TCG) with zero
+	// Go heap allocations or user/kernel round-trips before unix.Read enters the
+	// kfree_skb hold on f.cpu under SCHED_FIFO. Even when preemption is disabled
+	// on f.cpu, the hrtimer hardirq fires on f.cpu and runs NET_TX_SOFTIRQ on
+	// irq_exit in the interrupted reader task's context.
+	const batchDrops = 8
+	sendPage, err := unix.Mmap(-1, 0, unix.Getpagesize(), unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = unix.Munmap(sendPage) }()
+	const (
+		mmsgBytes = int(unsafe.Sizeof(unix.Mmsghdr{})) * batchDrops
+		iovBytes  = int(unsafe.Sizeof(unix.Iovec{})) * batchDrops
+		addrBytes = int(unsafe.Sizeof(unix.RawSockaddrInet4{}))
+		payload   = "timer-drop"
+	)
+	mmsgs := unsafe.Slice((*unix.Mmsghdr)(unsafe.Pointer(&sendPage[0])), batchDrops)
+	iovs := unsafe.Slice((*unix.Iovec)(unsafe.Pointer(&sendPage[mmsgBytes])), batchDrops)
+	rawAddr := (*unix.RawSockaddrInet4)(unsafe.Pointer(&sendPage[mmsgBytes+iovBytes]))
+	rawAddr.Family = unix.AF_INET
+	portBytes := (*[2]byte)(unsafe.Pointer(&rawAddr.Port))
+	portBytes[0] = byte(9000 >> 8)
+	portBytes[1] = byte(9000 & 0xff)
+	rawAddr.Addr = [4]byte{198, 18, 0, 2}
+	payloadOff := mmsgBytes + iovBytes + addrBytes
+	copy(sendPage[payloadOff:payloadOff+len(payload)], payload)
+	for i := range batchDrops {
+		iovs[i] = unix.Iovec{
+			Base: &sendPage[payloadOff],
+			Len:  uint64(len(payload)),
+		}
+		mmsgs[i].Hdr = unix.Msghdr{
+			Name:    (*byte)(unsafe.Pointer(rawAddr)),
+			Namelen: unix.SizeofSockaddrInet4,
+			Iov:     &iovs[i],
+			Iovlen:  1,
+		}
+	}
+
 	if err := setProofPriority(10); err != nil {
 		t.Fatal(err)
 	}
@@ -627,11 +663,14 @@ func triggerNestedFreeHold(t *testing.T, f *bridgeFixture, s int, beforeDrops ui
 	var sendErr error
 	_, readErr := f.r.readBurst(f.fd, 1, func(fd int, _ []byte) (int, error) {
 		atomic.StoreUint64(&f.r.slot.Control.Armed, 0)
-		for range 8 {
-			if err := unix.Sendto(s, []byte("timer-drop"), 0, &unix.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: 9000}); err != nil {
-				sendErr = err
-				return -1, err
-			}
+		sent, _, errno := unix.Syscall6(unix.SYS_SENDMMSG, uintptr(s), uintptr(unsafe.Pointer(&sendPage[0])), batchDrops, 0, 0, 0)
+		if errno != 0 {
+			sendErr = errno
+			return -1, errno
+		}
+		if sent != batchDrops {
+			sendErr = fmt.Errorf("sendmmsg sent %d/%d packets", sent, batchDrops)
+			return -1, sendErr
 		}
 		atomic.StoreUint64(&f.r.slot.Control.Armed, 1)
 		called = true
@@ -961,5 +1000,3 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 		})
 	}
 }
-
-
