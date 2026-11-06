@@ -35,6 +35,7 @@ type objects struct {
 	wfpCreates           int
 	retirementReferences func()
 	adapterLUID          uint64
+	retiredLegacy        []retiredLegacyAdapter
 	saveAdapterLUID      func(uint64) error
 }
 type object struct {
@@ -224,7 +225,7 @@ func (o object) Inspect(ctx context.Context, fp journal.Fingerprint) (journal.Fi
 		if o.all.recovering {
 			return maps.Clone(fp), true, nil
 		}
-		present, err := nativeAdapterPresent(fp["guid"], fp["name"], o.all.adapterLUID)
+		present, err := o.all.adapterPresent(fp["guid"], fp["name"], o.all.adapterLUID)
 		other := maps.Clone(fp)
 		if present {
 			other["foreignLuid"] = number(o.all.adapterLUID)
@@ -368,7 +369,7 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 		oldLUID := o.all.adapterLUID
 		adoptedPresent := false
 		if o.all.recovering && o.all.adapter == nil {
-			rows, err := nativeAdapterRows()
+			rows, err := o.all.activeAdapterRows()
 			if err != nil {
 				return err
 			}
@@ -391,7 +392,7 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 				}
 			}
 		}
-		if _, err := nativeAdapterPresent(fp["guid"], fp["name"], oldLUID); err != nil {
+		if _, err := o.all.adapterPresent(fp["guid"], fp["name"], oldLUID); err != nil {
 			return err
 		}
 		if o.all.adapter != nil {
@@ -417,7 +418,7 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 		observed := false
 		began := time.Now()
 		return awaitAdapterRemoval(ctx, func() (bool, error) {
-			present, err := nativeAdapterPresent(fp["guid"], fp["name"], oldLUID)
+			present, err := o.all.adapterPresent(fp["guid"], fp["name"], oldLUID)
 			if present && !observed && time.Since(began) >= 250*time.Millisecond && o.all.retirementReferences != nil {
 				observed = true
 				o.all.retirementReferences()

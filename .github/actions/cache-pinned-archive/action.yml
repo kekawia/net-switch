@@ -2,7 +2,7 @@ name: Cache a verified build archive
 description: Restore only an archive, verify its pinned hash, and save it before the build starts.
 inputs:
   artifact:
-    description: Pin to cache (go or wintun)
+    description: Pin to cache (go, wintun, or inno)
     required: true
 runs:
   using: composite
@@ -17,6 +17,7 @@ runs:
         $pin = switch ($env:ARTIFACT) {
           'go' { $pins.go }
           'wintun' { $pins.nativeSources.wintun }
+          'inno' { $pins.innoSetup }
           default { throw "Unknown archive: $env:ARTIFACT" }
         }
         $name = [IO.Path]::GetFileName(([Uri]$pin.url).AbsolutePath)
@@ -35,7 +36,12 @@ runs:
         $ProgressPreference = 'SilentlyContinue'
         . ./scripts/build-common.ps1
         $pins = Get-Content packaging/versions.json -Raw | ConvertFrom-Json
-        $pin = if ($env:ARTIFACT -eq 'go') { $pins.go } else { $pins.nativeSources.wintun }
+        $pin = switch ($env:ARTIFACT) {
+          'go' { $pins.go }
+          'wintun' { $pins.nativeSources.wintun }
+          'inno' { $pins.innoSetup }
+          default { throw "Unknown archive: $env:ARTIFACT" }
+        }
         [IO.Directory]::CreateDirectory("$PWD/dist/cache") | Out-Null
         Get-Artifact $pin "$PWD/dist/cache"
     - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

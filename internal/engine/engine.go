@@ -517,22 +517,47 @@ func (e *Engine) Stats() any {
 	if dialer, ok := e.deps.Dialer.(interface{ Stats() any }); ok {
 		s["dialer"] = dialer.Stats()
 	}
-	var memory runtime.MemStats
-	runtime.ReadMemStats(&memory)
-	s["heapBytes"] = memory.HeapAlloc
-	s["stackBytes"] = memory.StackInuse
-	s["heapGoalBytes"] = memory.NextGC
-	s["gcCycles"] = uint64(memory.NumGC)
-	s["gcCPUppm"] = uint64(memory.GCCPUFraction * 1_000_000)
-	s["runtimeBytes"] = memory.Sys - memory.HeapReleased
+	// Sample runtime memory and GC metrics via runtime/metrics.Read rather than
+	// runtime.ReadMemStats so stats polling never triggers stopTheWorld pauses.
+	samples := [11]metrics.Sample{
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/stacks:bytes"},
+		{Name: "/gc/heap/goal:bytes"},
+		{Name: "/gc/cycles/total:gc-cycles"},
+		{Name: "/memory/classes/total:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+		{Name: "/gc/stack/starting-size:bytes"},
+		{Name: "/gc/heap/live:bytes"},
+		{Name: "/cpu/classes/gc/total:cpu-seconds"},
+		{Name: "/cpu/classes/gc/mark/idle:cpu-seconds"},
+		{Name: "/cpu/classes/total:cpu-seconds"},
+	}
+	metrics.Read(samples[:])
+	totalMem := samples[4].Value.Uint64()
+	releasedMem := samples[5].Value.Uint64()
+	var runtimeBytes uint64
+	if totalMem > releasedMem {
+		runtimeBytes = totalMem - releasedMem
+	}
+	gcTotalSec := samples[8].Value.Float64()
+	gcIdleSec := samples[9].Value.Float64()
+	totalCPUSec := samples[10].Value.Float64()
+	var gcCPUppm uint64
+	if totalCPUSec > 0 && gcTotalSec > gcIdleSec {
+		gcCPUppm = uint64(((gcTotalSec - gcIdleSec) / totalCPUSec) * 1_000_000)
+	}
+	s["heapBytes"] = samples[0].Value.Uint64()
+	s["stackBytes"] = samples[1].Value.Uint64()
+	s["heapGoalBytes"] = samples[2].Value.Uint64()
+	s["gcCycles"] = samples[3].Value.Uint64()
+	s["gcCPUppm"] = gcCPUppm
+	s["runtimeBytes"] = runtimeBytes
 	s["goroutines"] = uint64(runtime.NumGoroutine())
 	s["gomaxprocs"] = uint64(runtime.GOMAXPROCS(0))
-	samples := []metrics.Sample{{Name: "/gc/stack/starting-size:bytes"}, {Name: "/gc/heap/live:bytes"}, {Name: "/cpu/classes/gc/total:cpu-seconds"}, {Name: "/cpu/classes/total:cpu-seconds"}}
-	metrics.Read(samples)
-	s["stackStartBytes"] = samples[0].Value.Uint64()
-	s["heapLiveBytes"] = samples[1].Value.Uint64()
-	s["gcCPUNanos"] = uint64(samples[2].Value.Float64() * 1e9)
-	s["totalCPUNanos"] = uint64(samples[3].Value.Float64() * 1e9)
+	s["stackStartBytes"] = samples[6].Value.Uint64()
+	s["heapLiveBytes"] = samples[7].Value.Uint64()
+	s["gcCPUNanos"] = uint64(gcTotalSec * 1e9)
+	s["totalCPUNanos"] = uint64(totalCPUSec * 1e9)
 	if e.lastError != nil {
 		s["fatal"] = Clip(e.lastError.Error(), 4096)
 	}

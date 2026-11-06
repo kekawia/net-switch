@@ -101,7 +101,7 @@ test('a map that misses a reader fails the drift check', () => {
   fails({ areaOf: mapped('tests/windows/launch.mjs', 'tests_linux') }, /^tests\/windows\/launch\.mjs .* (node|control) job/);
   fails({ groupsOf: without('tests_linux', 'acceptance') }, /^tests\/linux\/suite\/snap-inputs\.json .* acceptance job/);
   // docs/ looks like documentation, but the installer check verifies it.
-  fails({ areaOf: (file, tracked) => file.startsWith('docs/') ? 'docs' : areaFor(file, tracked) }, /^docs\/user-guide\.md \(area docs\) is read by ci\.yml installer, which a installer job/);
+  fails({ areaOf: (file, tracked) => file.startsWith('docs/') ? 'docs' : areaFor(file, tracked) }, /^docs\/user-guide\.md \(area docs\) is read by (?:ci\.yml installer|scripts\/build-windows-installer\.ps1), which a installer job/);
   // Fixtures beside Go code that a Node test reads.
   fails({ areaOf: mapped('internal/apps/node-tests.json', 'go_shared') }, /^internal\/apps\/node-tests\.json \(area go_shared\) is read by test\/pure-port-fixtures\.test\.mjs, which a node job/);
 });

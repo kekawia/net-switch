@@ -211,29 +211,35 @@ type OwnershipLock struct{}
 // A held hostile default is bypassed without changing the machine-wide lock.
 // Windows releases the byte lock on crash.
 func (OwnershipLock) Acquire(ctx context.Context) (func() error, error) {
+	_, release, err := acquireOwnershipLock(ctx)
+	return release, err
+}
+
+func acquireOwnershipLock(ctx context.Context) (string, func() error, error) {
 	root, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	directory, err := ownershipDirectory(ctx, filepath.Join(root, "Net Switch Engine Ownership"))
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
-	p, err := windows.UTF16PtrFromString(filepath.Join(directory.Name(), "ownership-"+wintunMutexID+".lock"))
+	dirPath := directory.Name()
+	p, err := windows.UTF16PtrFromString(filepath.Join(dirPath, "ownership-"+wintunMutexID+".lock"))
 	if err != nil {
 		directory.Close()
-		return nil, err
+		return "", nil, err
 	}
 	sa, err := security(privateSDDL)
 	if err != nil {
 		directory.Close()
-		return nil, err
+		return "", nil, err
 	}
 	handle, err := windows.CreateFile(p, windows.GENERIC_READ|windows.GENERIC_WRITE,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, sa, windows.OPEN_ALWAYS, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	if err != nil {
 		directory.Close()
-		return nil, err
+		return "", nil, err
 	}
 	lockOwner := winhandle.Open(handle, "ownership lock file open")
 	closeHandles := func() error {
@@ -241,17 +247,17 @@ func (OwnershipLock) Acquire(ctx context.Context) (func() error, error) {
 	}
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(lockOwner.Handle("ownership lock metadata"), &info); err != nil {
-		return nil, errors.Join(err, closeHandles())
+		return "", nil, errors.Join(err, closeHandles())
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.NumberOfLinks != 1 {
-		return nil, errors.Join(errors.New("ownership lock is not a private regular file"), closeHandles())
+		return "", nil, errors.Join(errors.New("ownership lock is not a private regular file"), closeHandles())
 	}
 	if err := winlock.Acquire(ctx, lockOwner.Handle("ownership lock acquire")); err != nil {
-		return nil, errors.Join(err, closeHandles())
+		return "", nil, errors.Join(err, closeHandles())
 	}
 	var once sync.Once
 	var releaseErr error
-	return func() error {
+	return dirPath, func() error {
 		once.Do(func() {
 			releaseErr = closeHandles()
 		})

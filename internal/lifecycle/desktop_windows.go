@@ -18,6 +18,7 @@ func desktopAutostart(on *bool) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	exe = stableDesktopExecutable(exe)
 	value := windows.ComposeCommandLine([]string{exe, "--background"})
 	if on != nil {
 		if *on {

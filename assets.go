@@ -3,6 +3,10 @@ package netswitch
 import (
 	"embed"
 	"encoding/json"
+	"strings"
+
+	"github.com/AyoubAchour/net-switch/internal/buildinfo"
+	"github.com/AyoubAchour/net-switch/internal/updates"
 )
 
 // UI contains the unchanged UI used by the Node application and C# tray.
@@ -14,6 +18,9 @@ var UI embed.FS
 var manifest []byte
 
 func AppVersion() string {
+	if v := strings.TrimPrefix(strings.TrimSpace(buildinfo.String()), "v"); updates.ParseVersion(v) != nil {
+		return v
+	}
 	var m struct {
 		Version string `json:"version"`
 	}

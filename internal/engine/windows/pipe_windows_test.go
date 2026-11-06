@@ -229,7 +229,6 @@ func TestEnginePipeAuthenticatesRealTokens(t *testing.T) {
 			done <- err
 			return
 		}
-		defer conn.Close()
 		var b [4]byte
 		_, err = io.ReadFull(conn, b[:])
 		if err == nil && string(b[:]) != "ping" {
@@ -238,7 +237,7 @@ func TestEnginePipeAuthenticatesRealTokens(t *testing.T) {
 		if err == nil {
 			_, err = conn.Write([]byte("pong"))
 		}
-		done <- err
+		done <- errors.Join(err, conn.Close())
 	}()
 	ptr, _ := windows.UTF16PtrFromString(EnginePipe)
 	h, err := windows.CreateFile(ptr, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OVERLAPPED, 0)
