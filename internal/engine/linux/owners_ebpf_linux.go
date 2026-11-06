@@ -4,6 +4,7 @@ package linux
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -424,12 +425,6 @@ func (o *Owners) rebuildProvenanceEpoch(
 	o.ebpf.mu.Unlock()
 
 	enableNew := func(drainLocked func() error) error {
-		if drainLocked != nil {
-			if err := drainLocked(); err != nil {
-				o.requestProvenanceBridgeMaintenance()
-				return fmt.Errorf("drain uncertified TUN frames during epoch rebuild: %w", err)
-			}
-		}
 		o.ebpf.mu.Lock()
 		aborted := o.ebpf.stopped || o.ebpf.bridge != newBridge
 		o.ebpf.mu.Unlock()
@@ -437,9 +432,20 @@ func (o *Owners) rebuildProvenanceEpoch(
 			o.requestProvenanceBridgeMaintenance()
 			return errors.New("provenance stopped before enabling rebuilt bridge")
 		}
+		// Enable packet capture on newBridge BEFORE draining TUN so zero uncaptured
+		// frames can enter TUN after drainLocked returns EAGAIN; any post-enable
+		// frame swept by drainLocked retires its packets-map entry cleanly while
+		// the reader slot remains unarmed.
 		if err := newBridge.Enable(uint64(tun.TxQLen())); err != nil {
 			o.requestProvenanceBridgeMaintenance()
 			return fmt.Errorf("enable rebuilt eBPF provenance bridge: %w", err)
+		}
+		if drainLocked != nil {
+			if err := drainLocked(); err != nil {
+				_ = newBridge.Stop()
+				o.requestProvenanceBridgeMaintenance()
+				return fmt.Errorf("drain uncertified TUN frames during epoch rebuild: %w", err)
+			}
 		}
 		o.ebpf.epochRebuilds.Add(1)
 		o.ebpf.epochRebuildNanos.Add(uint64(max(time.Since(rebuildStarted), 0)))
@@ -462,13 +468,14 @@ func (o *Owners) EnableProvenance() error {
 	if err := probe.Enable(); err != nil {
 		return fmt.Errorf("enable eBPF sender probe: %w", err)
 	}
-	if err := tun.DrainNonblock(); err != nil {
-		_ = probe.Disable()
-		return fmt.Errorf("drain pre-enable TUN frames: %w", err)
-	}
 	if err := bridge.Enable(uint64(tun.TxQLen())); err != nil {
 		_ = probe.Disable()
 		return fmt.Errorf("enable eBPF provenance bridge: %w", err)
+	}
+	if err := tun.DrainNonblock(); err != nil {
+		_ = bridge.Stop()
+		_ = probe.Disable()
+		return fmt.Errorf("drain pre-enable TUN frames: %w", err)
 	}
 	o.startProvenanceMaintenance()
 	return nil
@@ -582,6 +589,48 @@ func (o *Owners) drainPendingActors(rt *ownerbpf.ProvenanceRuntime, probe *owner
 	}
 }
 
+// needsPacketProvenanceEnvelope reports whether gVisor can ever consult
+// NetSwitchProvenance on l3. Unfragmented TCP segments without SYN (established
+// data, ACKs, FIN, RST, and non-SYN TSO super-packets) are routed by gVisor's
+// existing endpoint table without calling Forwarder.open or NAT.Handle, so
+// skipping heap envelope + AddCleanup allocation on them eliminates per-packet
+// GC pressure under GOMEMLIMIT while preserving SYN/TFO admission, IPv4/IPv6
+// fragment reassembly, IPv6 extension headers, UDP, and ICMP.
+func needsPacketProvenanceEnvelope(l3 []byte, dec ownerbpf.ReadDecision) bool {
+	if dec.Status != ownerbpf.ReadCookie || dec.Rebuild || dec.Packet.Cookie == 0 {
+		return true
+	}
+	if len(l3) < 20 {
+		return true
+	}
+	switch l3[0] >> 4 {
+	case 4:
+		ihl := int(l3[0]&0x0f) * 4
+		if ihl < 20 || len(l3) < ihl+20 || l3[9] != unix.IPPROTO_TCP {
+			return true
+		}
+		if (binary.BigEndian.Uint16(l3[6:8]) & 0x3fff) != 0 {
+			return true
+		}
+		tcpHdrLen := int(l3[ihl+12]>>4) * 4
+		if tcpHdrLen < 20 || len(l3) < ihl+tcpHdrLen {
+			return true
+		}
+		return (l3[ihl+13] & 0x02) != 0
+	case 6:
+		if len(l3) < 60 || l3[6] != unix.IPPROTO_TCP {
+			return true
+		}
+		tcpHdrLen := int(l3[40+12]>>4) * 4
+		if tcpHdrLen < 20 || len(l3) < 40+tcpHdrLen {
+			return true
+		}
+		return (l3[40+13] & 0x02) != 0
+	default:
+		return true
+	}
+}
+
 func (o *Owners) onProvenanceBurst(
 	rawBufs [][]byte,
 	sizes []int,
@@ -595,6 +644,10 @@ func (o *Owners) onProvenanceBurst(
 		var l3 []byte
 		if sizes[i] > ownerbpf.VirtioNetHdrLen {
 			l3 = rawBufs[i][ownerbpf.VirtioNetHdrLen:sizes[i]]
+		}
+		if !needsPacketProvenanceEnvelope(l3, decisions[i]) {
+			out[i] = nil
+			continue
 		}
 		out[i] = rt.AcquirePacket(l3, decisions[i])
 	}

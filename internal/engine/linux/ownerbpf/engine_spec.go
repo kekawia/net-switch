@@ -7,6 +7,7 @@ import (
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
+	"github.com/cilium/ebpf/btf"
 )
 
 const (
@@ -102,13 +103,16 @@ func PrepareEngineBridgeSpec(actualQueue, cpus, readers uint64) (*ebpf.Collectio
 	return spec, packetSlots, nil
 }
 
-// stripUnusedBridgeTerminalCPUStats removes the fixture-only cpu_state.consumes
-// and cpu_state.frees skb->dev/ifindex/netns inspection block (insns[16..58] and
-// its out-of-line counter increment insns[190..195]) from production consume and
-// freed programs. Without this, every consume_skb and kfree_skb across the host
-// executes four bpf_probe_read_kernel calls before checking Maps["packets"],
-// inflating the raw_tracepoint prog->active window by ~40x under plain process
-// context where softirqs and (on Linux 7.0+) task preemption remain enabled.
+// stripUnusedBridgeTerminalCPUStats rewrites production consume and freed so:
+//  1. Non-TUN skbs exit inline after a single lockless bpf_map_lookup_elem(&packets)
+//     check (8 instructions, zero spinlocks, zero probe reads).
+//  2. Matched TUN skbs read PacketRecord fields directly from the packets map
+//     value without an intermediate 128-byte stack copy, fast-path already-stamped
+//     readers without bus-locked stamp_guard XADDs, and defer
+//     bpf_map_delete_elem(&packets, &address) until immediately before exit so
+//     htab_unlock_bucket's local_irq_restore occurs with zero remaining BPF body
+//     work while unconditional retirement and delete-fault accounting hold on
+//     every matched and unmatched path.
 func stripUnusedBridgeTerminalCPUStats(name string, prog *ebpf.ProgramSpec) error {
 	if prog == nil {
 		return fmt.Errorf("embedded bridge %s program missing", name)
@@ -117,11 +121,20 @@ func stripUnusedBridgeTerminalCPUStats(name string, prog *ebpf.ProgramSpec) erro
 	if len(insns) != 279 {
 		return fmt.Errorf("embedded bridge %s instruction count = %d, want 279", name, len(insns))
 	}
+	var terminalKind int32
 	wantAtomicOffset := int16(56)
-	if name == "freed" {
+	switch name {
+	case "consume":
+		terminalKind = TerminalConsume
+	case "freed":
+		terminalKind = TerminalFree
 		wantAtomicOffset = 64
+	default:
+		return fmt.Errorf("unexpected bridge terminal program %q", name)
 	}
 	if insns[0].OpCode != asm.LoadMemOp(asm.DWord) || insns[0].Dst != asm.R7 || insns[0].Src != asm.R1 || insns[0].Offset != 0 ||
+		insns[1].OpCode != asm.Mov.Op(asm.ImmSource) || insns[1].Dst != asm.R1 || insns[1].Constant != 0 ||
+		insns[2].OpCode != asm.StoreMemOp(asm.Word) || insns[2].Dst != asm.RFP || insns[2].Src != asm.R1 || insns[2].Offset != -8 ||
 		insns[3].OpCode != asm.StoreMemOp(asm.DWord) || insns[3].Dst != asm.RFP || insns[3].Src != asm.R7 || insns[3].Offset != -16 ||
 		!insns[6].IsLoadFromMap() || insns[6].Reference() != "config" ||
 		!insns[10].IsLoadFromMap() || insns[10].Reference() != "cpu_state" ||
@@ -142,25 +155,417 @@ func stripUnusedBridgeTerminalCPUStats(name string, prog *ebpf.ProgramSpec) erro
 			return fmt.Errorf("embedded bridge %s expected probe_read_kernel at insn %d", name, callIdx)
 		}
 	}
-	if insns[189].OpCode != asm.Ja.Op(asm.ImmSource) || insns[189].Offset != 84 ||
-		insns[190].OpCode != asm.LoadMemOp(asm.Word) || insns[190].Dst != asm.R1 || insns[190].Src != asm.R6 || insns[190].Offset != 20 ||
-		insns[191].OpCode != asm.LoadMemOp(asm.Word) || insns[191].Dst != asm.R2 || insns[191].Src != asm.RFP || insns[191].Offset != -128 ||
-		insns[192].OpCode != asm.JNE.Op(asm.RegSource) || insns[192].Dst != asm.R2 || insns[192].Src != asm.R1 || insns[192].Offset != -140 ||
-		insns[193].OpCode != asm.Mov.Op(asm.ImmSource) || insns[193].Dst != asm.R1 || insns[193].Constant != 1 ||
-		insns[194].Dst != asm.R8 || insns[194].Src != asm.R1 || insns[194].Offset != wantAtomicOffset ||
-		insns[195].OpCode != asm.Ja.Op(asm.ImmSource) || insns[195].Offset != -143 {
+	if insns[172].OpCode != asm.Call.Op(asm.ImmSource) || insns[172].Constant != int64(asm.FnGetCurrentTask) ||
+		insns[173].OpCode != asm.Mov.Op(asm.ImmSource) || insns[173].Dst != asm.R1 || insns[173].Constant != 0 ||
+		btf.CORERelocationMetadata(&insns[173]) == nil ||
+		insns[174].OpCode != asm.Add.Op(asm.RegSource) || insns[174].Dst != asm.R0 || insns[174].Src != asm.R1 ||
+		insns[179].OpCode != asm.Call.Op(asm.ImmSource) || insns[179].Constant != int64(asm.FnProbeReadKernel) {
+		return fmt.Errorf("embedded bridge %s task->start_boottime CO-RE signature mismatch", name)
+	}
+	for idx := 59; idx < len(insns); idx++ {
+		if idx != 173 && btf.CORERelocationMetadata(&insns[idx]) != nil {
+			return fmt.Errorf("embedded bridge %s unexpected CO-RE relocation at insn %d", name, idx)
+		}
+	}
+	if insns[194].Dst != asm.R8 || insns[194].Src != asm.R1 || insns[194].Offset != wantAtomicOffset ||
+		insns[277].OpCode != asm.Mov.Op(asm.ImmSource) || insns[277].Dst != asm.R0 || insns[277].Constant != 0 ||
+		insns[278].OpCode != asm.Exit.Op(asm.ImmSource) {
 		return fmt.Errorf("embedded bridge %s cpu_state counter tail signature mismatch", name)
 	}
 
-	removed := func(idx int) bool {
-		return (idx >= 16 && idx <= 58) || (idx >= 190 && idx <= 195)
+	coreTaskStartOffsetInsn := insns[173]
+
+	type jumpPatch struct {
+		fromIdx int
+		label   string
 	}
-	patched, err := exciseInstructionsPreservingJumps(insns, removed)
-	if err != nil {
-		return fmt.Errorf("embedded bridge %s excise cpu_state block: %w", name, err)
+	labels := make(map[string]int, 10)
+	jumps := make([]jumpPatch, 0, 24)
+	out := make(asm.Instructions, 0, 176)
+	mark := func(label string) {
+		labels[label] = len(out)
 	}
-	prog.Instructions = patched
+	emit := func(seq ...asm.Instruction) {
+		out = append(out, seq...)
+	}
+	emitJump := func(ins asm.Instruction, label string) {
+		jumps = append(jumps, jumpPatch{fromIdx: len(out), label: label})
+		out = append(out, ins)
+	}
+
+	entryLoad := asm.LoadMem(asm.R2, asm.R1, 0, asm.DWord)
+	entryLoad.Metadata = insns[0].Metadata
+	emit(
+		entryLoad,
+		asm.StoreMem(asm.RFP, -8, asm.R2, asm.DWord),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -8),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("packets"),
+		asm.FnMapLookupElem.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "tun_hit")
+	emit(
+		asm.Mov.Imm(asm.R0, 0),
+		asm.Return(),
+	)
+
+	mark("tun_hit")
+	emit(
+		asm.Mov.Reg(asm.R7, asm.R0),
+		asm.FnGetCurrentPidTgid.Call(),
+		asm.StoreMem(asm.RFP, -12, asm.R0, asm.Word),
+		asm.RSh.Imm(asm.R0, 32),
+		asm.StoreMem(asm.RFP, -16, asm.R0, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -16),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("readers"),
+		asm.FnMapLookupElem.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "retire_unmatched")
+	emit(
+		asm.Mov.Reg(asm.R6, asm.R0),
+		asm.LoadMem(asm.R1, asm.R6, 0, asm.Word),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JGT.Op(asm.ImmSource), Dst: asm.R1, Constant: ReaderLimit - 1}, "retire_unmatched")
+	emit(
+		asm.LoadMem(asm.R9, asm.R7, 8, asm.DWord),
+		asm.LoadMem(asm.R2, asm.R6, 24, asm.DWord),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R2, Src: asm.R9}, "retire_unmatched")
+	emit(
+		asm.LoadMem(asm.R2, asm.R6, 4, asm.Word),
+		asm.LoadMem(asm.R3, asm.R7, 16, asm.Word),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R2, Src: asm.R3}, "retire_unmatched")
+	emit(
+		asm.LoadMem(asm.R2, asm.R6, 8, asm.Word),
+		asm.LoadMem(asm.R3, asm.R7, 20, asm.Word),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R2, Src: asm.R3}, "retire_unmatched")
+
+	emit(
+		asm.Mov.Imm(asm.R1, 0),
+		asm.StoreMem(asm.RFP, -16, asm.R1, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -16),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("config"),
+		asm.FnMapLookupElem.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "retire_unmatched")
+	emit(asm.LoadMem(asm.R2, asm.R0, 8, asm.DWord))
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R9, Src: asm.R2}, "retire_unmatched")
+
+	emit(
+		asm.LoadMem(asm.R1, asm.R6, 0, asm.Word),
+		asm.StoreMem(asm.RFP, -16, asm.R1, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -16),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("read_slots"),
+		asm.FnMapLookupElem.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "retire_unmatched")
+	emit(
+		asm.Mov.Reg(asm.R8, asm.R0),
+		asm.LoadMem(asm.R1, asm.R8, 0, asm.Word),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R1, Constant: ProvenanceABI}, "retire_unmatched")
+	emit(asm.LoadMem(asm.R1, asm.R8, 32, asm.DWord))
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R1, Constant: 1}, "retire_unmatched")
+	emit(
+		asm.LoadMem(asm.R1, asm.R6, 16, asm.DWord),
+		asm.LoadMem(asm.R2, asm.R8, 8, asm.DWord),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R2, Src: asm.R1}, "retire_unmatched")
+	emit(asm.LoadMem(asm.R2, asm.R8, 16, asm.DWord))
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R2, Src: asm.R9}, "retire_unmatched")
+	emit(asm.LoadMem(asm.R1, asm.R8, 24, asm.DWord))
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R1, Constant: 0}, "retire_unmatched")
+
+	// Count before stamping: a nested attempt must make the read ambiguous.
+	emit(
+		asm.Mov.Imm(asm.R1, 1),
+		asm.AddAtomic.Mem(asm.R8, asm.R1, asm.DWord, 64),
+		asm.Mov.Imm(asm.R1, 0),
+		asm.StoreMem(asm.RFP, -24, asm.R1, asm.DWord),
+		asm.FnGetCurrentTask.Call(),
+		coreTaskStartOffsetInsn,
+		asm.Add.Reg(asm.R0, asm.R1),
+		asm.Mov.Reg(asm.R1, asm.RFP),
+		asm.Add.Imm(asm.R1, -24),
+		asm.Mov.Imm(asm.R2, 8),
+		asm.Mov.Reg(asm.R3, asm.R0),
+		asm.FnProbeReadKernel.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "stamp_fault")
+	emit(asm.LoadMem(asm.R9, asm.RFP, -24, asm.DWord))
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R9, Constant: 0}, "stamp_fault")
+
+	// Fast-path already-stamped readers without bus-locked stamp_guard XADDs.
+	emit(asm.LoadMem(asm.R1, asm.R6, 40, asm.DWord))
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R1, Constant: 0}, "stamp_slow")
+	emit(
+		asm.LoadMem(asm.R1, asm.R6, 12, asm.Word),
+		asm.And.Imm(asm.R1, ReaderStamped),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R1, Constant: 0}, "stamp_slow")
+	emit(asm.LoadMem(asm.R2, asm.R6, 32, asm.DWord))
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R2, Src: asm.R9}, "stamp_slow")
+	emitJump(asm.Instruction{OpCode: asm.Ja.Op(asm.ImmSource)}, "publish_slot")
+
+	mark("stamp_slow")
+	emit(
+		asm.Mov.Imm(asm.R1, 1),
+		asm.AddAtomic.Mem(asm.R6, asm.R1, asm.DWord, 40),
+		asm.LoadMem(asm.R2, asm.R6, 40, asm.DWord),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R2, Constant: 1}, "stamp_guarded")
+	emit(
+		asm.Mov.Imm(asm.R1, -1),
+		asm.AddAtomic.Mem(asm.R6, asm.R1, asm.DWord, 40),
+	)
+	emitJump(asm.Instruction{OpCode: asm.Ja.Op(asm.ImmSource)}, "retire_unmatched")
+
+	mark("stamp_guarded")
+	emit(
+		asm.LoadMem(asm.R1, asm.R6, 12, asm.Word),
+		asm.And.Imm(asm.R1, ReaderStamped),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R1, Constant: 0}, "stamp_check_slow")
+	emit(
+		asm.StoreMem(asm.R6, 32, asm.R9, asm.DWord),
+		asm.Mov.Imm(asm.R1, ReaderStamped),
+		asm.StoreMem(asm.R6, 12, asm.R1, asm.Word),
+	)
+
+	mark("stamp_check_slow")
+	emit(
+		asm.LoadMem(asm.R2, asm.R6, 32, asm.DWord),
+		asm.Mov.Imm(asm.R1, -1),
+		asm.AddAtomic.Mem(asm.R6, asm.R1, asm.DWord, 40),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.RegSource), Dst: asm.R2, Src: asm.R9}, "stamp_fault")
+
+	mark("publish_slot")
+	emit(
+		asm.LoadMem(asm.R1, asm.R8, 24, asm.DWord),
+		asm.StoreMem(asm.R8, 72, asm.R1, asm.DWord),
+		asm.LoadMem(asm.R1, asm.R6, 16, asm.DWord),
+		asm.StoreMem(asm.R8, 80, asm.R1, asm.DWord),
+		asm.Mov.Imm(asm.R1, terminalKind),
+		asm.StoreMem(asm.R8, 88, asm.R1, asm.Word),
+		asm.LoadMem(asm.R1, asm.R7, 4, asm.Word),
+		asm.StoreMem(asm.R8, 92, asm.R1, asm.Word),
+	)
+	for off := int16(0); off < 128; off += 8 {
+		emit(
+			asm.LoadMem(asm.R1, asm.R7, off, asm.DWord),
+			asm.StoreMem(asm.R8, 128+off, asm.R1, asm.DWord),
+		)
+	}
+	emit(
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -8),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("packets"),
+		asm.FnMapDeleteElem.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "delete_fault_matched")
+	emit(
+		asm.Mov.Imm(asm.R0, 0),
+		asm.Return(),
+	)
+
+	mark("stamp_fault")
+	emit(
+		asm.Mov.Imm(asm.R1, 0),
+		asm.StoreMem(asm.RFP, -16, asm.R1, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -16),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("health"),
+		asm.FnMapLookupElem.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "retire_unmatched")
+	emit(
+		asm.Mov.Imm(asm.R1, 1),
+		asm.AddAtomic.Mem(asm.R0, asm.R1, asm.DWord, 0),
+		asm.AddAtomic.Mem(asm.R0, asm.R1, asm.DWord, 56),
+	)
+
+	mark("retire_unmatched")
+	emit(
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -8),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("packets"),
+		asm.FnMapDeleteElem.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "delete_fault_health")
+	emit(
+		asm.Mov.Imm(asm.R0, 0),
+		asm.Return(),
+	)
+
+	mark("delete_fault_matched")
+	emit(
+		asm.Mov.Imm(asm.R1, 0),
+		asm.StoreMem(asm.R8, 92, asm.R1, asm.Word),
+		asm.StoreMem(asm.R8, 132, asm.R1, asm.Word),
+	)
+
+	mark("delete_fault_health")
+	emit(
+		asm.Mov.Imm(asm.R1, 0),
+		asm.StoreMem(asm.RFP, -16, asm.R1, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -16),
+		asm.LoadMapPtr(asm.R1, 0).WithReference("health"),
+		asm.FnMapLookupElem.Call(),
+	)
+	emitJump(asm.Instruction{OpCode: asm.JEq.Op(asm.ImmSource), Dst: asm.R0, Constant: 0}, "exit_cold")
+	emit(
+		asm.Mov.Imm(asm.R1, 1),
+		asm.AddAtomic.Mem(asm.R0, asm.R1, asm.DWord, 0),
+		asm.AddAtomic.Mem(asm.R0, asm.R1, asm.DWord, 48),
+	)
+
+	mark("exit_cold")
+	emit(
+		asm.Mov.Imm(asm.R0, 0),
+		asm.Return(),
+	)
+
+	rawSlot := make([]int, len(out))
+	raw := 0
+	for i, ins := range out {
+		rawSlot[i] = raw
+		raw += int(ins.Size() / asm.InstructionSize)
+	}
+	for _, jp := range jumps {
+		toIdx, ok := labels[jp.label]
+		if !ok {
+			return fmt.Errorf("embedded bridge %s missing jump label %q", name, jp.label)
+		}
+		width := int(out[jp.fromIdx].Size() / asm.InstructionSize)
+		delta := rawSlot[toIdx] - (rawSlot[jp.fromIdx] + width)
+		if delta < -32768 || delta > 32767 {
+			return fmt.Errorf("embedded bridge %s jump delta %d overflows int16 (%d -> %s)", name, delta, jp.fromIdx, jp.label)
+		}
+		out[jp.fromIdx].Offset = int16(delta)
+	}
+
+	prog.Instructions = out
 	return nil
+}
+
+// ExpandFaultProofHoldQuantum widens the fixture-only proof_hold straight-line
+// bpf_ktime_get_ns quantum in fault_x86_bpfel.o / fault_arm64_bpfel.o from 32
+// calls to 128 calls per loop iteration without adding any jump instructions.
+// This raises the uncontested hold window (~3 ms -> ~12 ms on floor-5.8-amd64
+// KVM, still capped at 20 ms via now-start >= 20_000_000) while keeping the
+// Linux 5.8 verifier's explored jump-state count unchanged at 4,466 (< 8,192).
+func ExpandFaultProofHoldQuantum(spec *ebpf.CollectionSpec) error {
+	if spec == nil || spec.Maps["faults"] == nil {
+		return nil
+	}
+	const (
+		origTickCalls  = 32
+		extraTickCalls = 96
+	)
+	extra := make(asm.Instructions, extraTickCalls)
+	for i := range extra {
+		extra[i] = asm.FnKtimeGetNs.Call()
+	}
+	for _, tc := range []struct {
+		name           string
+		quantumInitIdx int
+	}{
+		{"capture", 338},
+		{"consume", 377},
+		{"freed", 377},
+	} {
+		prog := spec.Programs[tc.name]
+		if prog == nil {
+			return fmt.Errorf("fault bridge %s program missing", tc.name)
+		}
+		insns := prog.Instructions
+		qIdx := tc.quantumInitIdx
+		firstTickIdx := qIdx + 7
+		lastTickIdx := firstTickIdx + origTickCalls - 1
+		backJumpIdx := lastTickIdx + 5
+		if backJumpIdx >= len(insns) ||
+			insns[qIdx].OpCode != asm.Mov.Op(asm.ImmSource) || insns[qIdx].Dst != asm.R9 || insns[qIdx].Constant != 2500 ||
+			insns[qIdx+5].OpCode != asm.JNE.Op(asm.ImmSource) || insns[qIdx+5].Dst != asm.R1 || insns[qIdx+5].Constant != 0 || insns[qIdx+5].Offset != 39 ||
+			insns[qIdx+6].OpCode != asm.JGT.Op(asm.ImmSource) || insns[qIdx+6].Dst != asm.R0 || insns[qIdx+6].Constant != 19999999 || insns[qIdx+6].Offset != 38 ||
+			insns[backJumpIdx].OpCode != asm.JNE.Op(asm.ImmSource) || insns[backJumpIdx].Dst != asm.R1 || insns[backJumpIdx].Constant != 0 || insns[backJumpIdx].Offset != -41 {
+			return fmt.Errorf("fault bridge %s proof_hold signature mismatch", tc.name)
+		}
+		for idx := firstTickIdx; idx <= lastTickIdx; idx++ {
+			if insns[idx].OpCode != asm.Call.Op(asm.ImmSource) || insns[idx].Constant != int64(asm.FnKtimeGetNs) {
+				return fmt.Errorf("fault bridge %s expected ktime_get_ns call at insn %d", tc.name, idx)
+			}
+		}
+		expanded, err := insertInstructionsPreservingJumps(insns, lastTickIdx, extra)
+		if err != nil {
+			return fmt.Errorf("fault bridge %s expand proof_hold: %w", tc.name, err)
+		}
+		prog.Instructions = expanded
+	}
+	return nil
+}
+
+func insertInstructionsPreservingJumps(insns asm.Instructions, afterIdx int, extra asm.Instructions) (asm.Instructions, error) {
+	if afterIdx < 0 || afterIdx >= len(insns) {
+		return nil, fmt.Errorf("insert index %d out of range [0, %d)", afterIdx, len(insns))
+	}
+	oldSlot := make([]int, len(insns))
+	slotToOldIdx := make(map[int]int, len(insns))
+	raw := 0
+	for i, ins := range insns {
+		oldSlot[i] = raw
+		slotToOldIdx[raw] = i
+		raw += int(ins.Size() / asm.InstructionSize)
+	}
+
+	jumpTargetOldIdx := make(map[int]int)
+	oldToNewIdx := make([]int, len(insns))
+	out := make(asm.Instructions, 0, len(insns)+len(extra))
+	for i, ins := range insns {
+		if ins.IsFunctionReference() {
+			return nil, fmt.Errorf("unexpected bpf-to-bpf function reference at insn %d", i)
+		}
+		if isPCRelativeJump(ins) && ins.Reference() == "" {
+			if ins.OpCode.Class() == asm.Jump32Class {
+				return nil, fmt.Errorf("unexpected jump32 at insn %d", i)
+			}
+			width := int(ins.Size() / asm.InstructionSize)
+			targetSlot := oldSlot[i] + width + int(ins.Offset)
+			targetIdx, ok := slotToOldIdx[targetSlot]
+			if !ok {
+				return nil, fmt.Errorf("jump at insn %d targets non-boundary raw slot %d", i, targetSlot)
+			}
+			jumpTargetOldIdx[len(out)] = targetIdx
+		}
+		oldToNewIdx[i] = len(out)
+		out = append(out, ins)
+		if i == afterIdx {
+			out = append(out, extra...)
+		}
+	}
+
+	newSlot := make([]int, len(out))
+	raw = 0
+	for i, ins := range out {
+		newSlot[i] = raw
+		raw += int(ins.Size() / asm.InstructionSize)
+	}
+	for newIdx, oldTarget := range jumpTargetOldIdx {
+		newTarget := oldToNewIdx[oldTarget]
+		width := int(out[newIdx].Size() / asm.InstructionSize)
+		delta := newSlot[newTarget] - (newSlot[newIdx] + width)
+		if delta < -32768 || delta > 32767 {
+			return nil, fmt.Errorf("recomputed jump delta %d overflows int16 at new insn %d", delta, newIdx)
+		}
+		out[newIdx].Offset = int16(delta)
+	}
+	return out, nil
 }
 
 func isPCRelativeJump(ins asm.Instruction) bool {

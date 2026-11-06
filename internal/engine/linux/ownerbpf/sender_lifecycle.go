@@ -163,11 +163,33 @@ type SocketSlotTable struct {
 	MaxSlots       int
 	slots          []SocketStateSlot
 	meta           []socketSlotMeta
+	highWater      uint32
 	cookieToSlot   map[uint64]uint32
 	freeSlots      []uint32
 	nextGeneration uint64
 	metrics        SocketSlotMetrics
 	closeFn        func() error
+}
+
+func slotMetricContribution(m socketSlotMeta) (active, live, retained int) {
+	if !m.inUse {
+		return 0, 0, 0
+	}
+	if m.socketAlive {
+		return 1, 1, 0
+	}
+	if m.envelopeRefs > 0 {
+		return 1, 0, 1
+	}
+	return 1, 0, 0
+}
+
+func (t *SocketSlotTable) updateSlotMetrics(before, after socketSlotMeta) {
+	bAct, bLive, bRet := slotMetricContribution(before)
+	aAct, aLive, aRet := slotMetricContribution(after)
+	t.metrics.ActiveSlots += aAct - bAct
+	t.metrics.LiveSockets += aLive - bLive
+	t.metrics.RetainedSlots += aRet - bRet
 }
 
 func NewSocketSlotTable(maxSlots int) *SocketSlotTable {
@@ -180,16 +202,10 @@ func NewSocketSlotTable(maxSlots int) *SocketSlotTable {
 
 func newSocketSlotTableFromBacking(slots []SocketStateSlot, closeFn func() error) *SocketSlotTable {
 	maxSlots := len(slots)
-	free := make([]uint32, maxSlots)
-	for i := 0; i < maxSlots; i++ {
-		free[i] = uint32(maxSlots - 1 - i)
-	}
 	return &SocketSlotTable{
 		MaxSlots:     maxSlots,
 		slots:        slots,
-		meta:         make([]socketSlotMeta, maxSlots),
-		cookieToSlot: make(map[uint64]uint32, min(maxSlots, 4096)),
-		freeSlots:    free,
+		cookieToSlot: make(map[uint64]uint32, min(maxSlots, 256)),
 		closeFn:      closeFn,
 	}
 }
@@ -202,8 +218,12 @@ func (t *SocketSlotTable) Close() error {
 	t.closeFn = nil
 	t.slots = nil
 	t.meta = nil
+	t.highWater = 0
 	t.cookieToSlot = nil
 	t.freeSlots = nil
+	t.metrics.ActiveSlots = 0
+	t.metrics.LiveSockets = 0
+	t.metrics.RetainedSlots = 0
 	if fn == nil {
 		return nil
 	}
@@ -214,25 +234,7 @@ func (t *SocketSlotTable) Metrics() SocketSlotMetrics {
 	if t == nil {
 		return SocketSlotMetrics{}
 	}
-	m := t.metrics
-	active := 0
-	live := 0
-	retained := 0
-	for i := range t.meta {
-		if !t.meta[i].inUse {
-			continue
-		}
-		active++
-		if t.meta[i].socketAlive {
-			live++
-		} else if t.meta[i].envelopeRefs > 0 {
-			retained++
-		}
-	}
-	m.ActiveSlots = active
-	m.LiveSockets = live
-	m.RetainedSlots = retained
-	return m
+	return t.metrics
 }
 
 func (t *SocketSlotTable) SlotSnapshot(cookie uint64) (SocketStateSlot, uint32, bool) {
@@ -277,7 +279,7 @@ func (t *SocketSlotTable) ensureSlot(cookie uint64) (uint32, bool) {
 	if idx, ok := t.cookieToSlot[cookie]; ok {
 		return idx, true
 	}
-	if len(t.freeSlots) == 0 {
+	if len(t.freeSlots) == 0 && int(t.highWater) >= t.MaxSlots {
 		t.metrics.Refusals++
 		return 0, false
 	}
@@ -288,8 +290,23 @@ func (t *SocketSlotTable) ensureSlot(cookie uint64) (uint32, bool) {
 	}
 	t.nextGeneration++
 	gen := t.nextGeneration
-	idx := t.freeSlots[len(t.freeSlots)-1]
-	t.freeSlots = t.freeSlots[:len(t.freeSlots)-1]
+	var idx uint32
+	if n := len(t.freeSlots); n > 0 {
+		idx = t.freeSlots[n-1]
+		t.freeSlots = t.freeSlots[:n-1]
+	} else {
+		idx = t.highWater
+		if int(idx) >= len(t.meta) {
+			grow := max(len(t.meta)*2, 256)
+			if grow > t.MaxSlots {
+				grow = t.MaxSlots
+			}
+			grown := make([]socketSlotMeta, grow)
+			copy(grown, t.meta)
+			t.meta = grown
+		}
+		t.highWater++
+	}
 
 	s := &t.slots[idx]
 	atomic.StoreUint64(&s.Cookie, cookie)
@@ -299,10 +316,13 @@ func (t *SocketSlotTable) ensureSlot(cookie uint64) (uint32, bool) {
 	atomic.StoreUint64(&s.EvidenceRevision, 0)
 	atomic.StoreUint32(&s.Flags, uint32(SocketSlotNone))
 
-	t.meta[idx] = socketSlotMeta{
+	before := t.meta[idx]
+	after := socketSlotMeta{
 		inUse:       true,
 		socketAlive: true,
 	}
+	t.meta[idx] = after
+	t.updateSlotMetrics(before, after)
 	t.cookieToSlot[cookie] = idx
 	t.metrics.AllocatedTotal++
 	return idx, true
@@ -407,7 +427,7 @@ func (t *SocketSlotTable) publishContributor(ledger *IdentityLedger, cookie uint
 }
 
 func (t *SocketSlotTable) tryReclaimSlot(ledger *IdentityLedger, idx uint32) {
-	if int(idx) >= len(t.meta) {
+	if int(idx) >= int(t.highWater) || int(idx) >= len(t.meta) {
 		return
 	}
 	m := &t.meta[idx]
@@ -431,7 +451,9 @@ func (t *SocketSlotTable) tryReclaimSlot(ledger *IdentityLedger, idx uint32) {
 	atomic.StoreUint64(&s.Conflicts, 0)
 	atomic.StoreUint64(&s.EvidenceRevision, 0)
 	atomic.StoreUint32(&s.Flags, 0)
+	before := *m
 	*m = socketSlotMeta{}
+	t.updateSlotMetrics(before, *m)
 	t.freeSlots = append(t.freeSlots, idx)
 	t.metrics.ReclaimedTotal++
 }
@@ -519,7 +541,9 @@ func (l *IdentityLedger) DiscardCork(cookie uint64) {
 	l.slotTable.metrics.CorkDiscards++
 	s := &l.slotTable.slots[idx]
 	if !m.corkCommitted && atomic.LoadUint64(&s.Version) == 0 && atomic.LoadUint64(&s.Conflicts) == 0 && m.envelopeRefs == 0 {
+		before := *m
 		m.socketAlive = false
+		l.slotTable.updateSlotMetrics(before, *m)
 		l.slotTable.tryReclaimSlot(l, idx)
 	}
 }
@@ -576,7 +600,9 @@ func (l *IdentityLedger) ResolvePacketEnvelope(readDec ReadDecision) ForwardEnve
 			env.SlotGeneration = atomic.LoadUint64(&s.SlotGeneration)
 			env.HasSlot = true
 			env.retained = true
+			before := *m
 			m.envelopeRefs++
+			l.slotTable.updateSlotMetrics(before, *m)
 		}
 	}
 	return env
@@ -590,10 +616,12 @@ func (l *IdentityLedger) CloneEnvelope(env ForwardEnvelope) ForwardEnvelope {
 	if cloned.Identity.Snapshot != nil {
 		cloned.Identity.Snapshot.packetRefs++
 	}
-	if cloned.HasSlot && l.slotTable != nil && int(cloned.SlotIndex) < len(l.slotTable.meta) {
+	if cloned.HasSlot && l.slotTable != nil && int(cloned.SlotIndex) < int(l.slotTable.highWater) && int(cloned.SlotIndex) < len(l.slotTable.meta) {
 		m := &l.slotTable.meta[cloned.SlotIndex]
 		if m.inUse {
+			before := *m
 			m.envelopeRefs++
+			l.slotTable.updateSlotMetrics(before, *m)
 			cloned.retained = true
 		}
 	}
@@ -655,7 +683,7 @@ func (l *IdentityLedger) ValidateForwardingEnvelope(env ForwardEnvelope) PacketI
 		return env.Identity
 	}
 
-	if !env.HasSlot || int(env.SlotIndex) >= len(l.slotTable.slots) {
+	if !env.HasSlot || int(env.SlotIndex) >= int(l.slotTable.highWater) || int(env.SlotIndex) >= len(l.slotTable.meta) || int(env.SlotIndex) >= len(l.slotTable.slots) {
 		return PacketIdentityDecision{
 			Status: IdentityUnknown,
 			Reason: ReasonIdentityUnretained,
@@ -739,10 +767,12 @@ func (l *IdentityLedger) ReleaseEnvelope(env *ForwardEnvelope) {
 		l.ReleasePacket(env.Identity.Snapshot)
 		env.Identity.Snapshot = nil
 	}
-	if env.retained && env.HasSlot && l.slotTable != nil && int(env.SlotIndex) < len(l.slotTable.meta) {
+	if env.retained && env.HasSlot && l.slotTable != nil && int(env.SlotIndex) < int(l.slotTable.highWater) && int(env.SlotIndex) < len(l.slotTable.meta) {
 		m := &l.slotTable.meta[env.SlotIndex]
 		if m.envelopeRefs > 0 {
+			before := *m
 			m.envelopeRefs--
+			l.slotTable.updateSlotMetrics(before, *m)
 		}
 		env.retained = false
 		l.slotTable.tryReclaimSlot(l, env.SlotIndex)

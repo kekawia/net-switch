@@ -1117,10 +1117,12 @@ func (l *IdentityLedger) ReleaseSocket(cookie uint64) {
 		delete(l.stagedCork, cookie)
 	}
 	if l.slotTable != nil {
-		if idx, ok := l.slotTable.cookieToSlot[cookie]; ok {
+		if idx, ok := l.slotTable.cookieToSlot[cookie]; ok && int(idx) < int(l.slotTable.highWater) && int(idx) < len(l.slotTable.meta) {
 			m := &l.slotTable.meta[idx]
 			s := &l.slotTable.slots[idx]
+			before := *m
 			m.socketAlive = false
+			l.slotTable.updateSlotMetrics(before, *m)
 			atomic.StoreUint32(&s.Flags, atomic.LoadUint32(&s.Flags)|uint32(SocketSlotDestroyed))
 			l.slotTable.tryReclaimSlot(l, idx)
 		}

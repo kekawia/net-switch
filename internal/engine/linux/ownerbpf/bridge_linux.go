@@ -46,19 +46,19 @@ type BridgeFault struct {
 // Bridge is an isolated proof collection. Close requires all readers joined
 // and the fixture's TUN closed/drained; it cannot destroy a caller-owned fd.
 type Bridge struct {
-	VerifierStats                                             map[string]string
-	Collection                                                *ebpf.Collection
-	config                                                    BridgeConfig
-	expectedQueue, packetSlots                                uint64
-	links                                                     []link.Link
-	slots, health                                             []byte
-	mu                                                        sync.Mutex
-	activeReads                                               sync.WaitGroup
-	readers                                                   [ReaderLimit]bool
-	next                                                      uint64
-	stopped                                                                   bool
-	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord, ReadUnknown    atomic.Uint64
-	UnknownRecursionCapture, UnknownRecursionConsume, UnknownRecursionFreed   atomic.Uint64
+	VerifierStats                                                           map[string]string
+	Collection                                                              *ebpf.Collection
+	config                                                                  BridgeConfig
+	expectedQueue, packetSlots                                              uint64
+	links                                                                   []link.Link
+	slots, health                                                           []byte
+	mu                                                                      sync.Mutex
+	activeReads                                                             sync.WaitGroup
+	readers                                                                 [ReaderLimit]bool
+	next                                                                    uint64
+	stopped                                                                 bool
+	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord, ReadUnknown  atomic.Uint64
+	UnknownRecursionCapture, UnknownRecursionConsume, UnknownRecursionFreed atomic.Uint64
 }
 
 func (b *Bridge) recordUnknownRecursion(changed uint8) {
@@ -109,6 +109,9 @@ func LoadBridge(object string, cfg BridgeConfig) (_ *Bridge, err error) {
 		return nil, err
 	}
 	if err = checkBridgeSpec(spec); err != nil {
+		return nil, err
+	}
+	if err = ExpandFaultProofHoldQuantum(spec); err != nil {
 		return nil, err
 	}
 	var format []byte

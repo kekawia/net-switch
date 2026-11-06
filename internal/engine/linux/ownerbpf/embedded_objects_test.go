@@ -6,10 +6,12 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"runtime"
 	"testing"
 
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
 )
@@ -107,29 +109,39 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 	for _, progName := range []string{"consume", "freed"} {
 		cp := bridgeSpec.Programs[progName].Copy()
 		insns := cp.Instructions
-		if len(insns) != 230 {
-			t.Fatalf("%s patched instruction count = %d, want 230", progName, len(insns))
+		if len(insns) != 178 {
+			t.Fatalf("%s patched instruction count = %d, want 178", progName, len(insns))
 		}
 		if btf.FuncMetadata(&insns[0]) == nil || insns[0].Source() == nil {
 			t.Fatalf("%s insns[0] lost BTF FuncMetadata or initial LineInfo", progName)
 		}
-		if !insns[18].IsLoadFromMap() || insns[18].Reference() != "packets" {
-			t.Fatalf("%s insns[18] = %v (ref=%q), want LoadMapPtr packets immediately after config/cpu_state lookup", progName, insns[18], insns[18].Reference())
+		if !insns[4].IsLoadFromMap() || insns[4].Reference() != "packets" {
+			t.Fatalf("%s insns[4] = %v (ref=%q), want LoadMapPtr packets immediately on entry", progName, insns[4], insns[4].Reference())
 		}
 		probeReads := 0
+		coreRelocs := 0
 		for idx, ins := range insns {
 			if ins.OpCode == asm.Call.Op(asm.ImmSource) && ins.Constant == int64(asm.FnProbeReadKernel) {
-				if idx < 18 {
+				if idx < 4 {
 					t.Fatalf("%s retained pre-packets probe_read_kernel at insn %d", progName, idx)
 				}
 				probeReads++
+			}
+			if btf.CORERelocationMetadata(&insns[idx]) != nil {
+				coreRelocs++
 			}
 		}
 		if probeReads != 1 {
 			t.Fatalf("%s probe_read_kernel count = %d, want 1 (task->start_boottime only)", progName, probeReads)
 		}
+		if coreRelocs != 1 {
+			t.Fatalf("%s CO-RE relocation count = %d, want 1 (task->start_boottime only)", progName, coreRelocs)
+		}
 		assertAllInstructionsReachableAndValidJumps(t, progName, insns)
-		for i, mapName := range []string{"config", "cpu_state", "packets", "health", "readers", "read_slots"} {
+		if err := cp.Instructions.AssociateMap("cpu_state", fakeFD(99)); !errors.Is(err, asm.ErrUnreferencedSymbol) {
+			t.Fatalf("%s AssociateMap(cpu_state) = %v, want ErrUnreferencedSymbol", progName, err)
+		}
+		for i, mapName := range []string{"config", "packets", "health", "readers", "read_slots"} {
 			if err := cp.Instructions.AssociateMap(mapName, fakeFD(20+i)); err != nil {
 				t.Fatalf("%s AssociateMap(%s): %v", progName, mapName, err)
 			}
@@ -139,11 +151,88 @@ func TestPrepareEngineBridgeAndSenderSpecs(t *testing.T) {
 			if err := cp.Instructions.Marshal(&encoded, binary.LittleEndian); err != nil {
 				t.Fatalf("%s Marshal patched instructions: %v", progName, err)
 			}
-			if encoded.Len() != 239*asm.InstructionSize {
-				t.Fatalf("%s encoded byte len = %d, want %d", progName, encoded.Len(), 239*asm.InstructionSize)
+			if encoded.Len() != 186*asm.InstructionSize {
+				t.Fatalf("%s encoded byte len = %d, want %d", progName, encoded.Len(), 186*asm.InstructionSize)
 			}
 		}
 	}
+
+	t.Run("ExpandFaultProofHoldQuantum", func(t *testing.T) {
+		if err := ExpandFaultProofHoldQuantum(bridgeSpec); err != nil {
+			t.Fatalf("ExpandFaultProofHoldQuantum on non-fault spec: %v", err)
+		}
+		makeFaultProg := func(qIdx int) *ebpf.ProgramSpec {
+			insns := make(asm.Instructions, 0, qIdx+60)
+			// insns[0]: conditional jump across the entire proof_hold block to the post-hold tail.
+			insns = append(insns, asm.Instruction{
+				OpCode:   asm.JEq.Op(asm.ImmSource),
+				Dst:      asm.R1,
+				Constant: 0,
+				Offset:   int16((qIdx + 44) - 1),
+			})
+			for len(insns) < qIdx {
+				insns = append(insns, asm.Mov.Imm(asm.R0, 0))
+			}
+			insns = append(insns,
+				asm.Mov.Imm(asm.R9, 2500),
+				asm.LoadMem(asm.R1, asm.R6, 48, asm.DWord),
+				asm.Mov.Reg(asm.R0, asm.R8),
+				asm.Sub.Reg(asm.R0, asm.R7),
+				asm.Mov.Imm(asm.R2, 0),
+				asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R1, Constant: 0, Offset: 39},
+				asm.Instruction{OpCode: asm.JGT.Op(asm.ImmSource), Dst: asm.R0, Constant: 19999999, Offset: 38},
+			)
+			for range 32 {
+				insns = append(insns, asm.FnKtimeGetNs.Call())
+			}
+			insns = append(insns,
+				asm.Mov.Reg(asm.R8, asm.R0),
+				asm.Add.Imm(asm.R9, -1),
+				asm.Mov.Reg(asm.R1, asm.R9),
+				asm.And.Imm(asm.R1, 0x7fffffff),
+				asm.Instruction{OpCode: asm.JNE.Op(asm.ImmSource), Dst: asm.R1, Constant: 0, Offset: -41},
+				asm.Mov.Imm(asm.R0, 0),
+				asm.Return(),
+			)
+			return &ebpf.ProgramSpec{Type: ebpf.RawTracepoint, Instructions: insns}
+		}
+		faultSpec := &ebpf.CollectionSpec{
+			Maps: map[string]*ebpf.MapSpec{
+				"faults": {Name: "faults", Type: ebpf.Array, KeySize: 4, ValueSize: 64, MaxEntries: 1},
+			},
+			Programs: map[string]*ebpf.ProgramSpec{
+				"capture": makeFaultProg(338),
+				"consume": makeFaultProg(377),
+				"freed":   makeFaultProg(377),
+			},
+		}
+		if err := ExpandFaultProofHoldQuantum(faultSpec); err != nil {
+			t.Fatalf("ExpandFaultProofHoldQuantum: %v", err)
+		}
+		for _, tc := range []struct {
+			name string
+			qIdx int
+		}{
+			{"capture", 338},
+			{"consume", 377},
+			{"freed", 377},
+		} {
+			got := faultSpec.Programs[tc.name].Instructions
+			assertAllInstructionsReachableAndValidJumps(t, "fault/"+tc.name, got)
+			ktimeCalls := 0
+			for idx := tc.qIdx + 7; idx < tc.qIdx+7+128; idx++ {
+				if got[idx].OpCode == asm.Call.Op(asm.ImmSource) && got[idx].Constant == int64(asm.FnKtimeGetNs) {
+					ktimeCalls++
+				}
+			}
+			if ktimeCalls != 128 {
+				t.Fatalf("%s expanded ktime_get_ns calls = %d, want 128", tc.name, ktimeCalls)
+			}
+			if got[tc.qIdx+5].Offset != 135 || got[tc.qIdx+6].Offset != 134 || got[tc.qIdx+7+128+4].Offset != -137 {
+				t.Fatalf("%s unexpected recomputed offsets: break1=%d break2=%d loop=%d", tc.name, got[tc.qIdx+5].Offset, got[tc.qIdx+6].Offset, got[tc.qIdx+7+128+4].Offset)
+			}
+		}
+	})
 
 	for _, arch := range []string{"amd64", "arm64"} {
 		spec, err := PrepareEngineSenderSpec(arch, 0, 0)
