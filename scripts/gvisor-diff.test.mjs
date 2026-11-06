@@ -36,6 +36,9 @@ for (const patch of patches) test(`${patch} regenerates byte for byte under cust
   } else if (patch === 'gvisor-sack-cache.patch') {
     assert.match(expected, /sackNodePool/);
     assert.doesNotMatch(expected, /RTORecovery|dispatcher_netswitch_test|localCloseEnabled|NetSwitchProvenance/);
+  } else if (patch === 'gvisor-tcp-retry-limit.patch') {
+    assert.match(expected, /rtoRetries/);
+    assert.doesNotMatch(expected, /dispatcher_netswitch_test|localCloseEnabled|NetSwitchProvenance|sackNodePool/);
   }
   const settings = {
     'diff.noprefix': 'true',
@@ -67,7 +70,7 @@ for (const patch of patches) test(`${patch} regenerates byte for byte under cust
 });
 
 test('diff mode requires one named patch instead of silently combining patches', () => {
-  assert.deepEqual(patches, ['gvisor-local-close.patch', 'gvisor-provenance.patch', 'gvisor-rto-recovery.patch', 'gvisor-sack-cache.patch']);
+  assert.deepEqual(patches, ['gvisor-local-close.patch', 'gvisor-provenance.patch', 'gvisor-rto-recovery.patch', 'gvisor-sack-cache.patch', 'gvisor-tcp-retry-limit.patch']);
   for (const args of [['--diff'], ['--diff', '../gvisor-local-close.patch'], ['--diff', 'missing.patch']]) {
     const result = spawnSync(process.execPath, ['scripts/generate-gvisor.mjs', ...args], {
       cwd: root, encoding: 'utf8', windowsHide: true,
