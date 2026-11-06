@@ -3,11 +3,13 @@ package lifecycle
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/AyoubAchour/net-switch/internal/control/engine"
 	"golang.org/x/sys/windows"
 )
 
@@ -141,5 +143,29 @@ func TestMatchesInstalledDesktopExeAndSelfCommandLine(t *testing.T) {
 	}
 	if processCommandLineContains(h, "absent-token-9f81c2b0e4") {
 		t.Fatal("unexpected match for absent token")
+	}
+}
+
+func TestParseControlStatusRoutingWantedMatchesAccessStatus(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		want   bool
+	}{
+		{"on", true},
+		{"starting", true},
+		{"off", false},
+		{"error", false},
+	} {
+		access := &Access{
+			Remote:  &Remote{snapshot: engine.Snapshot{Status: tc.status, Instance: "inst-1"}},
+			Desktop: &DesktopBridge{},
+		}
+		raw, err := json.Marshal(access.status())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := parseControlStatusRoutingWanted(raw); got != tc.want {
+			t.Fatalf("status=%q (%s): got %t, want %t", tc.status, string(raw), got, tc.want)
+		}
 	}
 }

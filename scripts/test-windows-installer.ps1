@@ -494,6 +494,11 @@ setInterval(() => {}, 60000);
   if ($faultRun.ExitCode -eq 0) {
     throw 'Case 2: Setup unexpectedly succeeded despite NETSWITCH_MIGRATE_FAULT_PHASE=healthy'
   }
+  $faultLogText = Get-Content -LiteralPath $faultRun.LogPath -Raw
+  if ($faultLogText -notmatch 'injected migration fault at phase healthy') {
+    $faultTail = (Get-Content -LiteralPath $faultRun.LogPath -Tail 30) -join "`n"
+    throw "Case 2: Setup failed before reaching NETSWITCH_MIGRATE_FAULT_PHASE=healthy:`n$faultTail"
+  }
 
   if (-not (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Net Switch\server.mjs') -PathType Leaf)) {
     throw 'Case 2: legacy entrypoint missing after pre-commit rollback'

@@ -23,6 +23,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/control"
+	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
@@ -1119,13 +1120,19 @@ func stopLegacyProcesses(appDir, dataDir string, probe legacyRuntimeProbe) error
 			return err
 		}
 		if len(remaining) == 0 {
-			return nil
+			break
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("legacy Net Switch processes did not stop: %s", strings.Join(remaining, ", "))
 		}
 		time.Sleep(300 * time.Millisecond)
 	}
+	retireCtx, cancelRetire := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancelRetire()
+	if err := winengine.RecordRetiredLegacyAdapter(retireCtx); err != nil {
+		return fmt.Errorf("retire legacy Net Switch adapter: %w", err)
+	}
+	return nil
 }
 
 func stopLegacyEnginePID(pid uint32, engineDir string) {
@@ -2091,16 +2098,32 @@ func queryCurrentControlRoutingWanted(ctx context.Context) bool {
 		return false
 	}
 	defer rpc.Close()
-	var state struct {
-		Routing struct {
-			Status string `json:"status"`
-			Wanted bool   `json:"wanted"`
-		} `json:"routing"`
-	}
-	if err := rpc.Call(qCtx, map[string]any{"method": "status"}, &state); err != nil {
+	var raw json.RawMessage
+	if err := rpc.Call(qCtx, map[string]any{"method": "status"}, &raw); err != nil {
 		return false
 	}
-	return state.Routing.Status == "on" || state.Routing.Wanted
+	return parseControlStatusRoutingWanted(raw)
+}
+
+func parseControlStatusRoutingWanted(raw []byte) bool {
+	var state struct {
+		Routing json.RawMessage `json:"routing"`
+	}
+	if json.Unmarshal(raw, &state) != nil || len(state.Routing) == 0 {
+		return false
+	}
+	var statusStr string
+	if json.Unmarshal(state.Routing, &statusStr) == nil {
+		return statusStr == "on" || statusStr == "starting"
+	}
+	var obj struct {
+		Status string `json:"status"`
+		Wanted bool   `json:"wanted"`
+	}
+	if json.Unmarshal(state.Routing, &obj) == nil {
+		return obj.Status == "on" || obj.Status == "starting" || obj.Wanted
+	}
+	return false
 }
 
 func pruneSupersededVersionDirs(appDir, keepCurrent, keepPrev string) {
