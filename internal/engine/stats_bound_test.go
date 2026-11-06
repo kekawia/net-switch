@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/netip"
 	"reflect"
+	"runtime"
+	"runtime/metrics"
 	"slices"
 	"strings"
 	"testing"
@@ -214,4 +216,73 @@ func statsReply(t *testing.T, server *protocol.Server) []byte {
 		}
 	}
 	return line
+}
+
+func TestStatsRuntimeMetricsAvoidStopTheWorld(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e := New(ctx, Dependencies{
+		OpenTun: func(context.Context) (platform.TunDevice, error) { return testfake.NewTun(), nil },
+		Routes:  &testfake.Routes{},
+		Dialer:  testfake.Dialer{},
+		Owners:  &testfake.Owners{},
+	}, flows.Defaults(), nil)
+
+	otherSTWCount := func() uint64 {
+		sample := [1]metrics.Sample{{Name: "/sched/pauses/total/other:seconds"}}
+		metrics.Read(sample[:])
+		var total uint64
+		for _, c := range sample[0].Value.Float64Histogram().Counts {
+			total += c
+		}
+		return total
+	}
+
+	held := make([]byte, 16<<20)
+	held[0] = 1
+	runtime.GC()
+
+	beforeSTW := otherSTWCount()
+	var stats map[string]any
+	for range 32 {
+		stats = e.Stats().(map[string]any)
+	}
+	afterSTW := otherSTWCount()
+	runtime.KeepAlive(held)
+
+	if afterSTW != beforeSTW {
+		t.Fatalf("Engine.Stats triggered %d non-GC stopTheWorld pauses across 32 polls", afterSTW-beforeSTW)
+	}
+
+	for _, key := range []string{
+		"heapBytes",
+		"stackBytes",
+		"heapGoalBytes",
+		"gcCycles",
+		"gcCPUppm",
+		"runtimeBytes",
+		"goroutines",
+		"gomaxprocs",
+		"stackStartBytes",
+		"heapLiveBytes",
+		"gcCPUNanos",
+		"totalCPUNanos",
+	} {
+		v, ok := stats[key]
+		if !ok {
+			t.Fatalf("missing stats[%q]", key)
+		}
+		if _, ok := v.(uint64); !ok {
+			t.Fatalf("stats[%q] has type %T, want uint64", key, v)
+		}
+	}
+	if got := stats["heapBytes"].(uint64); got < 16<<20 {
+		t.Fatalf("heapBytes = %d, want >= %d", got, 16<<20)
+	}
+	if got := stats["runtimeBytes"].(uint64); got < 16<<20 {
+		t.Fatalf("runtimeBytes = %d, want >= %d", got, 16<<20)
+	}
+	if got := stats["gcCycles"].(uint64); got == 0 {
+		t.Fatalf("gcCycles = 0 after explicit runtime.GC")
+	}
 }

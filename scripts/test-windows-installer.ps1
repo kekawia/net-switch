@@ -155,7 +155,7 @@ function Assert-TaskPresent([string] $TaskName, [bool] $Expected) {
 
 function Invoke-SilentInstaller([string] $ExePath, [string] $LogName, [string[]] $ExtraArgs = @(), [switch] $AllowFailure) {
   $logPath = Join-Path $diagDir $LogName
-  $allArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$logPath") + $ExtraArgs
+  $allArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "`"/LOG=$logPath`"") + $ExtraArgs
   $p = Start-Process -FilePath $ExePath -ArgumentList $allArgs -Wait -PassThru
   if (-not $AllowFailure -and $p.ExitCode -ne 0) {
     $tail = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Tail 40) -join "`n" } else { '<no log>' }
@@ -170,7 +170,7 @@ function Invoke-SilentUninstaller([string] $LogName) {
     throw "Missing uninstaller at $unins"
   }
   $logPath = Join-Path $diagDir $LogName
-  $p = Start-Process -FilePath $unins -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$logPath") -Wait -PassThru
+  $p = Start-Process -FilePath $unins -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "`"/LOG=$logPath`"") -Wait -PassThru
   if ($p.ExitCode -ne 0) {
     $tail = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Tail 40) -join "`n" } else { '<no log>' }
     throw "Uninstaller failed with exit $($p.ExitCode). Log tail:`n$tail"
@@ -261,7 +261,7 @@ try {
   $primaryStatePath = Join-Path $tempRoot 'isp-primary.json'
   $secondaryStatePath = Join-Path $tempRoot 'isp-secondary.json'
 
-  $pPrimary = Start-Process -FilePath $ispExe -ArgumentList @('serve', '--uplink-index', "$($uplink.index)", '--uplink-ip', "$($uplink.address)", '--state', $primaryStatePath, '--role', 'primary') -WindowStyle Hidden -PassThru
+  $pPrimary = Start-Process -FilePath $ispExe -ArgumentList @('serve', '--uplink-index', "$($uplink.index)", '--uplink-ip', "$($uplink.address)", '--state', "`"$primaryStatePath`"", '--role', 'primary') -WindowStyle Hidden -PassThru
   $ispProcs += $pPrimary
   $primaryIsp = Wait-Until 'primary TestISP ready' 30 {
     if (-not (Test-Path -LiteralPath $primaryStatePath -PathType Leaf)) { return $null }
@@ -273,7 +273,7 @@ try {
   $env:TESTISP_INDEX = "$($primaryIsp.index)"
   & pwsh.exe -NoProfile -ExecutionPolicy Bypass -File $ispNetworkScript -Action configure | Out-Null
 
-  $pSecondary = Start-Process -FilePath $ispExe -ArgumentList @('serve', '--uplink-index', "$($uplink.index)", '--uplink-ip', "$($uplink.address)", '--state', $secondaryStatePath, '--role', 'secondary') -WindowStyle Hidden -PassThru
+  $pSecondary = Start-Process -FilePath $ispExe -ArgumentList @('serve', '--uplink-index', "$($uplink.index)", '--uplink-ip', "$($uplink.address)", '--state', "`"$secondaryStatePath`"", '--role', 'secondary') -WindowStyle Hidden -PassThru
   $ispProcs += $pSecondary
   $secondaryIsp = Wait-Until 'secondary TestISP ready' 30 {
     if (-not (Test-Path -LiteralPath $secondaryStatePath -PathType Leaf)) { return $null }
@@ -287,9 +287,30 @@ try {
   Remove-Item Env:TESTISP_ROLE, Env:TESTISP_INDEX, Env:TESTISP_TOKEN -ErrorAction SilentlyContinue
 
   $echoPortFile = Join-Path $tempRoot 'echo-port.txt'
-  $echoScript = "const http=require('node:http'),fs=require('node:fs');const s=http.createServer((req,res)=>{const u=new URL(req.url,'http://x');res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({nonce:u.searchParams.get('nonce')||''}));});s.listen(0,process.argv[1],()=>{fs.writeFileSync(process.argv[2],String(s.address().port));});setInterval(()=>{},60000);"
-  $echoProc = Start-Process -FilePath 'node.exe' -ArgumentList @('-e', $echoScript, "$($uplink.address)", $echoPortFile) -WindowStyle Hidden -PassThru
+  $echoScriptPath = Join-Path $tempRoot 'echo-server.js'
+  $echoStderrPath = Join-Path $diagDir 'echo-stderr.log'
+  $echoJs = @'
+const http = require('node:http');
+const fs = require('node:fs');
+const host = process.argv[2];
+const portFile = process.argv[3];
+const server = http.createServer((req, res) => {
+  const u = new URL(req.url, 'http://localhost');
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ nonce: u.searchParams.get('nonce') || '' }));
+});
+server.listen(0, host, () => {
+  fs.writeFileSync(portFile, String(server.address().port));
+});
+setInterval(() => {}, 60000);
+'@
+  [IO.File]::WriteAllText($echoScriptPath, $echoJs, [Text.UTF8Encoding]::new($false))
+  $echoProc = Start-Process -FilePath 'node.exe' -ArgumentList @("`"$echoScriptPath`"", "`"$($uplink.address)`"", "`"$echoPortFile`"") -RedirectStandardError $echoStderrPath -WindowStyle Hidden -PassThru
   $echoPort = [int](Wait-Until 'local HTTP echo server port' 15 {
+    if ($echoProc.HasExited) {
+      $errDetail = if (Test-Path -LiteralPath $echoStderrPath -PathType Leaf) { (Get-Content -LiteralPath $echoStderrPath -Raw).Trim() } else { '' }
+      throw "echo server exited early (code $($echoProc.ExitCode)): $errDetail"
+    }
     if (Test-Path -LiteralPath $echoPortFile -PathType Leaf) {
       $txt = (Get-Content -LiteralPath $echoPortFile -Raw).Trim()
       if ($txt -match '^\d+$') { return $txt }

@@ -63,6 +63,13 @@ Name: "{autodesktop}\Net Switch"; Filename: "{app}\netswitch-desktop.exe"; Worki
 [Run]
 Filename: "{app}\netswitch-desktop.exe"; WorkingDir: "{app}"; Description: "Open Net Switch"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
+[UninstallRun]
+; Inno Setup appends upgrade records to unins000.dat and replays LastList in
+; reverse order. Pre-0.4 installers recorded RunOnceId "RemoveAutostart" pointing
+; to {app}\runtime\node.exe without skipifdoesntexist; claiming the same
+; RunOnceId first marks it done before unins000.exe reaches the retired entry.
+Filename: "{cmd}"; Parameters: "/c rem"; WorkingDir: "{sys}"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveAutostart"
+
 [Code]
 var
   StageExtracted: Boolean;
