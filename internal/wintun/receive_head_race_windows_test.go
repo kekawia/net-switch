@@ -273,7 +273,8 @@ func TestWintunEntryShiftProbe(t *testing.T) {
 // staleHeadCounts is what staleHeadIO saw. NaturalRegressions needs no replay:
 // it counts the driver's own late stores, which the account can tell apart
 // while the ring has room. On a full ring a late store reads as one large
-// release, to this account as to the writer. AccountLost should stay zero.
+// release, to this account as to the writer. AccountLost stays zero on a
+// healthy ring; after an overrun the ring is no longer one.
 type staleHeadCounts struct {
 	Replays            int    `json:"replays"`             // batches written with the older Head in place
 	Overruns           int    `json:"overruns"`            // of those, batches that wrote past the free space
@@ -468,8 +469,10 @@ type staleHeadRounds struct {
 	Mismatched int `json:"mismatched_streams"`
 }
 
-// stalledRound echoes eight verified streams whose readers stall between
-// bursts, so Windows keeps their packets in the ring and the ring stays full.
+// stalledRound echoes eight verified streams whose readers start late and then
+// stall between bursts. Windows keeps a packet in the ring until its reader
+// takes the data, so the late start fills the ring whatever the runner's speed
+// (an ARM64 runner reading at once never filled a 1 MiB ring).
 func stalledRound(round, size int) (completed, incomplete int, differences []staleHeadDifference, err error) {
 	const streams = 8
 	transfer := integrityTransferID.Add(1)
@@ -508,6 +511,7 @@ func stalledRound(round, size int) (completed, incomplete int, differences []sta
 			b := make([]byte, 256<<10)
 			var n int64
 			var readErr error
+			time.Sleep(150 * time.Millisecond)
 			for reads := 1; readErr == nil; reads++ {
 				var k int
 				if k, readErr = c.Read(b); k > 0 {
@@ -567,6 +571,7 @@ func TestWintunStaleReceiveHead(t *testing.T) {
 			f.stopEcho = tcpEcho(t, f)
 
 			var control, replayed staleHeadRounds
+			var controlCounts staleHeadCounts
 			var overrunRounds, damagedRounds int
 			var differences []staleHeadDifference
 			var problem error
@@ -579,8 +584,12 @@ func TestWintunStaleReceiveHead(t *testing.T) {
 				replay.armed.Store(armed)
 				completed, incomplete, d, err := stalledRound(round, streamBytes)
 				replay.armed.Store(false)
+				after := replay.snapshot()
 				totals.Rounds, totals.Completed, totals.Incomplete, totals.Mismatched = totals.Rounds+1, totals.Completed+completed, totals.Incomplete+incomplete, totals.Mismatched+len(d)
-				if replay.snapshot().Overruns > before.Overruns {
+				if !armed {
+					controlCounts = after
+				}
+				if after.Overruns > before.Overruns {
 					overrunRounds++
 					if len(d) != 0 || incomplete != 0 || f.fault() != nil {
 						damagedRounds++
@@ -593,12 +602,14 @@ func TestWintunStaleReceiveHead(t *testing.T) {
 			if len(differences) > 4 {
 				differences = differences[:4]
 			}
+			// The driver ends the session itself when the writer laps its read
+			// position: the other way one stale Head shows, besides wrong bytes.
 			report(t, map[string]any{"test": "stale_receive_head", "arch": runtime.GOARCH, "capacity": capacity, "mtu": 1500,
-				"streams_per_round": 8, "stream_bytes": streamBytes, "control": control, "replay": replayed, "counts": counts,
-				"overrun_rounds": overrunRounds, "damaged_rounds": damagedRounds, "differences": differences,
+				"streams_per_round": 8, "stream_bytes": streamBytes, "control": control, "control_counts": controlCounts, "replay": replayed, "counts": counts,
+				"overrun_rounds": overrunRounds, "damaged_rounds": damagedRounds, "session_lost": f.fault() != nil, "differences": differences,
 				"seconds": time.Since(start).Seconds(), "session": observeSession(session), "fault": fmt.Sprint(f.fault()), "error": fmt.Sprint(problem)})
-			if control.Completed == 0 || control.Incomplete != 0 || control.Mismatched != 0 {
-				t.Errorf("the control rounds were not clean (%+v), so damage after a replay would prove nothing", control)
+			if control.Completed == 0 || control.Incomplete != 0 || control.Mismatched != 0 || controlCounts.Replays != 0 || controlCounts.AccountLost != 0 {
+				t.Errorf("the control rounds were not clean (%+v, %+v), so damage after a replay would prove nothing", control, controlCounts)
 			}
 			switch {
 			case overrunRounds == 0:
