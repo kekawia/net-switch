@@ -36,6 +36,24 @@ func newPerformanceSamples(pairs int, mode, metric string) []performanceSample {
 	return samples
 }
 
+// referenceFault reports whether a sample of the signed DLL failed on the
+// DLL's own account: its reader rejected a ring entry, or it delivered bytes
+// that were never sent. Both are the 0.14.1 driver's defects seen through the
+// official library. They are driver evidence and no measure of our session,
+// so they are reported and never fail a comparison (the release gate approved
+// on 2026-11-10). The in-process reference is our own reader and writer and
+// is never excused.
+func referenceFault(s performanceSample) bool {
+	return s.Mode == "dll" && (errors.Is(s.cause, ErrCorrupt) || errors.Is(s.cause, errPayloadIntegrity))
+}
+
+// validPairs is how many of the matched pairs a ratio needs: nine of twelve.
+// The others may be lost to reference faults.
+func validPairs(pairs int) int { return (3*pairs + 3) / 4 }
+
+// pairedSampleRatios returns one ratio per pair whose two samples are valid.
+// A pair whose DLL sample is a reference fault is left out; every other
+// invalid sample fails the comparison, as does having too few pairs left.
 func pairedSampleRatios(ours, dll []performanceSample, reference ...string) ([]float64, error) {
 	mode := "dll"
 	if len(reference) != 0 {
@@ -45,27 +63,35 @@ func pairedSampleRatios(ours, dll []performanceSample, reference ...string) ([]f
 		return nil, fmt.Errorf("integrity-invalid comparison: incomplete matched pairs ours=%d DLL=%d", len(ours), len(dll))
 	}
 	var invalid error
+	var a, b []float64
 	for i := range ours {
+		usable := true
 		for _, side := range []struct {
 			samples []performanceSample
 			mode    string
 		}{{ours, "ours"}, {dll, mode}} {
 			s := side.samples[i]
-			if s.Status != "valid" || s.Value == nil || s.Error != "" || s.Pair != i || s.Mode != side.mode || s.Metric != ours[0].Metric {
+			identified := s.Pair == i && s.Mode == side.mode && s.Metric == ours[0].Metric
+			if identified && referenceFault(s) {
+				usable = false
+			} else if !identified || s.Status != "valid" || s.Value == nil || s.Error != "" {
 				cause := s.cause
 				if cause == nil {
 					cause = fmt.Errorf("%s (status=%s, pair=%d, mode=%s, metric=%s)", s.Error, s.Status, s.Pair, s.Mode, s.Metric)
 				}
 				invalid = errors.Join(invalid, fmt.Errorf("pair=%d mode=%s metric=%s: %w", i, side.mode, s.Metric, cause))
+				usable = false
 			}
+		}
+		if usable {
+			a, b = append(a, *ours[i].Value), append(b, *dll[i].Value)
 		}
 	}
 	if invalid != nil {
 		return nil, fmt.Errorf("integrity-invalid comparison: %w", invalid)
 	}
-	a, b := make([]float64, len(ours)), make([]float64, len(dll))
-	for i := range ours {
-		a[i], b[i] = *ours[i].Value, *dll[i].Value
+	if len(a) < validPairs(len(ours)) {
+		return nil, fmt.Errorf("integrity-invalid comparison: only %d of %d pairs are left after reference faults, fewer than %d", len(a), len(ours), validPairs(len(ours)))
 	}
 	ratios, err := pairedRatios(a, b)
 	if err != nil {

@@ -668,7 +668,12 @@ func TestWintunPerformance(t *testing.T) {
 						}
 						report(t, diagnostics)
 						// Report a failed reference too, but never turn an invalid
-						// denominator into a favorable throughput ratio.
+						// denominator into a favorable throughput ratio: a fault of the
+						// signed DLL's own is logged and its pair is left out below.
+						if referenceFault(*sample) {
+							t.Logf("reference fault, reported and left out of the comparison: %v", sample.cause)
+							return
+						}
 						must(t, sample.cause)
 					})
 				}
@@ -684,13 +689,14 @@ func TestWintunPerformance(t *testing.T) {
 			t.Errorf("%s: %v", metric.name, err)
 			continue
 		}
+		faults := pairs - len(ratios)
 		if diagnostic {
 			// Instrumented timing never enters the clean performance gate.
-			report(t, map[string]any{"test": "integrity_pairs_complete", "pairs": pairs, "metric": metric.name})
+			report(t, map[string]any{"test": "integrity_pairs_complete", "pairs": pairs, "reference_faults": faults, "metric": metric.name})
 			continue
 		}
 		ratio := median(ratios)
-		report(t, map[string]any{"test": "performance_paired", "statistic": "median_pair_ratio", "arch": runtime.GOARCH, "reference": reference, "pairs": pairs, "metric": metric.name, "ratio": ratio, "pair_ratios": ratios, "dll_samples": dll, "ours_samples": ours})
+		report(t, map[string]any{"test": "performance_paired", "statistic": "median_pair_ratio", "arch": runtime.GOARCH, "reference": reference, "pairs": pairs, "reference_faults": faults, "metric": metric.name, "ratio": ratio, "pair_ratios": ratios, "dll_samples": dll, "ours_samples": ours})
 		if metric.name == "udp_p95_us" {
 			if ratio > 1.10 {
 				t.Errorf("latency regression: median matched ratio %.3f > 1.10", ratio)
