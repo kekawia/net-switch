@@ -318,7 +318,7 @@ func TestRingReceiveHeadReplayOverruns(t *testing.T) {
 	overrun := m.write(t, 8)
 	m.giveBack(0)
 	counts := replay.snapshot()
-	if overrun == 0 || m.wrong != 1 || counts.Replays != 1 || counts.Overruns != 1 || counts.OverrunBytes == 0 || counts.AccountLost != 0 {
+	if overrun == 0 || m.wrong != 1 || counts.Replays != 1 || counts.Overruns != 1 || counts.OverrunBytes == 0 || counts.NaturalRegressions != 0 {
 		t.Fatalf("one replayed Head: wrote %d packets, wrong deliveries %d, %+v", overrun, m.wrong, counts)
 	}
 	if head := m.r.receive.load(0); head != third || replay.armed.Load() {
@@ -330,17 +330,18 @@ func TestRingReceiveHeadReplayOverruns(t *testing.T) {
 // The account behind the replay has to follow a healthy ring exactly, or the
 // hosted test would report damage of its own making. With releases in order it
 // never loses the ring and never meets a Head it cannot explain. With the
-// 0.14.1 order it catches late stores with nothing replayed, but only while
-// the ring has room: on a full ring a late store reads as one large release,
-// which is exactly why the writer believes it.
+// 0.14.1 order it catches late stores with nothing replayed, as a Head behind
+// the last one, while the ring has room. On a full ring a late store reads as
+// one large release, to this account as to the writer; there it shows only on
+// a real adapter, when the writer was given more room than the Head allows.
 func TestRingReceiveHeadAccountFollowsTheRing(t *testing.T) {
-	late := 0
+	late := map[string]int{}
 	for name, sizes := range headModelMixes {
 		for seed := int64(1); seed <= 20; seed++ {
 			m := newHeadModel(t, seed, 0, sizes)
 			replay := modelReplay(m)
 			m.run(t, 1500)
-			if counts := replay.snapshot(); counts != (staleHeadCounts{}) || !replay.clean || m.wrong != 0 || m.delivered == 0 {
+			if counts := replay.snapshot(); counts.Replays != 0 || counts.NaturalRegressions != 0 || !replay.clean || m.wrong != 0 || m.delivered == 0 {
 				t.Fatalf("%s, seed %d, releases in order: %+v clean=%t delivered=%d wrong=%d", name, seed, counts, replay.clean, m.delivered, m.wrong)
 			}
 			m = newHeadModel(t, seed, 12, sizes)
@@ -350,11 +351,13 @@ func TestRingReceiveHeadAccountFollowsTheRing(t *testing.T) {
 			if counts.Replays != 0 {
 				t.Fatalf("%s, seed %d: an unarmed harness replayed a Head: %+v", name, seed, counts)
 			}
-			late += counts.NaturalRegressions
+			for _, event := range counts.Events {
+				late[event.Kind]++
+			}
 		}
 	}
-	t.Logf("0.14.1 order, nothing replayed: %d Heads no release could explain", late)
-	if late == 0 {
-		t.Fatal("the account did not notice the 0.14.1 release order")
+	t.Logf("0.14.1 order, nothing replayed, first events of each run by kind: %v", late)
+	if late["behind_sample"] == 0 || late["inconsistent"] != 0 {
+		t.Fatalf("the account did not notice the 0.14.1 release order as expected: %v", late)
 	}
 }

@@ -100,8 +100,12 @@ receive thread starts, and only writes it afterwards: the value reaches our
 writer and nothing in the driver. It is a value the driver published earlier in
 the same lap, placed only while the word still holds the newest one, and taken
 out again unless the driver has published in between. Control rounds without a
-replay come first and must be clean. Like the model tests, it asserts the
-defect until the writer guard lands. The same harness runs against the model in
+replay come first. The readers start late, so Windows holds enough packets to
+fill the ring on any runner; that load also invites the driver's own late
+stores, and the test reports each one it catches (`natural_events`) without
+failing. Like the model tests, it asserts the defect until the writer guard
+lands: every replayed Head must make the writer overrun, and the overrun must
+show as wrong delivered bytes or as the driver ending the session. The same harness runs against the model in
 `TestRingReceiveHeadReplayOverruns`, and
 `TestRingReceiveHeadAccountFollowsTheRing` checks that its account of the ring
 never drifts on healthy traffic. Neither hosted test is part of the nightly
