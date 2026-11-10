@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"math/rand"
 	"net/netip"
+	"sync"
 	"testing"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
@@ -29,16 +30,24 @@ import (
 //
 // Upstream moved that write under the lock in dd050927 (2026-02-20), which has
 // not shipped in a signed build.
+const (
+	modelMaxBatch = 16
+	modelMaxSize  = 9000
+)
+
 type headModel struct {
-	r      *rings
-	rng    *rand.Rand
-	late   int // longest delay, in steps, between a release and its Head write
-	cursor uint32
-	held   []heldPacket
-	writes []lateHead
-	seq    uint64
-	sizes  []int
-	out    func([][]byte) (int, error) // in place of the bare writer, when set
+	r       *rings
+	rng     *rand.Rand
+	late    int // longest delay, in steps, between a release and its Head write
+	cursor  uint32
+	held    []heldPacket
+	writes  []lateHead
+	seq     uint64
+	sizes   []int
+	headers [][20]byte
+	batch   [modelMaxBatch][]byte
+	bufs    [modelMaxBatch][modelMaxSize]byte
+	out     func([][]byte) (int, error) // in place of the bare writer, when set
 
 	delivered, wrong, garbled int
 	probes                    int // the writer's stall probes, which Windows drops
@@ -90,44 +99,66 @@ type lateHead struct {
 
 var modelSource, modelDestination = netip.MustParseAddr("198.19.240.2"), netip.MustParseAddr("198.19.240.1")
 
-func modelPacket(seq uint64, size int) []byte {
-	payload := make([]byte, size-20)
-	binary.LittleEndian.PutUint64(payload, seq)
-	for i := 8; i < len(payload); i++ {
-		payload[i] = byte(seq) + byte(i)*31
+// Precompute the payload pattern so five million packets under -race use bulk
+// copies and comparisons instead of per-byte race-detector calls.
+var modelFillTable = sync.OnceValue(func() *[256][MaxPacketSize - 20]byte {
+	var fill [256][MaxPacketSize - 20]byte
+	for s := range fill {
+		for i := range 256 {
+			fill[s][i] = byte(s) + byte(i)*31
+		}
+		for n := 256; n < len(fill[s]); n *= 2 {
+			copy(fill[s][n:], fill[s][:n])
+		}
 	}
-	return packet.IP(modelSource, modelDestination, 253, payload)
-}
+	return &fill
+})
 
 func modelPayloadIntact(seq uint64, payload []byte) bool {
 	if len(payload) < 8 || binary.LittleEndian.Uint64(payload) != seq {
 		return false
 	}
-	for i := 8; i < len(payload); i++ {
-		if payload[i] != byte(seq)+byte(i)*31 {
-			return false
-		}
+	row := &modelFillTable()[byte(seq)]
+	if len(payload) > len(row) {
+		return false
 	}
-	return true
+	return bytes.Equal(payload[8:], row[8:len(payload)])
 }
 
 func newHeadModel(t *testing.T, seed int64, late int, sizes []int) *headModel {
 	t.Helper()
+	headers := make([][20]byte, len(sizes))
+	for i, size := range sizes {
+		if size < 28 || size > modelMaxSize {
+			t.Fatalf("model packet size %d outside [28, %d]", size, modelMaxSize)
+		}
+		copy(headers[i][:], packet.IP(modelSource, modelDestination, 253, make([]byte, size-20))[:20])
+	}
 	event, err := windows.CreateEvent(nil, 0, 0, nil)
 	must(t, err)
 	t.Cleanup(func() { windows.CloseHandle(event) })
 	return &headModel{
 		r:   &rings{receive: ring{make([]byte, ringBytes(MinCapacity)), MinCapacity}, writeEvent: event},
-		rng: rand.New(rand.NewSource(seed)), late: late, sizes: sizes,
+		rng: rand.New(rand.NewSource(seed)), late: late, sizes: sizes, headers: headers,
 	}
 }
 
 func (m *headModel) write(t *testing.T, packets int) int {
 	t.Helper()
-	batch := make([][]byte, packets)
+	if packets > len(m.bufs) {
+		t.Fatalf("model batch %d exceeds %d", packets, len(m.bufs))
+	}
+	fill := modelFillTable()
+	batch := m.batch[:packets]
 	for i := range batch {
 		m.seq++
-		batch[i] = modelPacket(m.seq, m.sizes[m.rng.Intn(len(m.sizes))])
+		k := m.rng.Intn(len(m.sizes))
+		size := m.sizes[k]
+		b := m.bufs[i][:size]
+		copy(b[:20], m.headers[k][:])
+		binary.LittleEndian.PutUint64(b[20:28], m.seq)
+		copy(b[28:], fill[byte(m.seq)][8:size-20])
+		batch[i] = b
 	}
 	if m.out != nil {
 		n, err := m.out(batch)
