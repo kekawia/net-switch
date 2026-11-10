@@ -613,9 +613,11 @@ setInterval(() => {}, 60000);
   } | ConvertTo-Json -Depth 5
   [IO.File]::WriteAllText((Join-Path $userData 'settings.json'), $profileOneSettings, $utf8NoBom)
 
-  $randPwd = 'Ns!' + [Guid]::NewGuid().ToString('N').Substring(0, 12) + '9aA'
-  & net.exe user $tempUserName $randPwd /add | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Case 4: failed to create temporary local user $tempUserName" }
+  # 14 characters at most: net.exe asks for confirmation above that, and on a
+  # runner nobody answers ("No valid response was provided").
+  $randPwd = 'Ns!' + [Guid]::NewGuid().ToString('N').Substring(0, 8) + '9aA'
+  $netOutput = & net.exe user $tempUserName $randPwd /add 2>&1
+  if ($LASTEXITCODE -ne 0) { throw "Case 4: failed to create temporary local user ${tempUserName}: $netOutput" }
   $tempSidObj = ([Security.Principal.NTAccount]$tempUserName).Translate([Security.Principal.SecurityIdentifier])
   $tempProfileSid = $tempSidObj.Value
 
