@@ -271,7 +271,8 @@ func TestWintunEntryShiftProbe(t *testing.T) {
 }
 
 // staleHeadCounts is what staleHeadIO saw. NaturalRegressions needs no replay:
-// it counts the driver's own late stores, seen before anything was replayed.
+// it counts Heads no release could have produced, seen before anything was
+// replayed. None has been seen on a hosted runner so far.
 type staleHeadCounts struct {
 	Replays            int              `json:"replays"`             // batches written with the older Head in place
 	Overruns           int              `json:"overruns"`            // of those, batches that wrote past the free space
@@ -281,22 +282,18 @@ type staleHeadCounts struct {
 	Events             []staleHeadEvent `json:"natural_events,omitempty"`
 }
 
-// staleHeadEvent is one Head that cannot follow the one before it, with nothing
-// replayed. Head only moves forward in a correct driver, so each is the 0.14.1
-// late store caught in the ring.
-//
-//   - "behind_sample": the Head is older than the one sampled before it. Seen
-//     this way only while the ring has room; Bytes is how far back.
-//   - "behind_writer": the writer was shown more room than this Head allows, so
-//     an earlier Head was newer. This is the full-ring case, the one that makes
-//     a writer overrun; Bytes is the extra room.
-//   - "inconsistent": Head and Tail no longer match the account at all.
+// staleHeadEvent is one sampled Head that no release could have produced, with
+// nothing replayed. Head only moves forward in a correct driver, so a "behind"
+// event is the 0.14.1 late store caught in the ring. It can be told apart only
+// while the ring has room: on a full ring a late store reads as one large
+// release, to this account as to the writer. "inconsistent" means Head and
+// Tail no longer match the account at all.
 type staleHeadEvent struct {
 	Kind       string `json:"kind"`
 	HeadBefore uint32 `json:"head_before"`
 	Head       uint32 `json:"head"`
 	Tail       uint32 `json:"tail"`
-	Bytes      uint64 `json:"bytes"`
+	Room       uint64 `json:"room"` // free space by the account when it was seen
 }
 
 // staleHeadIO replays on a real adapter the one thing the 0.14.1 return path
@@ -343,16 +340,32 @@ func (s *staleHeadIO) snapshot() staleHeadCounts {
 	return counts
 }
 
-func (s *staleHeadIO) natural(kind string, before, head, tail uint32, bytes uint64) {
+func (s *staleHeadIO) natural(kind string, before, head, tail uint32, room uint64) {
 	if s.replayed {
 		return
 	}
 	s.count(func(c *staleHeadCounts) {
 		c.NaturalRegressions++
 		if len(c.Events) < 8 {
-			c.Events = append(c.Events, staleHeadEvent{kind, before, head, tail, bytes})
+			c.Events = append(c.Events, staleHeadEvent{kind, before, head, tail, room})
 		}
 	})
+}
+
+// resolve places a sampled Head on the unwrapped line. The writer loads Head
+// after this account samples it, so it may have been given a newer one and
+// written more than the last sample allowed. The true Head therefore lies
+// between what the writes so far imply and Tail, a span shorter than the ring,
+// which names one position for every offset. A sample outside it follows from
+// no release. (Measuring from the last sample instead miscounts a full lap
+// when the ring drains after such a write.)
+func (s *staleHeadIO) resolve(head uint32, capacity uint64) (uint64, bool) {
+	floor := s.vhead
+	if s.vtail-floor > capacity-4 {
+		floor = s.vtail - (capacity - 4)
+	}
+	at := floor + uint64((head-s.head-uint32(floor-s.vhead))&uint32(capacity-1))
+	return at, at <= s.vtail
 }
 
 func (s *staleHeadIO) WriteBatch(packets [][]byte) (int, error) {
@@ -368,8 +381,8 @@ func (s *staleHeadIO) advance(head uint32, by, capacity uint64) {
 	}
 	s.older = append(s.older, s.vhead)
 	s.vhead, s.head = s.vhead+by, head
-	for s.vhead-s.older[0] >= capacity {
-		s.older = s.older[1:] // more than a lap old
+	for len(s.older) != 0 && s.vhead-s.older[0] >= capacity {
+		s.older = s.older[1:] // a lap old or more
 	}
 }
 
@@ -395,21 +408,16 @@ func (s *staleHeadIO) before(packets [][]byte) (stale, newest uint32, replayed b
 		s.head, s.tail, s.vhead, s.vtail, s.older = head, tail, capacity, capacity, s.older[:0]
 		return
 	}
-	previous, by := s.head, uint64((head-s.head)&mask)
-	if by > s.vtail-s.vhead {
-		// More than everything outstanding: no release explains this value. It
-		// is left out of the account; the next sample is a real release again.
-		s.natural("behind_sample", previous, head, tail, capacity-by)
+	previous := s.head
+	at, possible := s.resolve(head, capacity)
+	if !possible {
+		// No release explains this value. It is left out of the account; the
+		// next sample is a real release again.
+		s.natural("behind", previous, head, tail, capacity-4-min(s.vtail-s.vhead, capacity-4))
 		return
 	}
-	s.advance(head, by, capacity)
-	if outstanding := s.vtail - s.vhead; outstanding > capacity-4 {
-		// The writer computes its room from the Head it loads, and it loaded
-		// before this sample. It was given more room than this Head allows.
-		s.clean = false
-		s.natural("behind_writer", previous, head, tail, outstanding-(capacity-4))
-		return
-	} else if uint32(outstanding) != (tail-head)&mask {
+	s.advance(head, at-s.vhead, capacity)
+	if uint32(s.vtail-s.vhead) != (tail-head)&mask {
 		s.clean = false
 		s.natural("inconsistent", previous, head, tail, 0)
 		return
@@ -452,6 +460,12 @@ func (s *staleHeadIO) after(stale, newest uint32, replayed bool) {
 	r := s.Session.rings
 	if r == nil || r != s.seen || r.closed {
 		s.clean = false
+		if replayed {
+			// The session was replaced while the batch was written: no verdict.
+			s.armed.Store(false)
+			s.replayed = true
+			s.count(func(c *staleHeadCounts) { c.Replays++ })
+		}
 		return
 	}
 	capacity, mask := uint64(r.receive.capacity), r.receive.capacity-1
@@ -461,17 +475,26 @@ func (s *staleHeadIO) after(stale, newest uint32, replayed bool) {
 	if !replayed {
 		return
 	}
+	ended := false
 	if !atomic.CompareAndSwapUint32(r.receive.word(0), stale, newest) {
 		// The driver published during the batch. Its value is at least as new as
 		// the one replaced, so the batch is judged against it: an overrun counted
 		// below is certain, and one the release then covered is not counted.
 		head := r.receive.load(0)
 		by := uint64((head - newest) & mask)
-		if head > mask || head&3 != 0 || by > s.vtail-s.vhead {
-			s.clean = false // released, or a value no release explains: no verdict
+		switch {
+		case head == ^uint32(0):
+			// The driver stopped the ring while this very batch was being written:
+			// it read what the batch overwrote. Judge the batch against the last
+			// Head it published.
+			ended = true
+		case head > mask || head&3 != 0 || by > s.vtail-s.vhead:
+			s.clean = false // a value no release explains: no verdict
+			s.count(func(c *staleHeadCounts) { c.Replays++ })
 			return
+		default:
+			s.advance(head, by, capacity)
 		}
-		s.advance(head, by, capacity)
 	}
 	limit := s.vhead + capacity - 4
 	s.count(func(c *staleHeadCounts) {
@@ -482,7 +505,7 @@ func (s *staleHeadIO) after(stale, newest uint32, replayed bool) {
 			c.BytesBehind = s.behind
 		}
 	})
-	if s.vtail > limit {
+	if s.vtail > limit || ended {
 		// One overrun is the experiment. From here the ring holds more than this
 		// account can describe, until it is next seen empty.
 		s.armed.Store(false)
@@ -592,6 +615,7 @@ func TestWintunStaleReceiveHead(t *testing.T) {
 		controlRounds = 5
 		replayRounds  = 5
 	)
+	var overruns, damaged int
 	for _, capacity := range []uint32{MinCapacity, 1 << 20} {
 		t.Run(fmt.Sprintf("%dKiB", capacity>>10), func(t *testing.T) {
 			a := newAdapter(t, capacity)
@@ -643,22 +667,21 @@ func TestWintunStaleReceiveHead(t *testing.T) {
 				"streams_per_round": 8, "stream_bytes": streamBytes, "control": control, "control_counts": controlCounts, "replay": replayed, "counts": counts,
 				"overrun_rounds": overrunRounds, "damaged_rounds": damagedRounds, "session_lost": f.fault() != nil, "differences": differences,
 				"seconds": time.Since(start).Seconds(), "session": observeSession(session), "fault": fmt.Sprint(f.fault()), "error": fmt.Sprint(problem)})
-			// The driver's own late stores are the defect itself, and this load
-			// invites them, so damage in the control rounds is reported and does
-			// not fail the test until the guard is in. The account cannot see every
-			// late store on a full ring, so such damage may come without an event.
-			switch {
-			case controlCounts.Replays != 0 || control.Completed == 0:
-				t.Errorf("the control rounds did not run as a control (%+v, %+v)", control, controlCounts)
-			case control.Incomplete != 0 || control.Mismatched != 0:
-				t.Logf("known defect: streams were damaged with nothing replayed, as the driver's own late stores can do (%+v, %+v)", control, controlCounts)
+			if control.Completed == 0 || control.Incomplete != 0 || control.Mismatched != 0 || controlCounts.Replays != 0 {
+				t.Errorf("the control rounds were not clean (%+v, %+v), so damage after a replay would prove nothing", control, controlCounts)
 			}
 			switch {
 			case overrunRounds == 0:
-				t.Errorf("no replayed Head made the writer overrun: the harness measured nothing (%+v)", counts)
+				// A replay needs a batch that does not fit the ring. Whether the ring
+				// gets that full depends on the runner, so one size may show nothing.
+				t.Logf("nothing was replayed into an overrun at this ring size (%+v)", counts)
 			case damagedRounds == 0:
 				t.Errorf("the writer overran in %d rounds and no stream was damaged: the defect did not reproduce here (%+v)", overrunRounds, counts)
 			}
+			overruns, damaged = overruns+overrunRounds, damaged+damagedRounds
 		})
+	}
+	if overruns == 0 || damaged == 0 {
+		t.Errorf("no ring size showed the defect: %d overrun rounds, %d damaged", overruns, damaged)
 	}
 }

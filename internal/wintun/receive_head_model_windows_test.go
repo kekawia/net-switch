@@ -330,10 +330,9 @@ func TestRingReceiveHeadReplayOverruns(t *testing.T) {
 // The account behind the replay has to follow a healthy ring exactly, or the
 // hosted test would report damage of its own making. With releases in order it
 // never loses the ring and never meets a Head it cannot explain. With the
-// 0.14.1 order it catches late stores with nothing replayed, as a Head behind
-// the last one, while the ring has room. On a full ring a late store reads as
-// one large release, to this account as to the writer; there it shows only on
-// a real adapter, when the writer was given more room than the Head allows.
+// 0.14.1 order it catches late stores with nothing replayed, as a Head no
+// release could have produced, while the ring has room. On a full ring a late
+// store reads as one large release, to this account as to the writer.
 func TestRingReceiveHeadAccountFollowsTheRing(t *testing.T) {
 	late := map[string]int{}
 	for name, sizes := range headModelMixes {
@@ -357,7 +356,52 @@ func TestRingReceiveHeadAccountFollowsTheRing(t *testing.T) {
 		}
 	}
 	t.Logf("0.14.1 order, nothing replayed, first events of each run by kind: %v", late)
-	if late["behind_sample"] == 0 || late["inconsistent"] != 0 {
+	if late["behind"] == 0 || late["inconsistent"] != 0 {
 		t.Fatalf("the account did not notice the 0.14.1 release order as expected: %v", late)
+	}
+}
+
+// On a real adapter the driver can publish between the account's sample and
+// the writer's own load, so the writer is rightly given more room than the
+// sample allowed. When the ring then drains, Head has moved more than one lap
+// past that sample. An account that measured from the sample took this for a
+// Head that went backwards (seen on both hosted runners, 2026-11-10).
+func TestRingReceiveHeadAccountAllowsTheWriterANewerHead(t *testing.T) {
+	m := newHeadModel(t, 1, 0, []int{1228})
+	replay := &staleHeadIO{Session: &Session{rings: m.r}}
+	var between func()
+	m.out = func(batch [][]byte) (int, error) {
+		stale, newest, replayed := replay.before(batch)
+		if between != nil {
+			between()
+		}
+		n, err := replay.Session.WriteBatch(batch)
+		replay.after(stale, newest, replayed)
+		return n, err
+	}
+	for m.write(t, 1) == 1 {
+	}
+	m.indicate(1 << 20)
+	// The account samples a full ring; two packets come back before the writer loads.
+	between = func() {
+		m.giveBack(0)
+		m.giveBack(1)
+		m.release(func() int { return 0 })
+	}
+	if n := m.write(t, 2); n != 2 {
+		t.Fatalf("wrote %d packets into two slots freed after the sample", n)
+	}
+	between = nil
+	// Everything drains, in order: Head is now more than a lap past that sample.
+	m.indicate(1 << 20)
+	for i := range m.held {
+		m.giveBack(i)
+	}
+	m.release(func() int { return 0 })
+	if n := m.write(t, 1); n != 1 {
+		t.Fatalf("wrote %d packets into an empty ring", n)
+	}
+	if counts := replay.snapshot(); counts.NaturalRegressions != 0 || !replay.clean || m.wrong != 0 {
+		t.Fatalf("a healthy ring read as a Head that went back: %+v clean=%t wrong=%d", counts, replay.clean, m.wrong)
 	}
 }
