@@ -1,0 +1,279 @@
+//go:build windows
+
+package wintun
+
+import (
+	"encoding/binary"
+	"math/rand"
+	"net/netip"
+	"testing"
+
+	"github.com/AyoubAchour/net-switch/internal/engine/packet"
+	"golang.org/x/sys/windows"
+)
+
+// A model of how the signed 0.14.1 driver consumes the Receive ring, run
+// against the real writer. It was written from the driver's behaviour
+// (driver/wintun.c at tag 0.14.1, TunProcessReceiveData and
+// TunReturnNetBufferLists); no driver source is reproduced here.
+//
+// What the model keeps from the driver:
+//   - one receive thread walks the entries between its private cursor and Tail
+//     and hands each packet to Windows by reference: Windows reads the bytes
+//     from ring memory until it returns the packet;
+//   - packets come back in any order, and only the returned prefix is released;
+//   - each release publishes Head as the offset after that packet. In 0.14.1
+//     the write happens after the lock is dropped, so two releases can publish
+//     out of order and Head can step backwards.
+//
+// Upstream moved that write under the lock in dd050927 (2026-02-20), which has
+// not shipped in a signed build.
+type headModel struct {
+	r      *rings
+	rng    *rand.Rand
+	late   int // longest delay, in steps, between a release and its Head write
+	cursor uint32
+	held   []heldPacket
+	writes []lateHead
+	seq    uint64
+	sizes  []int
+
+	delivered, wrong, garbled int
+	lost                      bool
+}
+
+type heldPacket struct {
+	at, next uint32 // packet bytes, and the offset the driver publishes for it
+	size     int
+	seq      uint64
+	returned bool
+}
+
+type lateHead struct {
+	value uint32
+	steps int
+}
+
+var modelSource, modelDestination = netip.MustParseAddr("198.19.240.2"), netip.MustParseAddr("198.19.240.1")
+
+func modelPacket(seq uint64, size int) []byte {
+	payload := make([]byte, size-20)
+	binary.LittleEndian.PutUint64(payload, seq)
+	for i := 8; i < len(payload); i++ {
+		payload[i] = byte(seq) + byte(i)*31
+	}
+	return packet.IP(modelSource, modelDestination, 253, payload)
+}
+
+func modelPayloadIntact(seq uint64, payload []byte) bool {
+	if len(payload) < 8 || binary.LittleEndian.Uint64(payload) != seq {
+		return false
+	}
+	for i := 8; i < len(payload); i++ {
+		if payload[i] != byte(seq)+byte(i)*31 {
+			return false
+		}
+	}
+	return true
+}
+
+func newHeadModel(t *testing.T, seed int64, late int, sizes []int) *headModel {
+	t.Helper()
+	event, err := windows.CreateEvent(nil, 0, 0, nil)
+	must(t, err)
+	t.Cleanup(func() { windows.CloseHandle(event) })
+	return &headModel{
+		r:   &rings{receive: ring{make([]byte, ringBytes(MinCapacity)), MinCapacity}, writeEvent: event},
+		rng: rand.New(rand.NewSource(seed)), late: late, sizes: sizes,
+	}
+}
+
+func (m *headModel) write(t *testing.T, packets int) int {
+	t.Helper()
+	batch := make([][]byte, packets)
+	for i := range batch {
+		m.seq++
+		batch[i] = modelPacket(m.seq, m.sizes[m.rng.Intn(len(m.sizes))])
+	}
+	n, _, err := m.r.write(batch)
+	must(t, err)
+	return n
+}
+
+// indicate is the receive thread: it gives up to limit queued packets to Windows.
+func (m *headModel) indicate(limit int) {
+	data, capacity := m.r.receive.data(), m.r.receive.capacity
+	for ; limit > 0 && !m.lost; limit-- {
+		content := (m.r.receive.load(4) - m.cursor) & (capacity - 1)
+		if content == 0 {
+			return
+		}
+		size := binary.LittleEndian.Uint32(data[m.cursor : m.cursor+4])
+		if content < 4 || size > MaxPacketSize || aligned(size+4) > content {
+			m.lost = true // the driver stops and publishes its shutdown marker
+			return
+		}
+		p := heldPacket{at: m.cursor + 4, next: (m.cursor + aligned(size+4)) & (capacity - 1), size: int(size)}
+		m.cursor = p.next
+		b := data[p.at : p.at+size]
+		if size < 28 || b[0]>>4 != 4 || int(binary.BigEndian.Uint16(b[2:4])) != int(size) {
+			// Not a packet Windows accepts; it comes straight back.
+			m.garbled++
+			p.returned = true
+		} else {
+			p.seq = binary.LittleEndian.Uint64(b[20:28])
+			if !modelPayloadIntact(p.seq, b[20:]) {
+				m.garbled++ // a checksum would reject it on arrival
+				p.returned = true
+			}
+		}
+		m.held = append(m.held, p)
+	}
+}
+
+// giveBack is Windows returning one held packet. The application receives the
+// bytes that are in ring memory at that moment.
+func (m *headModel) giveBack(i int) {
+	p := &m.held[i]
+	if p.returned {
+		return
+	}
+	p.returned = true
+	if modelPayloadIntact(p.seq, m.r.receive.data()[p.at+20:p.at+uint32(p.size)]) {
+		m.delivered++
+	} else {
+		m.wrong++
+	}
+}
+
+// release publishes Head for every packet of the returned prefix. A delay of
+// zero is the corrected driver; anything else lets a later release land first.
+func (m *headModel) release(delay func() int) {
+	for len(m.held) != 0 && m.held[0].returned {
+		m.writes = append(m.writes, lateHead{m.held[0].next, delay()})
+		m.held = m.held[1:]
+	}
+	m.land()
+}
+
+func (m *headModel) land() {
+	keep := m.writes[:0]
+	for _, w := range m.writes {
+		if w.steps == 0 {
+			m.r.receive.store(0, w.value)
+			continue
+		}
+		w.steps--
+		keep = append(keep, w)
+	}
+	m.writes = keep
+}
+
+func (m *headModel) run(t *testing.T, steps int) {
+	t.Helper()
+	for i := 0; i < steps && !m.lost; i++ {
+		switch n := m.rng.Intn(10); {
+		case n < 4:
+			m.write(t, 1+m.rng.Intn(16))
+		case n < 6:
+			m.indicate(1 + m.rng.Intn(24))
+		default:
+			for k := 1 + m.rng.Intn(6); k > 0 && len(m.held) != 0; k-- {
+				j := 0 // usually the oldest packet, the one holding Head back
+				if m.rng.Intn(10) >= 7 {
+					j = m.rng.Intn(len(m.held))
+				}
+				m.giveBack(j)
+			}
+			m.release(func() int {
+				if m.late == 0 || m.rng.Intn(6) != 0 {
+					return 0
+				}
+				return 1 + m.rng.Intn(m.late)
+			})
+			continue
+		}
+		m.land()
+	}
+}
+
+var headModelMixes = map[string][]int{
+	"bulk TCP":          {9000, 9000, 9000, 40 + 20},
+	"UDP 1228":          {1228},
+	"mixed sizes":       {60, 124, 1228, 1500, 9000},
+	"64-byte entries":   {60},
+	"small and jumbo":   {60, 9000},
+	"1500-byte packets": {1500, 1500, 52 + 20},
+}
+
+// With Head published under the lock, as upstream's unreleased fix does, the
+// writer never destroys a packet Windows still holds. This is the control for
+// the model itself.
+func TestRingReceiveHeadOrderedReleasesStayIntact(t *testing.T) {
+	for name, sizes := range headModelMixes {
+		t.Run(name, func(t *testing.T) {
+			for seed := int64(1); seed <= 20; seed++ {
+				m := newHeadModel(t, seed, 0, sizes)
+				m.run(t, 1500)
+				if m.wrong != 0 || m.garbled != 0 || m.lost || m.delivered == 0 {
+					t.Fatalf("seed %d: delivered=%d wrong=%d garbled=%d lost=%t", seed, m.delivered, m.wrong, m.garbled, m.lost)
+				}
+			}
+		})
+	}
+}
+
+// The smallest schedule that shows the defect. It asserts today's behaviour:
+// the writer trusts a Head that stepped backwards and overwrites a packet
+// Windows has not returned. The writer guard turns these expectations around.
+func TestRingReceiveHeadStepsBackwards(t *testing.T) {
+	m := newHeadModel(t, 1, 0, []int{1228})
+	for m.write(t, 1) == 1 {
+	}
+	m.indicate(1 << 20)
+	if len(m.held) < 8 {
+		t.Fatalf("the ring holds only %d packets", len(m.held))
+	}
+	first, third := m.held[0].next, m.held[2].next
+	for i := range 3 {
+		m.giveBack(i)
+	}
+	m.held = m.held[3:]
+	// Two threads released the three packets. The one that released the last
+	// two has published; the other was delayed before its write.
+	m.r.receive.store(0, third)
+	if n := m.write(t, 3); n != 3 {
+		t.Fatalf("wrote %d packets into three freed slots", n)
+	}
+	m.r.receive.store(0, first)
+	// Nothing was returned in between, so nothing may be written now.
+	overrun := m.write(t, 8)
+	m.giveBack(0)
+	if overrun == 0 || m.wrong != 1 {
+		t.Fatalf("the 0.14.1 Head regression no longer reproduces: wrote %d packets, wrong deliveries %d", overrun, m.wrong)
+	}
+	t.Logf("known defect: a stale Head let %d packets overwrite memory Windows still held, and the oldest held packet was delivered damaged", overrun)
+}
+
+// The same defect under random schedules and traffic mixes: with the 0.14.1
+// ordering, applications receive bytes that were never sent to them. Like the
+// test above, this asserts the defect until the writer guard lands.
+func TestRingReceiveHeadRaceReproduces(t *testing.T) {
+	for name, sizes := range headModelMixes {
+		t.Run(name, func(t *testing.T) {
+			var delivered, wrong, garbled, lost int
+			for seed := int64(1); seed <= 40; seed++ {
+				m := newHeadModel(t, seed, 12, sizes)
+				m.run(t, 1500)
+				delivered, wrong, garbled = delivered+m.delivered, wrong+m.wrong, garbled+m.garbled
+				if m.lost {
+					lost++
+				}
+			}
+			t.Logf("known defect: delivered=%d wrong=%d garbled=%d sessions lost=%d of 40", delivered, wrong, garbled, lost)
+			if wrong == 0 {
+				t.Fatal("the 0.14.1 Head race no longer delivers wrong bytes in this model")
+			}
+		})
+	}
+}

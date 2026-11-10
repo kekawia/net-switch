@@ -1,0 +1,86 @@
+name: Wintun Receive.Head race
+
+# Hosted evidence for the Receive.Head race in the signed Wintun 0.14.1 driver:
+# which entry shift Windows tolerates, and how often delivered TCP bytes are
+# wrong under a small, full ring. Both tests report and do not gate; see
+# internal/wintun/receive_head_race_windows_test.go.
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/wintun-head-race.yml
+      - internal/wintun/receive_head_*_windows_test.go
+      - internal/wintun/ring_windows.go
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: Runs of the race measurement on each runner
+        type: choice
+        options: ['1', '3', '6']
+        default: '3'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: wintun-head-race-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  race:
+    name: Head race / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '4'
+      GOFLAGS: -mod=vendor -p=2
+      NETSWITCH_WINTUN_CI: '1'
+      REPEATS: ${{ inputs.repeats || '3' }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Compile the native test executable
+        run: go test -c -o ./bin/wintun.test.exe ./internal/wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - name: Fetch the unchanged signed Wintun DLL beside the executable
+        run: ./scripts/prepare-wintun-tests.ps1
+      - name: Model of the 0.14.1 release order against the writer
+        run: ./bin/wintun.test.exe '-test.v' '-test.timeout=5m' '-test.run=^TestRingReceiveHead'
+      - name: Which entry shift Windows tolerates
+        run: |
+          ./bin/wintun.test.exe '-test.v' '-test.timeout=10m' '-test.run=^TestWintunEntryShiftProbe$' 2>&1 | ForEach-Object {
+            $_
+            if ("$_" -match 'WINTUN_RESULT (\{.*"test":"entry_shift_probe".*\})') { "``````json`n$($Matches[1])`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8 }
+          }
+          exit $LASTEXITCODE
+      - name: Wrong delivered bytes under a small, full Receive ring
+        if: ${{ !cancelled() }}
+        run: |
+          "| Mode | Ring bytes | Rounds | Completed | Incomplete | Mismatched | MB/s |`n|---|---:|---:|---:|---:|---:|---:|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          ./bin/wintun.test.exe '-test.v' '-test.timeout=30m' '-test.run=^TestWintunReceiveHeadRace$' "-test.count=$env:REPEATS" 2>&1 | ForEach-Object {
+            $_
+            if ("$_" -match 'WINTUN_RESULT (\{.*"test":"receive_head_race".*\})') {
+              $r = $Matches[1] | ConvertFrom-Json
+              "| $($r.mode) | $($r.capacity) | $($r.rounds) | $($r.completed_streams) | $($r.incomplete_streams) | $($r.mismatched_streams) | $([math]::Round($r.megabytes_per_second, 1)) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            }
+          }
+          exit $LASTEXITCODE

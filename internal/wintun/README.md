@@ -45,6 +45,13 @@ the received checksum (65,535 is valid; -1 means not evaluated). Neither parser
 nor the second copy can accept a rejected packet. The ordinary `validIP` path
 is unchanged, and successful reads perform no additional capture work.
 
+A content rejection also takes up to eight further private copies while Head is
+still held, stopping when two in a row agree. `Later` is the diagnosis of the
+last one, `LaterCopies` their number and `Settled` whether they agreed. An empty
+`Later.Predicate` means the slot held a valid packet moments after it was
+rejected: the driver published the entry before its bytes had arrived. This is
+evidence for a later decision about recovery. It delivers nothing.
+
 Every rejection is logged before the ten-second recovery-warning throttle.
 `Stats.FirstRejection` also retains the first capture across recovery and close;
 `Stats.SessionID` identifies the counter lifetime. Session starts log the loaded
@@ -62,6 +69,27 @@ it does not need `wintun_boundaries`. A manual `rejection_capture=true` dispatch
 runs two full-sequence ARM64 jobs with concurrency capped at two. The scheduled
 matrix is unchanged. Only dispatch this small capture after the PR checks pass;
 it is an investigation, not a replacement for the release integrity gate.
+
+### Receive.Head race in 0.14.1
+
+The signed driver hands each packet to Windows by reference into the Receive
+ring, and publishes Head only after it has dropped its lock. Two threads
+returning packets can therefore publish out of order, and Head steps backwards.
+A writer that computes free space from that Head then overwrites packets Windows
+has verified but not yet copied to the application. Upstream moved the write
+under the lock in dd050927 (2026-02-20); no signed build contains it.
+
+`receive_head_model_windows_test.go` models the driver's release order against
+the real `rings.write` and needs no adapter. With releases published in order
+nothing is damaged. With the 0.14.1 order the tests assert the defect: they are
+the reproduction, and the writer guard will turn their expectations around.
+
+`wintun-head-race.yml` runs two hosted measurements that report and do not
+gate. `TestWintunEntryShiftProbe` asks whether Windows accepts four bytes after
+the IP packet inside an entry, or a spacer entry it drops, for UDP over IPv4
+and IPv6 and for every packet of a TCP transfer. `TestWintunReceiveHeadRace`
+counts wrong delivered TCP bytes per session implementation under a small ring
+that is kept full. Neither is part of the nightly integrity sequence.
 
 ## Registration owner
 
@@ -162,6 +190,7 @@ contracts. No Wintun or wireguard-go source was copied or adapted.
 - [0.14.1 session API](https://git.zx2c4.com/wintun/tree/api/session.c?h=0.14.1)
 - [0.14.1 adapter API](https://git.zx2c4.com/wintun/tree/api/adapter.c?h=0.14.1)
 - [Missed wake-up fix ec0a6b98](https://git.zx2c4.com/wintun/commit/?id=ec0a6b98456fe1ba52567bb2add4bbf5f64315a1)
+- [Head ordering fix dd050927](https://git.zx2c4.com/wintun/commit/?id=dd050927f42081dce7c2ae262be55ffd8210c11a)
 - [CM_Get_Device_Interface_List](https://learn.microsoft.com/en-us/windows/win32/api/cfgmgr32/nf-cfgmgr32-cm_get_device_interface_listw)
 
 The existing distribution already includes the prebuilt binary license. Adding
