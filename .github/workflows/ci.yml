@@ -726,6 +726,7 @@ jobs:
       INTEGRITY_REPEATS: ${{ inputs.wintun_integrity_repeats }}
       INTEGRITY_SCENARIO: ${{ matrix.scenario }}
       INTEGRITY_SHARD: ${{ matrix.shard }}
+      INTEGRITY_RESULT_FILE: ${{ github.workspace }}/bin/integrity-result.json
     defaults:
       run:
         shell: pwsh
@@ -794,6 +795,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Repeat complete matched cases without retrying or replacing failures
         run: node scripts/wintun-integrity-summary.mjs
+      - name: Hand this job's verdict to the night job
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wintun-integrity-result-${{ runner.arch }}-${{ matrix.scenario }}-${{ matrix.shard }}
+          path: bin/integrity-result.json
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Keep full-sequence CPU profiles
         if: always() && matrix.scenario == 'full'
         timeout-minutes: 2

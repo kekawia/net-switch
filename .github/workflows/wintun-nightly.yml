@@ -13,6 +13,10 @@ on:
 permissions:
   contents: read
 
+# The release gate (internal/wintun/README.md, "Release gate"): every job
+# judges our own session and writes its verdict as an artifact; the night job
+# at the end reads them all and counts passing nights in a row.
+
 # One shared matrix; do not overlap two nightly/manual invocations of it.
 concurrency:
   group: wintun-integrity-hunts
@@ -47,6 +51,7 @@ jobs:
       INTEGRITY_REPEATS: '2'
       INTEGRITY_SCENARIO: ${{ matrix.scenario }}
       INTEGRITY_SHARD: ${{ matrix.shard }}
+      INTEGRITY_RESULT_FILE: ${{ github.workspace }}/bin/integrity-result.json
     defaults:
       run:
         shell: pwsh
@@ -115,6 +120,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Repeat complete matched cases without retrying or replacing failures
         run: node scripts/wintun-integrity-summary.mjs
+      - name: Hand this job's verdict to the night job
+        if: always()
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wintun-integrity-result-${{ runner.arch }}-${{ matrix.scenario }}-${{ matrix.shard }}
+          path: bin/integrity-result.json
+          if-no-files-found: ignore
+          retention-days: 30
       - name: Keep full-sequence CPU profiles
         if: always() && matrix.scenario == 'full'
         timeout-minutes: 2
@@ -123,3 +137,40 @@ jobs:
           name: wintun-integrity-${{ runner.arch }}-${{ matrix.scenario }}-${{ matrix.shard }}-profiles
           path: bin/wintun-*-cpu.pprof
           retention-days: 14
+
+  night:
+    # The whole matrix is the night. A job that left no verdict fails it. The
+    # small rejection capture is an investigation and has no night.
+    needs: wintun-integrity
+    if: ${{ always() && !inputs.rejection_capture && github.repository_id == '1418987447' }}
+    name: Night verdict
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Check the night's own rules
+        run: node --test .github/ci/wintun-night.test.mjs
+      - name: Collect every job's verdict
+        # No verdict at all leaves the folder empty, which the next step fails.
+        run: gh run download "$GITHUB_RUN_ID" --pattern 'wintun-integrity-result-*' --dir night/results || mkdir -p night/results
+      - name: Judge the night against the gate and earlier nights
+        run: node scripts/wintun-night.mjs night/results night/wintun-night.json
+      - name: Keep the night's record for the nights after it
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wintun-night
+          path: night/wintun-night.json
+          if-no-files-found: ignore
+          retention-days: 90

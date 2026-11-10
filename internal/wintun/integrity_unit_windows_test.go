@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -514,6 +515,58 @@ func TestPerformanceInvalidSamples(t *testing.T) {
 	}
 	if r, err := pairedSampleRatios(ours, inprocess, "inprocess"); err != nil || median(r) != 0.9 {
 		t.Fatalf("inprocess reference: %v %v", r, err)
+	}
+}
+
+// The signed DLL's own faults are driver evidence: they cost their pair and
+// nothing else. Ours, and the in-process reference built on our own reader and
+// writer, are never excused.
+func TestPerformanceReferenceFaults(t *testing.T) {
+	rejection := fmt.Errorf("%w: DLL Send ring framing rejection (ERROR_INVALID_DATA)", ErrCorrupt)
+	mismatch := fmt.Errorf("stream 3: %w", errPayloadIntegrity)
+	samples := func(mode string) []performanceSample {
+		s, value := newPerformanceSamples(12, mode, "udp_8_MBps"), 100.0
+		if mode == "ours" {
+			value = 90
+		}
+		for i := range s {
+			s[i].finish(value, nil)
+		}
+		return s
+	}
+	ours, dll := samples("ours"), samples("dll")
+	dll[6].finish(0, rejection)
+	dll[9].finish(0, errors.Join(errors.New("transfer incomplete"), mismatch))
+	if !referenceFault(dll[6]) || !referenceFault(dll[9]) || referenceFault(dll[0]) {
+		t.Fatal("reference faults misread")
+	}
+	if r, err := pairedSampleRatios(ours, dll); err != nil || len(r) != 10 || median(r) != 0.9 {
+		t.Fatalf("two reference faults of twelve pairs: %v %v", r, err)
+	}
+	dll[1].finish(0, rejection)
+	if r, err := pairedSampleRatios(ours, dll); err != nil || len(r) != 9 {
+		t.Fatalf("three reference faults of twelve pairs: %v %v", r, err)
+	}
+	dll[2].finish(0, rejection)
+	if r, err := pairedSampleRatios(ours, dll); r != nil || !errors.Is(err, errTooFewPairs) || !strings.Contains(err.Error(), "only 8 of 12") {
+		t.Fatalf("four reference faults left too few pairs and still passed: %v %v", r, err)
+	}
+	// Any other failed DLL sample still fails the comparison.
+	dll = samples("dll")
+	dll[4].finish(0, errors.New("dial timeout"))
+	if r, err := pairedSampleRatios(ours, dll); r != nil || err == nil {
+		t.Fatalf("an ordinary DLL failure was excused: %v %v", r, err)
+	}
+	// The same errors on our side, or on the in-process reference, are ours.
+	dll = samples("dll")
+	ours[4].finish(0, rejection)
+	if r, err := pairedSampleRatios(ours, dll); r != nil || !errors.Is(err, ErrCorrupt) || referenceFault(ours[4]) {
+		t.Fatalf("our own rejection was excused: %v %v", r, err)
+	}
+	ours, inprocess := samples("ours"), samples("inprocess")
+	inprocess[4].finish(0, mismatch)
+	if r, err := pairedSampleRatios(ours, inprocess, "inprocess"); r != nil || !errors.Is(err, errPayloadIntegrity) || referenceFault(inprocess[4]) {
+		t.Fatalf("the in-process reference was excused: %v %v", r, err)
 	}
 }
 
