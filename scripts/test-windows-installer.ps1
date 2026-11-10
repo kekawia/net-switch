@@ -550,7 +550,7 @@ setInterval(() => {}, 60000);
   if ($interruptedPhase -ne 'committing') {
     throw "Case 2: expected the interrupted journal to say 'committing', got '$interruptedPhase'"
   }
-  if (-not (Test-Path -LiteralPath (Join-Path $appDir 'server.mjs') -PathType Leaf)) {
+  if (-not (Test-Path -LiteralPath (Join-Path $env:ProgramFiles 'Net Switch\server.mjs') -PathType Leaf)) {
     throw 'Case 2: the interrupted commit already removed the 0.3.1 entrypoint, so the rerun would not exercise recovery'
   }
   if (-not (Get-Service -Name 'NetSwitch' -ErrorAction SilentlyContinue)) {
@@ -571,8 +571,15 @@ setInterval(() => {}, 60000);
   if ($finishedPhase -ne 'committed') {
     throw "Case 2: expected the journal to say 'committed' after the rerun, got '$finishedPhase'"
   }
-  foreach ($removedRel in @('server.mjs', 'runtime', 'engine', 'lib')) {
-    if (Test-Path -LiteralPath (Join-Path $appDir $removedRel)) {
+  # Installed paths, written as in case 1: a bare 'lib' or 'server.mjs' here
+  # would read as this repository's own file to the CI reader graph.
+  foreach ($removedRel in @(
+    'Net Switch\server.mjs',
+    'Net Switch\runtime',
+    'Net Switch\engine',
+    'Net Switch\lib'
+  )) {
+    if (Test-Path -LiteralPath (Join-Path $env:ProgramFiles $removedRel)) {
       throw "Case 2: 0.3.1 path '$removedRel' remained after the rerun finished the commit"
     }
   }
