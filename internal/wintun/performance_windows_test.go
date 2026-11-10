@@ -685,11 +685,19 @@ func TestWintunPerformance(t *testing.T) {
 		// Keep all positions, including fixture setup failures before a subtest.
 		report(t, map[string]any{"test": "performance_samples", "diagnostic": diagnostic, "metric": metric.name, "ours": ours, "dll": dll})
 		ratios, err := pairedSampleRatios(ours, dll, reference)
-		if err != nil {
+		// The instrumented run has no ratio to defend. It asks only that every
+		// sample of ours ran, so more reference faults than a ratio can spare do
+		// not fail it.
+		if err != nil && !(diagnostic && errors.Is(err, errTooFewPairs)) {
 			t.Errorf("%s: %v", metric.name, err)
 			continue
 		}
-		faults := pairs - len(ratios)
+		faults := 0
+		for _, sample := range dll {
+			if referenceFault(sample) {
+				faults++
+			}
+		}
 		if diagnostic {
 			// Instrumented timing never enters the clean performance gate.
 			report(t, map[string]any{"test": "integrity_pairs_complete", "pairs": pairs, "reference_faults": faults, "metric": metric.name})

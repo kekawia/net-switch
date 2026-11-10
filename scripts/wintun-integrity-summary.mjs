@@ -10,6 +10,12 @@ const boundaries = ['receive','ingress','echo','output','send','host'];
 const payloadFailure = /payload integrity failure|\b(?:payload|packet|integrity)(?: hash)? mismatch\b|\b(?:payload|packet) corruption\b|UDP echo corruption|recovery lost packet integrity|damaged packet escaped|bad packet bounds/i;
 const dllFraming = /DLL (?:receive ring:.*(?:data is invalid|ERROR_INVALID_DATA)|Send ring framing rejection)/i;
 const naturalPhases = new Set(['proof','capture-proof','calibration','performance-dll','performance-inprocess','ping-pong','profile-dll','profile-ours']);
+// The release gate (approved 2026-11-10) judges our own session. The signed
+// DLL is a reference: what it delivers wrong, what its reader rejects and what
+// it then fails to finish are the 0.14.1 driver seen through the official
+// library. They are reported as driver evidence and never change the verdict.
+// The in-process mode is our own reader and writer and is judged like ours.
+const reference = mode => mode==='dll';
 export function ratioSpread(values) {
   if (!values.length) return null;
   const sorted = [...values].sort((a,b) => a-b);
@@ -38,8 +44,20 @@ export class IntegritySummary {
   expectedPhases=new Map(); boundary=null; connectionIDs=new Set();
   phase=null; repeat=null; currentTest=null; currentTestPath=null; byMode=new Map();
   payloadIncidents=new Map(); ringIncidents=new Map();
-  sessions=new Map(); timeoutEvents=[];
-  get hasIntegrityFailure() { return this.payloadIncidents.size>0 || this.ringIncidents.size>0; }
+  sessions=new Map(); timeoutEvents=[]; guards=new Map();
+  // A delivered wrong byte in our own session fails the gate. A ring rejection
+  // does not by itself: it must be followed by a successful recovery.
+  get hasIntegrityFailure() { return [...this.payloadIncidents.values()].some(i=>!reference(i.mode)); }
+  get recoveryFailures() { return [...this.sessions.values()].filter(s=>!reference(s.mode)).reduce((n,s)=>n+s.recoveryFailures,0); }
+  rejections(own) { return [...this.sessions.values()].filter(s=>reference(s.mode)!==own).reduce((n,s)=>n+s.corruptions,0); }
+  // Every session snapshot carries the writer guard's counters, rejection or not.
+  guard(record) {
+    const id=record.stats?.SessionID;
+    if (!id || reference(record.mode)) return;
+    const old=this.guards.get(id)??{ignored_heads:0,shifted_entries:0,head_probes:0};
+    this.guards.set(id,{ignored_heads:Math.max(old.ignored_heads,Number(record.stats.IgnoredHeads)||0),
+      shifted_entries:Math.max(old.shifted_entries,Number(record.stats.ShiftedEntries)||0),head_probes:Math.max(old.head_probes,Number(record.stats.HeadProbes)||0)});
+  }
   attribution(record={}) {
     const testPath=record.test_path ?? this.currentTestPath ?? null;
     const mode=record.mode ?? (testPath ? /\/(ours|dll|inprocess)(?:\/|$)/.exec(testPath)?.[1] : undefined);
@@ -56,9 +74,10 @@ export class IntegritySummary {
     // New sessions have a process-qualified sequence ID; older logs use their
     // process/session pointer, with a test-path fallback only when unavailable.
     const sessionKey=[a.phase,a.repeat,a.session?(/^[0-9]+-[0-9]+$/.test(a.session)?a.session:`${a.process_id??''}/${a.session}`):`${a.mode}/${a.testPath}`].join('|');
-    const previous=this.sessions.get(sessionKey)??{corruptions:0,recoveries:0,...a};
+    const previous=this.sessions.get(sessionKey)??{corruptions:0,recoveries:0,recoveryFailures:0,...a};
     previous.corruptions=Math.max(previous.corruptions,Number(counter)||0);
     previous.recoveries=Math.max(previous.recoveries,Number(record.stats?.Recoveries)||0);
+    previous.recoveryFailures=Math.max(previous.recoveryFailures,Number(record.stats?.RecoveryFailures)||0);
     if (record.test_path) Object.assign(previous,a);
     this.sessions.set(sessionKey,previous);
     const first=record.stats?.FirstRejection;
@@ -124,6 +143,7 @@ export class IntegritySummary {
       }
     }
     if (pos<0) return;
+    if (r.stats) this.guard(r);
     if (r.verdict==='diagnostic_incomplete') this.incomplete++;
     const ringCounters=(r.stats?.Corruptions??0)>0 || (r.stats?.Recoveries??0)>0;
     const naturalRing=((naturalPhases.has(r.phase??this.phase) && r.test==='integrity_session') || r.test==='parallel_udp') && ringCounters;
@@ -174,14 +194,16 @@ export class IntegritySummary {
     const modes=this.scenario==='full' ? ['ours','dll','inprocess'] : ['ours','dll'];
     const keys=chosen.flatMap(b=>modes.map(m=>`${b}/${m}`));
     const ratios=[...this.configurations.values()].flat();
-    let missing=!this.complete || !this.boundary || !this.proof || keys.some(k=>!this.configurations.has(k)) || this.configurations.size!==keys.length;
-    missing ||= this.proof?.completed_configurations!==keys.length || this.proof?.expected_configurations!==keys.length || this.proof?.expected_pairs!==keys.length*3;
-    missing ||= this.calibrationConnections!==keys.length*30;
-    if (this.scenario==='proof') missing ||= this.capture.size!==2 || !this.capture.has('ours') || !this.capture.has('dll');
+    // Completeness is asked of our own modes. The reference may fall short of
+    // its share, never exceed it; what it lacks is listed, not failed.
+    const own=keys.filter(k=>!reference(k.split('/')[1]));
+    let missing=!this.complete || !this.boundary || !this.proof || own.some(k=>!this.configurations.has(k)) || this.configurations.size>keys.length;
+    missing ||= !(this.proof?.completed_configurations>=own.length && this.proof?.completed_configurations<=keys.length) || this.proof?.expected_configurations!==keys.length || this.proof?.expected_pairs!==keys.length*3;
+    if (this.scenario==='proof') missing ||= this.capture.size>2 || !this.capture.has('ours');
     const metrics=this.scenario==='isolated' ? ['tcp_8_MBps'] : ['tcp_1_MBps','tcp_8_MBps'];
     for (const set of this.expectedPhases.values()) missing ||= metrics.some(m=>!set.has(m)) || set.size!==metrics.length;
     const observedExposure=this.scenario==='proof' ? this.calibrationConnections : this.connections-this.calibrationConnections;
-    if (this.scenario!=='proof') missing ||= !this.expectedPhases.size || observedExposure!==this.expectedPhases.size*(this.scenario==='isolated'?240:312);
+    if (this.scenario!=='proof') missing ||= !this.expectedPhases.size;
     const expectedByMode=Object.fromEntries(modes.map(m=>[m,0]));
     if (this.scenario==='proof') for (const mode of modes) expectedByMode[mode]=chosen.length*30;
     else for (const key of this.expectedPhases.keys()) {
@@ -189,33 +211,57 @@ export class IntegritySummary {
       expectedByMode.ours+=amount;
       expectedByMode[key.endsWith('performance-dll')?'dll':'inprocess']+=amount;
     }
+    const referenceShortfall={};
     for (const mode of modes) {
-      const counts=this.byMode.get(mode);
-      missing ||= counts?.calibration!==chosen.length*30;
-      missing ||= (this.scenario==='proof'?counts?.calibration:counts?.connections-counts?.calibration)!==expectedByMode[mode];
+      const counts=this.byMode.get(mode)??{connections:0,calibration:0};
+      const exposure=this.scenario==='proof'?counts.calibration:counts.connections-counts.calibration;
+      if (reference(mode)) {
+        missing ||= counts.calibration>chosen.length*30 || exposure>expectedByMode[mode];
+        const short=chosen.length*30-counts.calibration+(this.scenario==='proof'?0:expectedByMode[mode]-exposure);
+        if (short>0) referenceShortfall[mode]=short;
+      } else missing ||= counts.calibration!==chosen.length*30 || exposure!==expectedByMode[mode];
     }
-    missing ||= this.byMode.size!==modes.length;
+    missing ||= [...this.byMode.keys()].some(m=>!modes.includes(m));
+    missing ||= this.calibrationConnections!==[...this.byMode.values()].reduce((n,c)=>n+c.calibration,0);
     // A nonzero exit without a recognized test failure is an unfinished runner.
     missing ||= code!==0 && this.failures.length===0;
     const spread=missing || this.incomplete || this.timeouts ? null : ratioSpread(ratios);
     const captureInvalid=[...this.capture.values()].some(s=>s.median<.95);
     const captureTimingOnly=captureInvalid && this.failures.length>0 && this.failures.every(l=>/TestWintunCaptureProof|phase=capture-proof\b/.test(l));
     const otherFailure=(code!==0 || this.failures.length>0) && !captureTimingOnly;
+    const recoveryFailures=this.recoveryFailures;
+    const passing=['no_corruption_observed','recovered_rejections'];
     const modeResults=Object.fromEntries(modes.map(mode=>{
       const counts=this.byMode.get(mode)??{connections:0,calibration:0};
-      const overhead=spread ? ratioSpread(chosen.flatMap(b=>this.configurations.get(`${b}/${mode}`))) : null;
+      const measured=chosen.map(b=>this.configurations.get(`${b}/${mode}`)).filter(Boolean);
+      const overhead=spread && measured.length===chosen.length ? ratioSpread(measured.flat()) : null;
       const observed=this.scenario==='proof'?counts.calibration:counts.connections-counts.calibration;
       const failureKinds=this.failureKindsFor(mode);
-      const verdict=failureKinds.length?'integrity_failure':!overhead?'diagnostic_incomplete':overhead.median<.80 || (this.capture.get(mode)?.median??1)<.95?'diagnostic_invalid':otherFailure?'test_failed':'no_corruption_observed';
-      const clean=verdict==='no_corruption_observed' && !this.hasIntegrityFailure ? observed : 0;
+      const wrongBytes=failureKinds.includes('payload_mismatch');
+      const verdict=reference(mode) && (failureKinds.length || referenceShortfall[mode]) ? 'reference_fault'
+        : wrongBytes ? 'integrity_failure'
+        : !overhead ? 'diagnostic_incomplete'
+        : overhead.median<.80 || (this.capture.get(mode)?.median??1)<.95 ? 'diagnostic_invalid'
+        : otherFailure ? 'test_failed'
+        : failureKinds.length ? 'recovered_rejections' : 'no_corruption_observed';
+      const clean=passing.includes(verdict) && !this.hasIntegrityFailure && !recoveryFailures ? observed : 0;
       return [mode,{verdict,failure_kinds:failureKinds,overhead,observed_exposure_connections:observed,calibration_connections:counts.calibration,clean_exposure_connections:clean}];
     }));
     const invalidModes=modes.filter(m=>modeResults[m].verdict==='diagnostic_invalid');
     const evidenceKinds=[...new Set([...this.payloadIncidents.values(),...this.ringIncidents.values(),...this.timeoutEvents].map(r=>r.kind))];
     const totalCorruptions=[...this.sessions.values()].reduce((n,s)=>n+s.corruptions,0);
     const totalRecoveries=[...this.sessions.values()].reduce((n,s)=>n+s.recoveries,0);
-    const verdict=this.hasIntegrityFailure ? 'integrity_failure' : this.incomplete || this.timeouts || missing ? 'diagnostic_incomplete' : invalidModes.length ? 'diagnostic_invalid' : otherFailure ? 'test_failed' : 'no_corruption_observed';
-    return {verdict, exit:['integrity_failure','diagnostic_incomplete'].includes(verdict)?1:0, original_exit:code,
+    const ownRejections=this.rejections(true);
+    // The gate, in order: no wrong delivered byte in our own session; every
+    // rejection recovered; every transfer complete. An unexplained session
+    // loss shows as an incomplete transfer.
+    const verdict=this.hasIntegrityFailure ? 'integrity_failure' : recoveryFailures ? 'recovery_failure' : this.incomplete || this.timeouts || missing ? 'diagnostic_incomplete'
+      : invalidModes.some(m=>!reference(m)) ? 'diagnostic_invalid' : otherFailure ? 'test_failed' : ownRejections ? 'recovered_rejections' : 'no_corruption_observed';
+    const guard=[...this.guards.values()].reduce((sum,g)=>({ignored_heads:sum.ignored_heads+g.ignored_heads,shifted_entries:sum.shifted_entries+g.shifted_entries,head_probes:sum.head_probes+g.head_probes}),{ignored_heads:0,shifted_entries:0,head_probes:0});
+    const referenceEvidence={payload_mismatch_incidents:[...this.payloadIncidents.values()].filter(i=>reference(i.mode)).length,
+      ring_rejection_incidents:this.rejections(false), missing_transfers:Object.values(referenceShortfall).reduce((n,x)=>n+x,0)};
+    return {verdict, exit:['integrity_failure','recovery_failure','diagnostic_incomplete'].includes(verdict)?1:0, original_exit:code,
+      gate:{passed:passing.includes(verdict), own_rejections:ownRejections, recovery_failures:recoveryFailures}, guard, reference_evidence:referenceEvidence,
       overhead:spread, qualification_scope:'per_mode', mode_results:modeResults, invalid_modes:invalidModes, minimum_ratio:.80, capture_overhead:Object.fromEntries(this.capture), capture_invalid:captureInvalid,
       diagnostic_connections:this.connections, calibration_connections:this.calibrationConnections, observed_exposure_connections:observedExposure,
       clean_exposure_connections:Object.values(modeResults).reduce((n,r)=>n+r.clean_exposure_connections,0),
@@ -225,6 +271,14 @@ export class IntegritySummary {
       integrity_evidence_records:this.payloadIncidents.size+this.ringIncidents.size, incomplete_records:this.incomplete, timeout_records:this.timeouts, incomplete_structure:Boolean(missing),
       notes:[...this.notes], failed_tests_and_phases:this.failures};
   }
+}
+
+// nightRecord is what one job contributes to the night's verdict
+// (scripts/wintun-night.mjs).
+export function nightRecord(result, job) {
+  return {...job, verdict:result.verdict, passed:result.gate.passed, own_rejections:result.gate.own_rejections, recovery_failures:result.gate.recovery_failures,
+    own_payload_mismatches:result.payload_mismatch_incidents-result.reference_evidence.payload_mismatch_incidents,
+    guard:result.guard, reference_evidence:result.reference_evidence, clean_exposure_connections:result.clean_exposure_connections};
 }
 
 export function diagnosticBudget(deadline, now=Date.now()) {
@@ -247,11 +301,17 @@ if (process.argv[1] && import.meta.url===pathToFileURL(process.argv[1]).href) {
     const result=summary.result(code??1);
     console.log(`INTEGRITY_SUMMARY ${JSON.stringify(result)}`);
     const kinds=result.integrity_evidence_kinds.length ? ` (${result.integrity_evidence_kinds.join(', ')})` : '';
+    // The night job reads this file; it is the job's whole verdict.
+    if(process.env.INTEGRITY_RESULT_FILE) writeFileSync(process.env.INTEGRITY_RESULT_FILE,JSON.stringify(nightRecord(result,{
+      arch:process.env.RUNNER_ARCH,scenario:process.env.INTEGRITY_SCENARIO,shard:process.env.INTEGRITY_SHARD})));
     writeSummary(
-      `### Wintun integrity: ${result.verdict}${kinds}\n\nEligible clean transfers: **${result.clean_exposure_connections}**; observed: ${result.observed_exposure_connections}; calibration connections: ${result.calibration_connections}. Payload-mismatch incidents: ${result.payload_mismatch_incidents}; ring-rejection incidents: ${result.ring_rejection_incidents}.\n\n`+
+      `### Wintun integrity: ${result.verdict}${kinds}\n\nGate: **${result.gate.passed?'passed':'not passed'}**. Our own session: ${result.gate.own_rejections} ring rejections, ${result.gate.recovery_failures} recovery failures, ${result.payload_mismatch_incidents-result.reference_evidence.payload_mismatch_incidents} delivered mismatches. `+
+      `Writer guard: ${result.guard.ignored_heads} Heads refused, ${result.guard.shifted_entries} entries shifted, ${result.guard.head_probes} stall probes.\n\n`+
+      `Signed DLL, reference only: ${result.reference_evidence.payload_mismatch_incidents} delivered mismatches, ${result.reference_evidence.ring_rejection_incidents} ring rejections, ${result.reference_evidence.missing_transfers} transfers not finished.\n\n`+
+      `Eligible clean transfers: **${result.clean_exposure_connections}**; observed: ${result.observed_exposure_connections}; calibration connections: ${result.calibration_connections}.\n\n`+
       `Per-mode results (each median must be >=0.80): ${JSON.stringify(result.mode_results)}\n\n`+
       [...result.notes,...result.failed_tests_and_phases].map(line=>`- ${line.replaceAll('<','&lt;')}\n`).join('')+
-      '\nDelivered payload mismatches and ring validation rejections in any protocol, or incomplete diagnostics, fail this investigation. An overhead-invalid mode receives zero clean credit; no mode receives clean credit when the job fails. Full evidence remains in the log; no sample was retried or replaced. The release blocker remains open.\n');
+      '\nThe gate judges our own session: a delivered payload mismatch, a ring rejection that is not followed by a successful recovery, or a transfer that does not finish fails this job. Recovered rejections are counted and do not fail it. What the signed DLL delivers wrong, rejects or leaves unfinished is driver evidence and never changes the verdict. An overhead-invalid mode receives zero clean credit. Full evidence remains in the log; no sample was retried or replaced.\n');
     process.exitCode=result.exit;
   };
   const expire=()=>{

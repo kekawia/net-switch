@@ -548,7 +548,7 @@ func TestPerformanceReferenceFaults(t *testing.T) {
 		t.Fatalf("three reference faults of twelve pairs: %v %v", r, err)
 	}
 	dll[2].finish(0, rejection)
-	if r, err := pairedSampleRatios(ours, dll); r != nil || err == nil || !strings.Contains(err.Error(), "only 8 of 12") {
+	if r, err := pairedSampleRatios(ours, dll); r != nil || !errors.Is(err, errTooFewPairs) || !strings.Contains(err.Error(), "only 8 of 12") {
 		t.Fatalf("four reference faults left too few pairs and still passed: %v %v", r, err)
 	}
 	// Any other failed DLL sample still fails the comparison.

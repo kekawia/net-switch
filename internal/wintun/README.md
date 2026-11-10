@@ -70,6 +70,53 @@ runs two full-sequence ARM64 jobs with concurrency capped at two. The scheduled
 matrix is unchanged. Only dispatch this small capture after the PR checks pass;
 it is an investigation, not a replacement for the release integrity gate.
 
+### Release gate
+
+The owner approved this gate on 2026-11-10, after choosing to harden our own
+session over shipping a self-signed driver. The signed 0.14.1 driver has
+defects no signed build fixes, so the gate judges what our session makes of
+them, and treats the official library as a reference.
+
+A night passes when, in our own session mode on x64 and ARM64:
+
+1. no delivered byte differs from what was sent, for TCP and UDP;
+2. every ring rejection is followed by a successful recovery, with no recovery
+   failure and no unexplained session loss;
+3. every transfer completes;
+4. rejections are counted, and a count more than ten times the trailing median
+   fails the night as a regression.
+
+The release needs 14 passing nights in a row.
+
+How the nightly applies it:
+
+- Each job's summary (`scripts/wintun-integrity-summary.mjs`) fails on a
+  delivered mismatch in `ours` or `inprocess`, on a session whose
+  `RecoveryFailures` is not zero, and on any transfer of ours that did not
+  finish; an unexplained session loss shows as the last. Recovered rejections
+  give the verdict `recovered_rejections`, which passes. Rejection and
+  recovery counters are reported but not compared with each other, because a
+  snapshot can fall between a rejection and the end of its recovery.
+- The in-process mode is our own reader and writer under a different
+  registration owner, so it is judged like ours.
+- What the signed DLL delivers wrong, what its reader rejects
+  (`ERROR_INVALID_DATA`) and what it then leaves unfinished are listed as
+  driver evidence under `reference_evidence` and never change a verdict. The
+  reference may fall short of its share of transfers; it may not exceed it.
+- `TestWintunPerformance` leaves a pair out of its ratio when the DLL sample
+  failed that way, and needs nine valid pairs of twelve for a ratio. The
+  instrumented nightly run has no ratio to defend and only asks that every
+  sample of ours ran.
+- Each job uploads its verdict; the `Night verdict` job
+  (`scripts/wintun-night.mjs`) fails unless all 72 reported and passed. Rule 4
+  starts once seven earlier nights have a record: it compares the night's
+  rejections in our own session with ten times the median of the last fourteen
+  recorded nights, with a floor of ten. It prints the number of passing nights
+  in a row; a night that failed, or left no record, ends the run. Only
+  scheduled nights count.
+- The writer guard's counters travel with it: `IgnoredHeads` is the number of
+  late `Receive.Head` stores the driver made that night and our writer refused.
+
 ### Receive.Head race in 0.14.1
 
 The signed driver hands each packet to Windows by reference into the Receive

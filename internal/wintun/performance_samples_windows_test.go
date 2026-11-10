@@ -51,6 +51,8 @@ func referenceFault(s performanceSample) bool {
 // The others may be lost to reference faults.
 func validPairs(pairs int) int { return (3*pairs + 3) / 4 }
 
+var errTooFewPairs = errors.New("too few pairs for a ratio")
+
 // pairedSampleRatios returns one ratio per pair whose two samples are valid.
 // A pair whose DLL sample is a reference fault is left out; every other
 // invalid sample fails the comparison, as does having too few pairs left.
@@ -91,7 +93,7 @@ func pairedSampleRatios(ours, dll []performanceSample, reference ...string) ([]f
 		return nil, fmt.Errorf("integrity-invalid comparison: %w", invalid)
 	}
 	if len(a) < validPairs(len(ours)) {
-		return nil, fmt.Errorf("integrity-invalid comparison: only %d of %d pairs are left after reference faults, fewer than %d", len(a), len(ours), validPairs(len(ours)))
+		return nil, fmt.Errorf("integrity-invalid comparison: only %d of %d pairs are left after reference faults, fewer than %d: %w", len(a), len(ours), validPairs(len(ours)), errTooFewPairs)
 	}
 	ratios, err := pairedRatios(a, b)
 	if err != nil {

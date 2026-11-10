@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import {test} from 'node:test';
-import {IntegritySummary, ratioSpread, diagnosticBudget} from '../../scripts/wintun-integrity-summary.mjs';
+import {IntegritySummary, ratioSpread, diagnosticBudget, nightRecord} from '../../scripts/wintun-integrity-summary.mjs';
 
 const emit=(s,r)=>s.line(`WINTUN_RESULT ${JSON.stringify(r)}`);
 const samples=ratios=>ratios.map((ratio,pair)=>({status:'valid',value:100*ratio,pair,metric:'test'}));
-function fixture({scenario='proof', ratio=1, ratios, modeRatios={}, captureRatio=1, captureModeRatios={}, omitPhase=false, omitCompletion=false}={}) {
+// short leaves that many of a mode's exposure transfers unfinished.
+function fixture({scenario='proof', ratio=1, ratios, modeRatios={}, captureRatio=1, captureModeRatios={}, omitPhase=false, omitCompletion=false, short={}}={}) {
  const s=new IntegritySummary({scenario});
  s.line(`INTEGRITY_RUN_START scenario=${scenario} boundary=receive repeat=1`);
  const bs=scenario==='proof'?['receive','ingress','echo','output','send','host']:['receive'];
@@ -21,7 +22,7 @@ function fixture({scenario='proof', ratio=1, ratios, modeRatios={}, captureRatio
  else for(const phase of scenario==='full'?['performance-dll','performance-inprocess']:['performance-dll']) {
   for(const metric of scenario==='full'?['tcp_1_MBps','tcp_8_MBps']:['tcp_8_MBps'])if(!omitPhase)emit(s,{test:'integrity_pairs_complete',phase,repeat:'1',metric,pairs:12});
   const perMode=scenario==='full'?156:120;
-  for(let i=0;i<perMode*2;i++){const mode=i<perMode?'ours':phase.endsWith('dll')?'dll':'inprocess';connection(phase,`TestWintunPerformance/${phase}/${mode}/${i}`);}
+  for(let i=0;i<perMode*2;i++){const mode=i<perMode?'ours':phase.endsWith('dll')?'dll':'inprocess';if(i%perMode<perMode-(short[mode]??0))connection(phase,`TestWintunPerformance/${phase}/${mode}/${i}`);}
  }
  const count=bs.length*modes.length;
  if(!omitCompletion){emit(s,{test:'integrity_proof_complete',completed_configurations:count,expected_configurations:count,expected_pairs:count*3});s.line('INTEGRITY_JOB_COMPLETE');}
@@ -80,7 +81,8 @@ test('quartiles use linear interpolation and do not mutate paired order',()=>{
 
 for(const scenario of ['proof','isolated','full'])for(const slow of scenario==='full'?['dll','ours','inprocess']:['dll','ours'])test(`${scenario}: slow ${slow} cannot borrow the other mode's speed or erase its exposure`,()=>{
  const r=fixture({scenario,modeRatios:{[slow]:.7}}).result(0);
- assert.equal(r.verdict,'diagnostic_invalid');assert.equal(r.exit,0);
+ // A slow reference costs the reference its credit and leaves the job's verdict alone.
+ assert.equal(r.verdict,slow==='dll'?'no_corruption_observed':'diagnostic_invalid');assert.equal(r.exit,0);
  assert.equal(r.mode_results[slow].clean_exposure_connections,0);
  const good=slow==='dll'?'ours':'dll';
  assert.equal(r.mode_results[good].verdict,'no_corruption_observed');
@@ -89,7 +91,7 @@ for(const scenario of ['proof','isolated','full'])for(const slow of scenario==='
  assert.ok(r.clean_exposure_connections>0);
 });
 test('payload/integrity evidence in every replay path is fatal, even with complete TCP data',()=>{
- for(const message of ['latency payload mismatch','UDP echo corruption','ping-pong payload corruption','recovery lost packet integrity','injected trip payload mismatch','registrar session packet corruption','shared-section packet corruption','payload integrity failure: DLL receive ring: The data is invalid.']) {
+ for(const message of ['latency payload mismatch','UDP echo corruption','ping-pong payload corruption','recovery lost packet integrity','injected trip payload mismatch','registrar session packet corruption','shared-section packet corruption']) {
   const s=fixture({scenario:'full',modeRatios:{dll:.7}});s.line(`test.go:1: ${message}`);s.line('--- FAIL: TestWintunPerformance');
   assert.equal(s.result(1).verdict,'integrity_failure',message);assert.equal(s.result(1).exit,1);assert.equal(s.result(1).clean_exposure_connections,0);
  }
@@ -97,7 +99,8 @@ test('payload/integrity evidence in every replay path is fatal, even with comple
  const nested=fixture({scenario:'full'});emit(nested,{test:'performance_sample',sample:{status:'invalid',metric:'udp_8_MBps',error:'UDP client: exit status 1\n--- FAIL: TestWintunUDPClient\n payload integrity failure: UDP echo corruption'}});assert.equal(nested.result(1).verdict,'integrity_failure');
 });
 test('natural ring corruption is evidence; injected recovery damage and ordinary errors are not',()=>{
- const natural=fixture({scenario:'full'});natural.line('INTEGRITY_PHASE_START scenario=full phase=performance-dll');natural.line('Wintun ring corruption: Send invalid entry (head=4)');assert.equal(natural.result(0).verdict,'integrity_failure');
+ const natural=fixture({scenario:'full'});natural.line('INTEGRITY_PHASE_START scenario=full phase=performance-dll');natural.line('Wintun ring corruption: Send invalid entry (head=4)');
+ assert.equal(natural.result(0).verdict,'recovered_rejections');assert.equal(natural.result(0).exit,0);assert.deepEqual(natural.result(0).gate,{passed:true,own_rejections:1,recovery_failures:0});
  const injected=fixture({scenario:'full'});injected.line('INTEGRITY_PHASE_START scenario=full phase=ring-recovery');injected.line('=== RUN   TestWintunRecoveryAndCancellation');injected.line('Wintun ring corruption recovered: Send packet failed validation');assert.equal(injected.result(0).verdict,'no_corruption_observed');
  const error=fixture({scenario:'full'});emit(error,{test:'parallel_udp',invalid_delivered:0,read_errors:1});error.line('--- FAIL: TestWintunParallelUDP: UDP read error or insufficient delivered packets');assert.equal(error.result(1).verdict,'test_failed');
 });
@@ -116,28 +119,74 @@ function ringIncident(s,{mode='ours',testPath='TestWintunPerformance/pair2/udp_8
  s.line(ringWarning);
  for(const event of instances===2?['pumps_joined','closed']:['pumps_joined'])emit(s,{mode,phase:'performance-inprocess',repeat,scenario:'full',event,stats:{Corruptions:1,Recoveries:1},test:'integrity_session',test_path:testPath});
 }
-test('a ring rejection in one UDP mode is named and attributed without blaming the other modes',()=>{
+test('a recovered ring rejection in our own session is named, counted and does not fail the gate',()=>{
  const s=fixture({scenario:'full'});ringIncident(s);
  const r=s.result(0);
- assert.equal(r.verdict,'integrity_failure');assert.equal(r.exit,1);
+ assert.equal(r.verdict,'recovered_rejections');assert.equal(r.exit,0);
+ assert.deepEqual(r.gate,{passed:true,own_rejections:1,recovery_failures:0});
  assert.deepEqual(r.integrity_evidence_kinds,['packet_content_rejection']);
  assert.equal(r.payload_mismatch_incidents,0);assert.equal(r.ring_rejection_incidents,1);
  assert.deepEqual(r.mode_results.ours.failure_kinds,['packet_content_rejection']);
- assert.equal(r.mode_results.ours.verdict,'integrity_failure');
+ assert.equal(r.mode_results.ours.verdict,'recovered_rejections');
  assert.deepEqual(r.mode_results.dll.failure_kinds,[]);
  assert.deepEqual(r.mode_results.inprocess.failure_kinds,[]);
  assert.equal(r.mode_results.dll.verdict,'no_corruption_observed');
- assert.equal(r.clean_exposure_connections,0);assert.ok(r.observed_exposure_connections>0);
+ assert.equal(r.clean_exposure_connections,r.observed_exposure_connections);
 });
-test('a delivered payload mismatch is named separately and stays fatal',()=>{
+test('a rejection that is not recovered fails the gate',()=>{
  const s=fixture({scenario:'full'});
- emit(s,{test:'tcp_payload_difference',verdict:'integrity_failure',mode:'dll',phase:'performance-dll',repeat:'1',test_path:'TestWintunPerformance/pair0/tcp_8_MBps/dll'});
+ emit(s,{test:'integrity_session',test_path:'TestWintunPerformance/pair2/tcp_8_MBps/ours',mode:'ours',phase:'performance-dll',repeat:'1',process_id:7,stats:{SessionID:'7-1',Corruptions:2,Recoveries:1,RecoveryFailures:1}});
  const r=s.result(0);
- assert.equal(r.verdict,'integrity_failure');assert.equal(r.exit,1);
- assert.deepEqual(r.integrity_evidence_kinds,['payload_mismatch']);
- assert.equal(r.payload_mismatch_incidents,1);assert.equal(r.ring_rejection_incidents,0);
- assert.deepEqual(r.mode_results.dll.failure_kinds,['payload_mismatch']);
+ assert.equal(r.verdict,'recovery_failure');assert.equal(r.exit,1);
+ assert.deepEqual(r.gate,{passed:false,own_rejections:2,recovery_failures:1});
  assert.equal(r.clean_exposure_connections,0);
+});
+test('a delivered payload mismatch in our own session is named separately and stays fatal',()=>{
+ for(const mode of ['ours','inprocess']) {
+  const s=fixture({scenario:'full'});
+  emit(s,{test:'tcp_payload_difference',verdict:'integrity_failure',mode,phase:'performance-dll',repeat:'1',test_path:`TestWintunPerformance/pair0/tcp_8_MBps/${mode}`});
+  const r=s.result(0);
+  assert.equal(r.verdict,'integrity_failure',mode);assert.equal(r.exit,1);assert.equal(r.gate.passed,false);
+  assert.deepEqual(r.integrity_evidence_kinds,['payload_mismatch']);
+  assert.equal(r.payload_mismatch_incidents,1);assert.equal(r.ring_rejection_incidents,0);
+  assert.deepEqual(r.mode_results[mode].failure_kinds,['payload_mismatch']);
+  assert.equal(r.clean_exposure_connections,0);
+ }
+});
+test('what the signed DLL delivers wrong, rejects or leaves unfinished is evidence and never the verdict',()=>{
+ const s=fixture({scenario:'full',short:{dll:9}});
+ emit(s,{test:'tcp_payload_difference',verdict:'integrity_failure',mode:'dll',phase:'performance-dll',repeat:'1',test_path:'TestWintunPerformance/pair0/tcp_8_MBps/dll'});
+ s.line('=== RUN TestWintunPerformance/pair6/udp_8_MBps/dll');
+ s.line('    performance_windows_test.go:672: Wintun ring corruption: DLL Send ring framing rejection (ERROR_INVALID_DATA): The data is invalid.');
+ s.line('test.go:1: payload integrity failure: DLL receive ring: The data is invalid.');
+ const r=s.result(0);
+ assert.equal(r.verdict,'no_corruption_observed');assert.equal(r.exit,0);
+ assert.deepEqual(r.gate,{passed:true,own_rejections:0,recovery_failures:0});
+ assert.deepEqual(r.reference_evidence,{payload_mismatch_incidents:1,ring_rejection_incidents:1,missing_transfers:9});
+ assert.equal(r.mode_results.dll.verdict,'reference_fault');
+ assert.equal(r.mode_results.dll.clean_exposure_connections,0);
+ assert.equal(r.mode_results.ours.verdict,'no_corruption_observed');
+ assert.equal(r.mode_results.ours.clean_exposure_connections,312);
+ // Our own session is held to every transfer, and so is the in-process mode.
+ for(const mode of ['ours','inprocess']) {
+  const own=fixture({scenario:'full',short:{[mode]:1}}).result(0);
+  assert.equal(own.verdict,'diagnostic_incomplete',mode);assert.equal(own.exit,1);assert.equal(own.gate.passed,false);
+ }
+ // The reference may fall short of its share, never exceed it.
+ const extra=fixture({scenario:'full'});
+ emit(extra,{test:'tcp_integrity',verdict:'ok',phase:'performance-dll',repeat:'1',connection:{transfer:'TestWintunPerformance/performance-dll/dll/extra',payload_id:99999,host_expected_sha256:'a'.repeat(64),host_actual_sha256:'a'.repeat(64),coverage:{host_receive:{bytes:67108864}}}});
+ assert.equal(extra.result(0).verdict,'diagnostic_incomplete');
+});
+test('the writer guard counters are summed over our own sessions and reach the night record',()=>{
+ const s=fixture({scenario:'full'});
+ const base={test:'integrity_session',phase:'performance-dll',repeat:'1',process_id:9};
+ for(const [id,mode,ignored,shifted,probes] of [['9-1','ours',1,10,0],['9-1','ours',3,25,1],['9-2','ours',2,5,0],['9-3','dll',50,50,50]])
+  emit(s,{...base,mode,test_path:`TestWintunPerformance/pair0/tcp_8_MBps/${mode}`,stats:{SessionID:id,IgnoredHeads:ignored,ShiftedEntries:shifted,HeadProbes:probes}});
+ const r=s.result(0);
+ assert.deepEqual(r.guard,{ignored_heads:5,shifted_entries:30,head_probes:1});
+ assert.equal(r.verdict,'no_corruption_observed');
+ assert.deepEqual(nightRecord(r,{arch:'ARM64',scenario:'full',shard:'3'}),{arch:'ARM64',scenario:'full',shard:'3',verdict:'no_corruption_observed',passed:true,own_rejections:0,recovery_failures:0,
+  own_payload_mismatches:0,guard:{ignored_heads:5,shifted_entries:30,head_probes:1},reference_evidence:{payload_mismatch_incidents:0,ring_rejection_incidents:0,missing_transfers:0},clean_exposure_connections:r.clean_exposure_connections});
 });
 test('a warning and repeated counter snapshots for one incident count once',()=>{
  const s=fixture({scenario:'full'});ringIncident(s);

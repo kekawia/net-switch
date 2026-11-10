@@ -46,7 +46,9 @@ test('investigations leave time to report incomplete and scripts run in normal P
 test('nightly uses the qualified sequence with one shared cap and no ordinary CI jobs', () => {
   const text = readFileSync(new URL('../workflows/wintun-nightly.yml', import.meta.url), 'utf8');
   const nightly = readWorkflow(text);
-  assert.deepEqual([...nightly.jobs.keys()], ['wintun-integrity']);
+  // The matrix, and the one job that reads its verdicts (the release gate).
+  assert.deepEqual([...nightly.jobs.keys()], ['wintun-integrity', 'night']);
+  assert.match(text, /  night:\n(?:    #.*\n)*    needs: wintun-integrity\n    if: \$\{\{ always\(\) && !inputs\.rejection_capture /);
   assert.match(text, /cron: '17 3 \* \* \*'/);
   assert.match(text, /max-parallel: \$\{\{ inputs.rejection_capture && 2 \|\| 10 \}\}/);
   const matrix={};
