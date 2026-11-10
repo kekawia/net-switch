@@ -106,8 +106,12 @@ on a fast runner one ring size may never get there, so the defect must show at
 one size at least. Like the model tests, the test asserts the defect until the
 writer guard lands: an overrun must show as wrong delivered bytes or as the
 driver ending the session. The harness also reports any Head no release could
-have produced with nothing replayed (`natural_events`). None has been seen on
-a hosted runner; it can only tell such a Head apart while the ring has room. The same harness runs against the model in
+have produced with nothing replayed (`natural_events`); it can only tell such a
+Head apart while the ring has room. The first one was recorded on x64 on
+2026-11-10 (run 42815757447, a control round): Head read 779044 and then
+768768, seven entries back, for 38 write batches in a row while the readers
+were stalled. The ring was four fifths empty, so the stale value only made it
+look fuller and no stream was damaged. That is the driver's own late store. The same harness runs against the model in
 `TestRingReceiveHeadReplayOverruns`, and
 `TestRingReceiveHeadAccountFollowsTheRing` checks that its account of the ring
 never drifts on healthy traffic. Neither hosted test is part of the nightly

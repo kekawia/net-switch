@@ -272,7 +272,9 @@ func TestWintunEntryShiftProbe(t *testing.T) {
 
 // staleHeadCounts is what staleHeadIO saw. NaturalRegressions needs no replay:
 // it counts Heads no release could have produced, seen before anything was
-// replayed. None has been seen on a hosted runner so far.
+// replayed. The first on a hosted runner (x64, run 42815757447, 2026-11-10):
+// Head read 779044, then 768768 for 38 batches in a row, seven entries back,
+// in a 1 MiB ring four fifths empty while the readers were stalled.
 type staleHeadCounts struct {
 	Replays            int              `json:"replays"`             // batches written with the older Head in place
 	Overruns           int              `json:"overruns"`            // of those, batches that wrote past the free space
@@ -292,8 +294,9 @@ type staleHeadEvent struct {
 	Kind       string `json:"kind"`
 	HeadBefore uint32 `json:"head_before"`
 	Head       uint32 `json:"head"`
-	Tail       uint32 `json:"tail"`
-	Room       uint64 `json:"room"` // free space by the account when it was seen
+	Tail       uint32 `json:"tail"`    // when first seen
+	Room       uint64 `json:"room"`    // free space by the account when first seen
+	Batches    int    `json:"batches"` // consecutive write batches that found it in place
 }
 
 // staleHeadIO replays on a real adapter the one thing the 0.14.1 return path
@@ -322,6 +325,9 @@ type staleHeadIO struct {
 	behind       uint64
 	replayed     bool // an overrun was caused here: later oddities are no longer the driver's alone
 
+	unexplained     bool // the last sample followed from no release
+	unexplainedHead uint32
+
 	countMu sync.Mutex
 	counts  staleHeadCounts
 }
@@ -344,10 +350,20 @@ func (s *staleHeadIO) natural(kind string, before, head, tail uint32, room uint6
 	if s.replayed {
 		return
 	}
+	// One late store stays in the ring until the next release, which can be many
+	// batches away while the readers stall. It is one event.
+	again := s.unexplained && s.unexplainedHead == head
+	s.unexplained, s.unexplainedHead = true, head
 	s.count(func(c *staleHeadCounts) {
+		if n := len(c.Events); again {
+			if n != 0 && c.Events[n-1].Head == head {
+				c.Events[n-1].Batches++
+			}
+			return
+		}
 		c.NaturalRegressions++
 		if len(c.Events) < 8 {
-			c.Events = append(c.Events, staleHeadEvent{kind, before, head, tail, room})
+			c.Events = append(c.Events, staleHeadEvent{kind, before, head, tail, room, 1})
 		}
 	})
 }
@@ -416,6 +432,7 @@ func (s *staleHeadIO) before(packets [][]byte) (stale, newest uint32, replayed b
 		s.natural("behind", previous, head, tail, capacity-4-min(s.vtail-s.vhead, capacity-4))
 		return
 	}
+	s.unexplained = false
 	s.advance(head, at-s.vhead, capacity)
 	if uint32(s.vtail-s.vhead) != (tail-head)&mask {
 		s.clean = false
