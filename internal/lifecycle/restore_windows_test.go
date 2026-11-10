@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
 	"github.com/AyoubAchour/net-switch/internal/settings"
 )
 

@@ -104,6 +104,9 @@ type MigrationJournal struct {
 	TasksSnapshot       win.LegacyTasksSnapshot `json:"tasksSnapshot"`
 	HealthCheckID       string                  `json:"healthCheckId,omitempty"`
 	LastError           string                  `json:"lastError,omitempty"`
+	// Upgrade marks a journal written by a 1.0 to 1.0 install, which reuses the
+	// health check. It has no 0.3.x state to go back to.
+	Upgrade bool `json:"upgrade,omitempty"`
 }
 
 type migrationHealthReport struct {
@@ -1402,15 +1405,26 @@ func Migrate(ctx context.Context, opts MigrateOptions) error {
 	}
 	versionDir := filepath.Join(appDir, "app-"+version)
 
-	// Reconcile any interrupted pre-commit journal before starting a fresh attempt.
+	// Reconcile an earlier run's journal before starting a fresh attempt.
 	if resolvedExisting, rErr := ResolveStore(dataDir); rErr == nil {
 		if CheckDirectory(resolvedExisting) == nil {
 			var prev MigrationJournal
 			if Read(filepath.Join(resolvedExisting, "migration-journal.json"), &prev) == nil {
-				if prev.Phase == "committed" && prev.Version == version {
-					return nil
-				}
-				if prev.Phase != "" && prev.Phase != "committed" && prev.Phase != "rolled_back" {
+				live := strings.EqualFold(prev.AppDir, appDir) && liveVersionDir(appDir) != ""
+				switch migrationRecovery(prev, live) {
+				case "finish":
+					if prev.StoreDir == "" {
+						prev.StoreDir = resolvedExisting
+					}
+					if err := finishMigrationCommit(&prev); err != nil {
+						return fmt.Errorf("finish interrupted migration commit: %w", err)
+					}
+					if prev.Version == version {
+						return nil
+					}
+					// 0.3.x is gone, so what is left is an ordinary upgrade.
+					return InstallVersioned(ctx, InstallVersionedOptions{AppDir: opts.AppDir, StageDir: opts.StageDir, Version: opts.Version, Owner: opts.Owner, DataDir: opts.DataDir})
+				case "rollback":
 					if rbErr := rollbackMigration(ctx, prev); rbErr != nil {
 						return fmt.Errorf("recover interrupted migration (%s): %w", prev.Phase, rbErr)
 					}
@@ -1629,18 +1643,19 @@ func Migrate(ctx context.Context, opts MigrateOptions) error {
 	}
 
 	// Phase 6: Committed (publish {app}\current and root launcher, remove legacy scheduled tasks and retired 0.3.x root files).
+	// Publishing can still be undone. "committing" is then journaled before
+	// anything of 0.3.x is removed: from there the machine store is the live 1.0
+	// store, so a later run finishes the commit and never rolls it back.
 	if err := publishRootDesktopFiles(appDir, version, versionDir); err != nil {
 		return failAndRollback(err)
 	}
-	if err := win.RemoveLegacyTasks(); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: remove legacy scheduled tasks after commit: %v\n", err)
+	if err := saveJournal("committing"); err != nil {
+		return failAndRollback(err)
 	}
-	for _, entry := range LegacyRootEntries() {
-		if err := removeNoFollowTree(filepath.Join(appDir, entry)); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: remove retired 0.3.x path %s: %v\n", entry, err)
-		}
+	if err := shouldFaultAtPhase("committing"); err != nil {
+		return err // stands in for a crash here: no rollback, the next run finishes
 	}
-	if err := saveJournal("committed"); err != nil {
+	if err := finishMigrationCommit(&journal); err != nil {
 		return err
 	}
 	if opts.OutPath != "" {
@@ -1649,6 +1664,67 @@ func Migrate(ctx context.Context, opts MigrateOptions) error {
 		_ = writeNoFollowUserFile(opts.OutPath, b)
 	}
 	return nil
+}
+
+// migrationRecovery says what an earlier run's journal asks of this one.
+//
+//   - "finish": the commit point was passed, or this is already a live 1.0
+//     install with 0.3.x files left behind. Only the removal of 0.3.x remains.
+//     Rolling back here would delete the live machine store and bring the old
+//     profile's settings in again.
+//   - "rollback": a migration stopped before its commit.
+//   - "fresh": nothing is pending.
+//
+// live means {app}\current names a complete installation in the journal's own
+// folder. An upgrade's journal is never rolled back: there is no 0.3.x behind it.
+func migrationRecovery(prev MigrationJournal, live bool) string {
+	switch {
+	case prev.Phase == "":
+		return "fresh"
+	case prev.Phase == "committing":
+		return "finish"
+	case prev.Phase == "committed" || prev.Upgrade:
+		if live {
+			return "finish"
+		}
+		return "fresh"
+	}
+	return "rollback"
+}
+
+// liveVersionDir returns the app-<version> folder that {app}\current names,
+// when that folder holds a complete installation.
+func liveVersionDir(appDir string) string {
+	raw, exists, err := readNoFollowMarker(filepath.Join(appDir, "current"))
+	if err != nil || !exists {
+		return ""
+	}
+	sub, err := ParseCurrentMarker(raw)
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(appDir, sub)
+	if service.CheckInstallation(dir) != nil {
+		return ""
+	}
+	return dir
+}
+
+// finishMigrationCommit removes what is left of 0.3.x once {app}\current names
+// the new version, and records the commit. Every step can be repeated, so an
+// interrupted commit is completed by running this again.
+func finishMigrationCommit(journal *MigrationJournal) error {
+	if err := win.RemoveLegacyTasks(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: remove legacy scheduled tasks after commit: %v\n", err)
+	}
+	for _, entry := range LegacyRootEntries() {
+		if err := removeNoFollowTree(filepath.Join(journal.AppDir, entry)); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: remove retired 0.3.x path %s: %v\n", entry, err)
+		}
+	}
+	journal.Phase = "committed"
+	journal.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+	return Save(filepath.Join(journal.StoreDir, "migration-journal.json"), *journal)
 }
 
 func waitForMigrationHealth(ctx context.Context, storeDir, ownerSID, healthCheckID string) error {
@@ -2066,6 +2142,7 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 			Owner:         owner,
 			RoutingWasOn:  wasRoutingOn,
 			HealthCheckID: healthID,
+			Upgrade:       true,
 		})
 		if err := service.Activate(ctx); err != nil {
 			return rollbackToPrev(err)
@@ -2084,6 +2161,7 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 			Owner:         owner,
 			RoutingWasOn:  wasRoutingOn,
 			HealthCheckID: healthID,
+			Upgrade:       true,
 		})
 	}
 	pruneSupersededVersionDirs(appDir, "app-"+version, prevSub)

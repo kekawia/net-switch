@@ -531,11 +531,57 @@ setInterval(() => {}, 60000);
   } | Out-Null
   Write-Host 'Case 2: Verified full pre-commit rollback and automatic 0.3.1 routing restart'
 
-  # Now run the real migration without fault injection over live 0.3.1 routing!
+  # Now migrate over live 0.3.1 routing, and stop in the middle of the commit:
+  # {app}\current already names 1.0.0 and the journal says "committing", but
+  # 0.3.1's files are still there. This stands in for a crash, so nothing rolls back.
+  $env:NETSWITCH_MIGRATE_FAULT_PHASE = 'committing'
+  try {
+    $crashRun = Invoke-SilentInstaller -ExePath $setup100 -LogName 'case2-commit-interrupted.log' -AllowFailure
+  } finally {
+    Remove-Item Env:NETSWITCH_MIGRATE_FAULT_PHASE -ErrorAction SilentlyContinue
+  }
+  $crashLogText = Get-Content -LiteralPath $crashRun.LogPath -Raw
+  if ($crashRun.ExitCode -eq 0 -or $crashLogText -notmatch 'injected migration fault at phase committing') {
+    $crashTail = (Get-Content -LiteralPath $crashRun.LogPath -Tail 30) -join "`n"
+    throw "Case 2: Setup did not stop at NETSWITCH_MIGRATE_FAULT_PHASE=committing (exit $($crashRun.ExitCode)):`n$crashTail"
+  }
+  $journalPath = Join-Path $machineData 'migration-journal.json'
+  $interruptedPhase = (Get-Content -LiteralPath $journalPath -Raw | ConvertFrom-Json).phase
+  if ($interruptedPhase -ne 'committing') {
+    throw "Case 2: expected the interrupted journal to say 'committing', got '$interruptedPhase'"
+  }
+  if (-not (Test-Path -LiteralPath (Join-Path $appDir 'server.mjs') -PathType Leaf)) {
+    throw 'Case 2: the interrupted commit already removed the 0.3.1 entrypoint, so the rerun would not exercise recovery'
+  }
+  if (-not (Get-Service -Name 'NetSwitch' -ErrorAction SilentlyContinue)) {
+    throw 'Case 2: the NetSwitch 1.0 service is missing after an interrupted commit'
+  }
+  # From here the machine store is the live 1.0 store. Change the old profile's
+  # copy: a rerun that rolled back and migrated again would bring this label in.
+  $profileSettingsPath = Join-Path $userData 'settings.json'
+  $staleProfile = (Get-Content -LiteralPath $profileSettingsPath -Raw).Replace('Backup LTE', 'Stale Profile Label')
+  [IO.File]::WriteAllText($profileSettingsPath, $staleProfile, $utf8NoBom)
+
+  # The rerun must finish the commit: remove 0.3.1 and keep the live store.
   Invoke-SilentInstaller -ExePath $setup100 -LogName 'case2-migrate-1.0.0.log' | Out-Null
   if ((Get-Content -LiteralPath (Join-Path $appDir 'current') -Raw).Trim() -ne 'app-1.0.0') {
     throw 'Case 2: expected {app}\current == app-1.0.0 after real migration'
   }
+  $finishedPhase = (Get-Content -LiteralPath $journalPath -Raw | ConvertFrom-Json).phase
+  if ($finishedPhase -ne 'committed') {
+    throw "Case 2: expected the journal to say 'committed' after the rerun, got '$finishedPhase'"
+  }
+  foreach ($removedRel in @('server.mjs', 'runtime', 'engine', 'lib')) {
+    if (Test-Path -LiteralPath (Join-Path $appDir $removedRel)) {
+      throw "Case 2: 0.3.1 path '$removedRel' remained after the rerun finished the commit"
+    }
+  }
+  Assert-TaskPresent -TaskName '\Net Switch\Server' -Expected $false
+  $storeLabels2 = @((Get-Content -LiteralPath (Join-Path $machineData 'settings.json') -Raw | ConvertFrom-Json).lines | ForEach-Object { $_.label })
+  if ($storeLabels2 -notcontains 'Backup LTE' -or $storeLabels2 -contains 'Stale Profile Label') {
+    throw "Case 2: the rerun replaced the live 1.0 settings with the old profile's: $($storeLabels2 -join ', ')"
+  }
+  Write-Host 'Case 2: Verified an interrupted commit is finished, not rolled back'
   if (-not (Test-Path -LiteralPath (Join-Path $machineData 'windows-undo.json') -PathType Leaf)) {
     throw 'Case 2: windows-undo.json was not preserved in 1.0 machine store'
   }

@@ -137,6 +137,7 @@ func setTasks(a map[string]any) error {
 	})
 	return err
 }
+
 type LegacyTasksSnapshot struct {
 	Present     bool   `json:"present"`
 	SignInReady bool   `json:"signInReady"`

@@ -67,6 +67,34 @@ func TestCanonicalSettingsSignatureAndProfileSelection(t *testing.T) {
 	}
 }
 
+// Once {app}\current names the new version, the machine store is the live 1.0
+// store. A journal from that point on must be finished, never rolled back: a
+// rollback deletes that store and the next attempt imports the old profile.
+func TestMigrationRecoveryNeverRollsBackPastTheCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		prev MigrationJournal
+		live bool
+		want string
+	}{
+		{"no journal", MigrationJournal{}, false, "fresh"},
+		{"stopped after the copy", MigrationJournal{Phase: "copied"}, false, "rollback"},
+		{"services installed, not yet healthy", MigrationJournal{Phase: "installed"}, false, "rollback"},
+		{"healthy, nothing published", MigrationJournal{Phase: "healthy"}, false, "rollback"},
+		{"healthy, published, commit not yet journaled", MigrationJournal{Phase: "healthy"}, true, "rollback"},
+		{"interrupted while removing 0.3.x", MigrationJournal{Phase: "committing"}, true, "finish"},
+		{"interrupted commit, marker unreadable", MigrationJournal{Phase: "committing"}, false, "finish"},
+		{"committed, a 0.3.x file could not be removed", MigrationJournal{Phase: "committed"}, true, "finish"},
+		{"committed, then uninstalled and 0.3.x put back", MigrationJournal{Phase: "committed"}, false, "fresh"},
+		{"upgrade interrupted on a live install", MigrationJournal{Phase: "installed", Upgrade: true}, true, "finish"},
+		{"upgrade journal left by a removed install", MigrationJournal{Phase: "installed", Upgrade: true}, false, "fresh"},
+	} {
+		if got := migrationRecovery(tc.prev, tc.live); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestVerifyStageChecksumsAndTamperRejection(t *testing.T) {
 	dir := t.TempDir()
 	files := map[string][]byte{
