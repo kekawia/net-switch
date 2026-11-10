@@ -24,7 +24,16 @@ type RejectionEvidence struct {
 	FirstHex, SecondHex                              string
 	Changed                                          bool
 	Primary, Independent                             packetDiagnosis
+	// Later diagnoses the last of up to settleCopies further private copies of a
+	// content rejection, taken while Head is still held. Settled means two
+	// consecutive copies agreed. An empty Later.Predicate says the slot became a
+	// valid packet after it was rejected. Evidence only: nothing is delivered.
+	Later       packetDiagnosis
+	LaterCopies int
+	Settled     bool
 }
+
+const settleCopies = 8
 
 type packetDiagnosis struct {
 	Predicate string
@@ -49,7 +58,7 @@ func (e *rejectionError) Error() string {
 // diagnostic. Bounds use the ORIGINAL acquired Tail, never the second load.
 func captureRejection(r ring, reason string, head, tail, size uint32, first []byte, rejectedReread ...uint32) error {
 	e := RejectionEvidence{Kind: "ring_framing_rejection", Head: head, Tail: tail, Size: size, Capacity: r.capacity,
-		Primary: packetDiagnosis{"not_evaluated", -1, -1}, Independent: packetDiagnosis{"not_evaluated", -1, -1}}
+		Primary: packetDiagnosis{"not_evaluated", -1, -1}, Independent: packetDiagnosis{"not_evaluated", -1, -1}, Later: packetDiagnosis{"not_evaluated", -1, -1}}
 	data := r.data()
 	// entry has already validated these bounds. Keep this helper safe in tests
 	// and if a future call site supplies invalid cursors.
@@ -75,16 +84,27 @@ func captureRejection(r ring, reason string, head, tail, size uint32, first []by
 			}
 			// Take the second bounded copy BEFORE parsing or formatting. Head is
 			// still held; formatting time cannot create a false comparison window.
-			second := bytes.Clone(data[int(head)+offset : int(head)+offset+n])
+			live := data[int(head)+offset : int(head)+offset+n]
+			second := bytes.Clone(live)
 			e.CopyOffset, e.CopyLength = offset, n
 			e.Changed = !bytes.Equal(first, second)
-			e.FirstHex = hex.EncodeToString(first[:min(n, 256)])
-			e.SecondHex = hex.EncodeToString(second[:min(n, 256)])
 			if reason == "packet failed validation" {
+				// Also before any formatting, so the copies are as close together
+				// as this path allows.
+				later := second
+				for e.LaterCopies < settleCopies && !e.Settled {
+					next := bytes.Clone(live)
+					e.LaterCopies++
+					e.Settled = bytes.Equal(later, next)
+					later = next
+				}
 				e.Kind = "packet_content_rejection"
 				e.Primary = diagnoseIP(first)
 				e.Independent = independentlyDiagnoseIP(first)
+				e.Later = diagnoseIP(later)
 			}
+			e.FirstHex = hex.EncodeToString(first[:min(n, 256)])
+			e.SecondHex = hex.EncodeToString(second[:min(n, 256)])
 		}
 	}
 	return &rejectionError{reason, e}

@@ -179,6 +179,29 @@ func TestRejectionSecondCopyNeverAccepted(t *testing.T) {
 	if !errors.Is(err, ErrCorrupt) || !e.Changed || e.Primary.Predicate != "version" || e.Independent.Predicate != "version" || e.FirstHex == e.SecondHex || r.load(0) != 0 {
 		t.Fatalf("second copy accepted/lost: %v", err)
 	}
+	// The slot holds a valid packet by the time it is copied again. That is
+	// recorded, and the rejection stands.
+	if e.Later.Predicate != "" || e.LaterCopies != 1 || !e.Settled {
+		t.Fatalf("later copies: %+v", e)
+	}
+}
+
+func TestRejectionLaterCopiesStayDamaged(t *testing.T) {
+	r := ring{make([]byte, ringBytes(MinCapacity)), MinCapacity}
+	p := testPacket()
+	p[0] = 0x75
+	binary.LittleEndian.PutUint32(r.data(), uint32(len(p)))
+	copy(r.data()[4:], p)
+	r.store(4, aligned(uint32(len(p))+4))
+	e := captureRejection(r, "packet failed validation", 0, r.load(4), uint32(len(p)), bytes.Clone(p)).(*rejectionError).evidence
+	if e.Changed || e.Later.Predicate != "version" || e.LaterCopies != 1 || !e.Settled {
+		t.Fatalf("stable damage: %+v", e)
+	}
+	// Framing rejections take no later copies: there is no packet to diagnose.
+	e = captureRejection(r, "invalid entry", 0, r.load(4), uint32(len(p)), nil).(*rejectionError).evidence
+	if e.Later.Predicate != "not_evaluated" || e.LaterCopies != 0 || e.Settled {
+		t.Fatalf("framing took later copies: %+v", e)
+	}
 }
 
 func TestRejectionBoundedCopyAndAcquiredTail(t *testing.T) {
