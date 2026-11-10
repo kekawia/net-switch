@@ -84,12 +84,28 @@ the real `rings.write` and needs no adapter. With releases published in order
 nothing is damaged. With the 0.14.1 order the tests assert the defect: they are
 the reproduction, and the writer guard will turn their expectations around.
 
-`wintun-head-race.yml` runs two hosted measurements that report and do not
-gate. `TestWintunEntryShiftProbe` asks whether Windows accepts four bytes after
-the IP packet inside an entry, or a spacer entry it drops, for UDP over IPv4
-and IPv6 and for every packet of a TCP transfer. `TestWintunReceiveHeadRace`
-counts wrong delivered TCP bytes per session implementation under a small ring
-that is kept full. Neither is part of the nightly integrity sequence.
+`wintun-head-race.yml` runs two hosted tests. `TestWintunEntryShiftProbe` asks
+whether Windows accepts four bytes after the IP packet inside an entry, or a
+spacer entry it drops, for UDP over IPv4 and IPv6 and for every packet of a TCP
+transfer. It reports and does not gate; on 2026-11-10 both methods were
+accepted on x64 and ARM64.
+
+`TestWintunStaleReceiveHead` shows what one late Head store costs on a real
+adapter. Waiting for the race does not work: on 2026-11-10 small rings kept
+full carried 1,920 streams (3.8 GiB) on the two hosted runners without one
+wrong byte, for the signed DLL and for us. So the test puts
+an older Head in place itself, for one write batch, at a moment the ring is
+full. That is sound because the driver reads Receive.Head once, when its
+receive thread starts, and only writes it afterwards: the value reaches our
+writer and nothing in the driver. It is a value the driver published earlier in
+the same lap, placed only while the word still holds the newest one, and taken
+out again unless the driver has published in between. Control rounds without a
+replay come first and must be clean. Like the model tests, it asserts the
+defect until the writer guard lands. The same harness runs against the model in
+`TestRingReceiveHeadReplayOverruns`, and
+`TestRingReceiveHeadAccountFollowsTheRing` checks that its account of the ring
+never drifts on healthy traffic. Neither hosted test is part of the nightly
+integrity sequence.
 
 ## Registration owner
 

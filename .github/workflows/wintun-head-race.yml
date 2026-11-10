@@ -1,9 +1,8 @@
 name: Wintun Receive.Head race
 
 # Hosted evidence for the Receive.Head race in the signed Wintun 0.14.1 driver:
-# which entry shift Windows tolerates, and how often delivered TCP bytes are
-# wrong under a small, full ring. Both tests report and do not gate; see
-# internal/wintun/receive_head_race_windows_test.go.
+# which entry shift Windows tolerates, and what one late Head store costs on a
+# real adapter. See internal/wintun/receive_head_race_windows_test.go.
 
 on:
   pull_request:
@@ -14,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       repeats:
-        description: Runs of the race measurement on each runner
+        description: Runs of the stale Head test on each runner
         type: choice
         options: ['1', '3', '6']
         default: '3'
@@ -72,15 +71,15 @@ jobs:
             if ("$_" -match 'WINTUN_RESULT (\{.*"test":"entry_shift_probe".*\})') { "``````json`n$($Matches[1])`n``````" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8 }
           }
           exit $LASTEXITCODE
-      - name: Wrong delivered bytes under a small, full Receive ring
+      - name: What one late Head store costs on a real adapter
         if: ${{ !cancelled() }}
         run: |
-          "| Mode | Ring bytes | Rounds | Completed | Incomplete | Mismatched | MB/s |`n|---|---:|---:|---:|---:|---:|---:|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          ./bin/wintun.test.exe '-test.v' '-test.timeout=30m' '-test.run=^TestWintunReceiveHeadRace$' "-test.count=$env:REPEATS" 2>&1 | ForEach-Object {
+          "| Ring bytes | Control streams | Control mismatched | Replay rounds | Overrun rounds | Overrun bytes | Damaged rounds | Mismatched | Incomplete | Natural regressions |`n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          ./bin/wintun.test.exe '-test.v' '-test.timeout=30m' '-test.run=^TestWintunStaleReceiveHead$' "-test.count=$env:REPEATS" 2>&1 | ForEach-Object {
             $_
-            if ("$_" -match 'WINTUN_RESULT (\{.*"test":"receive_head_race".*\})') {
+            if ("$_" -match 'WINTUN_RESULT (\{.*"test":"stale_receive_head".*\})') {
               $r = $Matches[1] | ConvertFrom-Json
-              "| $($r.mode) | $($r.capacity) | $($r.rounds) | $($r.completed_streams) | $($r.incomplete_streams) | $($r.mismatched_streams) | $([math]::Round($r.megabytes_per_second, 1)) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              "| $($r.capacity) | $($r.control.completed_streams) | $($r.control.mismatched_streams) | $($r.replay.rounds) | $($r.overrun_rounds) | $($r.counts.overrun_bytes) | $($r.damaged_rounds) | $($r.replay.mismatched_streams) | $($r.replay.incomplete_streams) | $($r.counts.natural_regressions) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           }
           exit $LASTEXITCODE

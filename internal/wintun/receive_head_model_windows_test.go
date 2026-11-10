@@ -37,6 +37,7 @@ type headModel struct {
 	writes []lateHead
 	seq    uint64
 	sizes  []int
+	out    func([][]byte) (int, error) // in place of the bare writer, when set
 
 	delivered, wrong, garbled int
 	lost                      bool
@@ -94,6 +95,11 @@ func (m *headModel) write(t *testing.T, packets int) int {
 	for i := range batch {
 		m.seq++
 		batch[i] = modelPacket(m.seq, m.sizes[m.rng.Intn(len(m.sizes))])
+	}
+	if m.out != nil {
+		n, err := m.out(batch)
+		must(t, err)
+		return n
 	}
 	n, _, err := m.r.write(batch)
 	must(t, err)
@@ -275,5 +281,80 @@ func TestRingReceiveHeadRaceReproduces(t *testing.T) {
 				t.Fatal("the 0.14.1 Head race no longer delivers wrong bytes in this model")
 			}
 		})
+	}
+}
+
+// modelReplay puts the hosted test's replay harness (staleHeadIO, in
+// receive_head_race_windows_test.go) in front of the model's writer.
+func modelReplay(m *headModel) *staleHeadIO {
+	replay := &staleHeadIO{Session: &Session{rings: m.r}}
+	m.out = replay.WriteBatch
+	return replay
+}
+
+// The hosted test replays an older Head on a real adapter. Here the same
+// harness meets the model, where every step is known: with every release
+// published in order, one replayed Head costs what the race costs in
+// TestRingReceiveHeadStepsBackwards, and Head is correct again afterwards.
+func TestRingReceiveHeadReplayOverruns(t *testing.T) {
+	m := newHeadModel(t, 1, 0, []int{1228})
+	replay := modelReplay(m)
+	for m.write(t, 1) == 1 {
+	}
+	m.indicate(1 << 20)
+	if len(m.held) < 8 {
+		t.Fatalf("the ring holds only %d packets", len(m.held))
+	}
+	third := m.held[2].next
+	for i := range 3 {
+		m.giveBack(i)
+	}
+	m.release(func() int { return 0 })
+	if n := m.write(t, 3); n != 3 {
+		t.Fatalf("wrote %d packets into three freed slots", n)
+	}
+	// Nothing is returned from here on, so nothing more may be written.
+	replay.armed.Store(true)
+	overrun := m.write(t, 8)
+	m.giveBack(0)
+	counts := replay.snapshot()
+	if overrun == 0 || m.wrong != 1 || counts.Replays != 1 || counts.Overruns != 1 || counts.OverrunBytes == 0 || counts.AccountLost != 0 {
+		t.Fatalf("one replayed Head: wrote %d packets, wrong deliveries %d, %+v", overrun, m.wrong, counts)
+	}
+	if head := m.r.receive.load(0); head != third || replay.armed.Load() {
+		t.Fatalf("after the replay Head is %d, not the driver's %d, or the harness is still armed (%t)", head, third, replay.armed.Load())
+	}
+	t.Logf("known defect: %d bytes written where nothing was free, from a Head %d bytes behind", counts.OverrunBytes, counts.BytesBehind)
+}
+
+// The account behind the replay has to follow a healthy ring exactly, or the
+// hosted test would report damage of its own making. With releases in order it
+// never loses the ring and never meets a Head it cannot explain. With the
+// 0.14.1 order it catches late stores with nothing replayed, but only while
+// the ring has room: on a full ring a late store reads as one large release,
+// which is exactly why the writer believes it.
+func TestRingReceiveHeadAccountFollowsTheRing(t *testing.T) {
+	late := 0
+	for name, sizes := range headModelMixes {
+		for seed := int64(1); seed <= 20; seed++ {
+			m := newHeadModel(t, seed, 0, sizes)
+			replay := modelReplay(m)
+			m.run(t, 1500)
+			if counts := replay.snapshot(); counts != (staleHeadCounts{}) || !replay.clean || m.wrong != 0 || m.delivered == 0 {
+				t.Fatalf("%s, seed %d, releases in order: %+v clean=%t delivered=%d wrong=%d", name, seed, counts, replay.clean, m.delivered, m.wrong)
+			}
+			m = newHeadModel(t, seed, 12, sizes)
+			replay = modelReplay(m)
+			m.run(t, 1500)
+			counts := replay.snapshot()
+			if counts.Replays != 0 {
+				t.Fatalf("%s, seed %d: an unarmed harness replayed a Head: %+v", name, seed, counts)
+			}
+			late += counts.NaturalRegressions
+		}
+	}
+	t.Logf("0.14.1 order, nothing replayed: %d Heads no release could explain", late)
+	if late == 0 {
+		t.Fatal("the account did not notice the 0.14.1 release order")
 	}
 }

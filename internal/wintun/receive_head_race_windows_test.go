@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,10 +23,10 @@ import (
 )
 
 // Hosted evidence for the Receive.Head race in the signed 0.14.1 driver (see
-// receive_head_model_windows_test.go). Both tests here report what they
-// measure and fail only when their own harness is broken: the signed DLL's
-// writer has the defect by design, and ours has it until the writer guard
-// lands. Neither test is part of the nightly integrity sequence.
+// receive_head_model_windows_test.go). The shift probe reports what Windows
+// accepts. The stale Head test asserts the defect on a real adapter, as the
+// model tests do in memory, until the writer guard turns it around. Neither
+// test is part of the nightly integrity sequence.
 
 var probePeer6 = netip.MustParseAddr("fd00:c613:f000::2")
 
@@ -269,17 +270,207 @@ func TestWintunEntryShiftProbe(t *testing.T) {
 		"trailing_bytes_ok": delivered['T'], "spacer_ok": delivered['S'], "session": observeSession(s), "fault": fmt.Sprint(f.fault())})
 }
 
-type headRaceDifference struct {
+// staleHeadCounts is what staleHeadIO saw. NaturalRegressions needs no replay:
+// it counts the driver's own late stores, which the account can tell apart
+// while the ring has room. On a full ring a late store reads as one large
+// release, to this account as to the writer. AccountLost should stay zero.
+type staleHeadCounts struct {
+	Replays            int    `json:"replays"`             // batches written with the older Head in place
+	Overruns           int    `json:"overruns"`            // of those, batches that wrote past the free space
+	OverrunBytes       uint64 `json:"overrun_bytes"`       // bytes written where nothing was free
+	BytesBehind        uint64 `json:"bytes_behind"`        // how far behind the newest Head the last overrunning one was
+	NaturalRegressions int    `json:"natural_regressions"` // sampled Heads no release could explain
+	AccountLost        int    `json:"account_lost"`        // times the ring stopped matching the account
+}
+
+// staleHeadIO replays on a real adapter the one thing the 0.14.1 return path
+// gets wrong: an older Receive.Head published after a newer one.
+//
+// The driver reads that word once, when its receive thread starts, and only
+// writes it afterwards (wintun.c in 0.14.1, lines 456, 420 and 576), so a value
+// placed there reaches our writer and nothing in the driver. The value replayed
+// is one the driver itself published earlier in the same lap. It goes in only
+// while the word still holds the newest value sampled, and comes out after one
+// write batch unless the driver has published in between.
+//
+// To know what is truly free it keeps its own account of the ring: Head and
+// Tail unwrapped, started whenever the ring is seen empty and dropped as soon
+// as the ring stops matching it.
+type staleHeadIO struct {
+	*Session
+	armed atomic.Bool
+
+	// Used only by the goroutine that writes.
+	seen         *rings
+	clean        bool     // vhead and vtail are a true account of the ring
+	head, tail   uint32   // Receive.Head and Tail as last sampled
+	vhead, vtail uint64   // the same, unwrapped since the ring was last seen empty
+	older        []uint64 // unwrapped Heads sampled before the newest, oldest first
+	behind       uint64
+
+	countMu sync.Mutex
+	counts  staleHeadCounts
+}
+
+func (s *staleHeadIO) count(change func(*staleHeadCounts)) {
+	s.countMu.Lock()
+	change(&s.counts)
+	s.countMu.Unlock()
+}
+
+func (s *staleHeadIO) snapshot() staleHeadCounts {
+	s.countMu.Lock()
+	defer s.countMu.Unlock()
+	return s.counts
+}
+
+func (s *staleHeadIO) WriteBatch(packets [][]byte) (int, error) {
+	stale, newest, replayed := s.before(packets)
+	n, err := s.Session.WriteBatch(packets)
+	s.after(stale, newest, replayed)
+	return n, err
+}
+
+func (s *staleHeadIO) advance(head uint32, by, capacity uint64) {
+	if by == 0 {
+		return
+	}
+	s.older = append(s.older, s.vhead)
+	s.vhead, s.head = s.vhead+by, head
+	for s.vhead-s.older[0] >= capacity {
+		s.older = s.older[1:] // more than a lap old
+	}
+}
+
+// before brings the account up to date and, when armed, puts an older Head in
+// place for the batch about to be written.
+func (s *staleHeadIO) before(packets [][]byte) (stale, newest uint32, replayed bool) {
+	s.Session.mu.RLock()
+	defer s.Session.mu.RUnlock()
+	r := s.Session.rings
+	if r == nil || r.closed {
+		s.seen, s.clean = nil, false
+		return
+	}
+	capacity, mask := uint64(r.receive.capacity), r.receive.capacity-1
+	head, tail := r.receive.load(0), r.receive.load(4)
+	if head > mask || head&3 != 0 {
+		s.clean = false // released by the driver
+		return
+	}
+	if r != s.seen || !s.clean {
+		// A true account can only start from an empty ring.
+		s.seen, s.clean = r, head == tail
+		s.head, s.tail, s.vhead, s.vtail, s.older = head, tail, capacity, capacity, s.older[:0]
+		return
+	}
+	by := uint64((head - s.head) & mask)
+	if by > s.vtail-s.vhead {
+		// More than everything outstanding: no release explains this value. It
+		// is the driver's own late store, seen without any replay. The value is
+		// left out of the account; the next sample is a real release again.
+		s.count(func(c *staleHeadCounts) { c.NaturalRegressions++ })
+		return
+	}
+	s.advance(head, by, capacity)
+	if s.vtail-s.vhead > capacity-4 || uint32(s.vtail-s.vhead) != (tail-head)&mask {
+		s.clean = false
+		s.count(func(c *staleHeadCounts) { c.AccountLost++ })
+		return
+	}
+	if !s.armed.Load() {
+		return
+	}
+	var need uint64
+	for _, p := range packets {
+		if len(p) != 0 && len(p) <= MaxPacketSize {
+			need += uint64(aligned(uint32(len(p)) + 4))
+		}
+	}
+	if need <= capacity-4-(s.vtail-s.vhead) {
+		return // the batch fits, so an older Head would change nothing
+	}
+	for i := len(s.older) - 1; i >= 0; i-- {
+		if s.vtail-s.older[i] < capacity {
+			continue // our Tail has not lapped this one: the ring would only look fuller
+		}
+		// Our Tail has lapped it, so with it in place the writer's free-space
+		// arithmetic wraps and the ring looks nearly empty.
+		stale = (head - uint32(s.vhead-s.older[i])) & mask
+		if !atomic.CompareAndSwapUint32(r.receive.word(0), head, stale) {
+			return 0, 0, false // the driver has just published; a later batch will do
+		}
+		s.behind = s.vhead - s.older[i]
+		return stale, head, true
+	}
+	return
+}
+
+// after takes the older Head out again and records what the batch did.
+func (s *staleHeadIO) after(stale, newest uint32, replayed bool) {
+	if !s.clean {
+		return
+	}
+	s.Session.mu.RLock()
+	defer s.Session.mu.RUnlock()
+	r := s.Session.rings
+	if r == nil || r != s.seen || r.closed {
+		s.clean = false
+		return
+	}
+	capacity, mask := uint64(r.receive.capacity), r.receive.capacity-1
+	tail := r.receive.load(4)
+	s.vtail += uint64((tail - s.tail) & mask)
+	s.tail = tail
+	if !replayed {
+		return
+	}
+	if !atomic.CompareAndSwapUint32(r.receive.word(0), stale, newest) {
+		// The driver published during the batch. Its value is at least as new as
+		// the one replaced, so the batch is judged against it: an overrun counted
+		// below is certain, and one the release then covered is not counted.
+		head := r.receive.load(0)
+		by := uint64((head - newest) & mask)
+		if head > mask || head&3 != 0 || by > s.vtail-s.vhead {
+			s.clean = false // released, or a value no release explains: no verdict
+			return
+		}
+		s.advance(head, by, capacity)
+	}
+	limit := s.vhead + capacity - 4
+	s.count(func(c *staleHeadCounts) {
+		c.Replays++
+		if s.vtail > limit {
+			c.Overruns++
+			c.OverrunBytes += s.vtail - limit
+			c.BytesBehind = s.behind
+		}
+	})
+	if s.vtail > limit {
+		// One overrun is the experiment. From here the ring holds more than this
+		// account can describe, until it is next seen empty.
+		s.armed.Store(false)
+		s.clean = false
+	}
+}
+
+type staleHeadDifference struct {
 	Round      int             `json:"round"`
 	Stream     int             `json:"stream"`
 	Received   int64           `json:"received_bytes"`
 	Difference *wordDifference `json:"difference"`
 }
 
-// headRaceRound echoes eight verified streams whose readers stall between
-// bursts, so Windows keeps packets in the ring and then returns many at once
-// from several threads: the conditions the 0.14.1 release path mishandles.
-func headRaceRound(round, size int) (completed, incomplete int, received int64, differences []headRaceDifference, err error) {
+type staleHeadRounds struct {
+	Rounds     int `json:"rounds"`
+	Completed  int `json:"completed_streams"`
+	Incomplete int `json:"incomplete_streams"`
+	Mismatched int `json:"mismatched_streams"`
+}
+
+// stalledRound echoes eight verified streams whose readers stall between
+// bursts, so Windows keeps their packets in the ring and the ring stays full.
+func stalledRound(round, size int) (completed, incomplete int, differences []staleHeadDifference, err error) {
 	const streams = 8
 	transfer := integrityTransferID.Add(1)
 	if err = validPayloadIdentity(transfer, streams); err != nil {
@@ -303,7 +494,7 @@ func headRaceRound(round, size int) (completed, incomplete int, received int64, 
 				return
 			}
 			defer c.Close()
-			c.SetDeadline(time.Now().Add(20 * time.Second))
+			c.SetDeadline(time.Now().Add(15 * time.Second))
 			c.(*net.TCPConn).SetReadBuffer(4 << 20)
 			written := make(chan error, 1)
 			go func() {
@@ -332,14 +523,13 @@ func headRaceRound(round, size int) (completed, incomplete int, received int64, 
 			writeErr := <-written
 			mu.Lock()
 			defer mu.Unlock()
-			received += n
 			if n == int64(size) && errors.Is(readErr, io.EOF) && writeErr == nil {
 				completed++
 			} else {
 				incomplete++
 			}
 			if v.first != nil {
-				differences = append(differences, headRaceDifference{round, stream, n, v.first})
+				differences = append(differences, staleHeadDifference{round, stream, n, v.first})
 			}
 		}()
 	}
@@ -347,54 +537,75 @@ func headRaceRound(round, size int) (completed, incomplete int, received int64, 
 	return
 }
 
-// TestWintunReceiveHeadRace measures how often delivered TCP bytes are wrong
-// when the Receive ring is small and kept full. It reports a rate per session
-// implementation and never fails on a mismatch.
-func TestWintunReceiveHeadRace(t *testing.T) {
+// TestWintunStaleReceiveHead shows on a real adapter what one late Head store
+// costs. Control rounds come first, with nothing replayed. Each round after
+// that gets one older Head for one write batch, at a moment the ring is full.
+//
+// Like the model tests it asserts the defect: the writer overruns and
+// applications see the damage. The writer guard will turn that around. The
+// race itself is too rare to wait for: small rings kept full carried 1,920
+// streams on the hosted runners without one wrong byte, for the signed DLL and
+// for us (2026-11-10).
+func TestWintunStaleReceiveHead(t *testing.T) {
 	requireRunner(t)
-	const streamBytes = 2 << 20
+	const (
+		streamBytes   = 2 << 20
+		controlRounds = 3
+		replayRounds  = 5
+	)
 	for _, capacity := range []uint32{MinCapacity, 1 << 20} {
-		for _, mode := range []string{"dll", "ours"} {
-			t.Run(fmt.Sprintf("%s/%dKiB", mode, capacity>>10), func(t *testing.T) {
-				a := newAdapter(t, capacity)
-				// Ordinary 1,500-byte packets: many more of them fit the ring, and
-				// each is returned to the driver on its own.
-				command(t, "netsh.exe", "interface", "ipv4", "set", "subinterface", "NsRingCI", "mtu=1500", "store=active")
-				f := fixtureOnAdapter(t, mode, a)
-				f.stopEcho()
-				f.stopEcho = tcpEcho(t, f)
-				var rounds, completed, incomplete int
-				var received int64
-				var differences []headRaceDifference
-				var problem error
-				start := time.Now()
-				for rounds < 10 && time.Since(start) < 30*time.Second {
-					rounds++
-					c, i, n, d, err := headRaceRound(rounds, streamBytes)
-					completed, incomplete, received = completed+c, incomplete+i, received+n
-					differences = append(differences, d...)
-					problem = errors.Join(problem, err)
+		t.Run(fmt.Sprintf("%dKiB", capacity>>10), func(t *testing.T) {
+			a := newAdapter(t, capacity)
+			// Ordinary 1,500-byte packets: many more of them fit the ring, and
+			// Windows keeps each one until its reader takes the data.
+			command(t, "netsh.exe", "interface", "ipv4", "set", "subinterface", "NsRingCI", "mtu=1500", "store=active")
+			f := fixtureOnAdapter(t, "ours", a)
+			session := f.io.(*Session)
+			replay := &staleHeadIO{Session: session}
+			f.stopEcho()
+			f.io = replay
+			f.stopEcho = tcpEcho(t, f)
+
+			var control, replayed staleHeadRounds
+			var overrunRounds, damagedRounds int
+			var differences []staleHeadDifference
+			var problem error
+			start := time.Now()
+			for round := 1; round <= controlRounds+replayRounds && time.Since(start) < 90*time.Second && f.fault() == nil; round++ {
+				before, armed, totals := replay.snapshot(), round > controlRounds, &control
+				if armed {
+					totals = &replayed
 				}
-				seconds := time.Since(start).Seconds()
-				result := map[string]any{"test": "receive_head_race", "arch": runtime.GOARCH, "mode": mode, "capacity": capacity, "mtu": 1500,
-					"rounds": rounds, "streams_per_round": 8, "stream_bytes": streamBytes, "completed_streams": completed, "incomplete_streams": incomplete,
-					"mismatched_streams": len(differences), "received_bytes": received, "megabytes_per_second": float64(received) / seconds / 1e6,
-					"seconds": seconds, "fault": fmt.Sprint(f.fault()), "error": fmt.Sprint(problem)}
-				if len(differences) > 4 {
-					differences = differences[:4]
+				replay.armed.Store(armed)
+				completed, incomplete, d, err := stalledRound(round, streamBytes)
+				replay.armed.Store(false)
+				totals.Rounds, totals.Completed, totals.Incomplete, totals.Mismatched = totals.Rounds+1, totals.Completed+completed, totals.Incomplete+incomplete, totals.Mismatched+len(d)
+				if replay.snapshot().Overruns > before.Overruns {
+					overrunRounds++
+					if len(d) != 0 || incomplete != 0 || f.fault() != nil {
+						damagedRounds++
+					}
 				}
-				result["differences"] = differences
-				switch s := f.io.(type) {
-				case *Session:
-					result["session"] = observeSession(s)
-				case *dllSession:
-					result["dll_packets"] = map[string]uint64{"read": s.readPackets.Load(), "written": s.writtenPackets.Load()}
-				}
-				report(t, result)
-				if completed == 0 {
-					t.Errorf("no stream completed: the harness measured nothing (%v)", problem)
-				}
-			})
-		}
+				differences = append(differences, d...)
+				problem = errors.Join(problem, err)
+			}
+			counts := replay.snapshot()
+			if len(differences) > 4 {
+				differences = differences[:4]
+			}
+			report(t, map[string]any{"test": "stale_receive_head", "arch": runtime.GOARCH, "capacity": capacity, "mtu": 1500,
+				"streams_per_round": 8, "stream_bytes": streamBytes, "control": control, "replay": replayed, "counts": counts,
+				"overrun_rounds": overrunRounds, "damaged_rounds": damagedRounds, "differences": differences,
+				"seconds": time.Since(start).Seconds(), "session": observeSession(session), "fault": fmt.Sprint(f.fault()), "error": fmt.Sprint(problem)})
+			if control.Completed == 0 || control.Incomplete != 0 || control.Mismatched != 0 {
+				t.Errorf("the control rounds were not clean (%+v), so damage after a replay would prove nothing", control)
+			}
+			switch {
+			case overrunRounds == 0:
+				t.Errorf("no replayed Head made the writer overrun: the harness measured nothing (%+v)", counts)
+			case damagedRounds == 0:
+				t.Errorf("the writer overran in %d rounds and no stream was damaged: the defect did not reproduce here (%+v)", overrunRounds, counts)
+			}
+		})
 	}
 }
