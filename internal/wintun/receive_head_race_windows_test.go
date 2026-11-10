@@ -455,6 +455,13 @@ func (s *staleHeadIO) before(packets [][]byte) (stale, newest uint32, replayed b
 	}
 	previous := s.head
 	at, possible := s.resolve(head, capacity)
+	// A late store stays in place until the next release. Once Tail has moved a
+	// lap past it, its offset names a position that is in range again; it is
+	// still the same stale value, and taking it then would cost this account a
+	// lap (run 42831652125 counted two follow-on events that way).
+	if s.unexplained && head == s.unexplainedHead {
+		possible = false
+	}
 	if !possible {
 		// No release explains this value. It is left out of the account; the
 		// next sample is a real release again.
