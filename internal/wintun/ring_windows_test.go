@@ -122,10 +122,29 @@ func TestRingBatchWakeAndFullDrop(t *testing.T) {
 	if result, _ := windows.WaitForSingleObject(event, 0); result != uint32(windows.WAIT_TIMEOUT) {
 		t.Fatal("event is not auto-reset")
 	}
+	// A Head that is not the end of an entry we wrote is refused: it neither
+	// frees the ring nor fills it. (Before the guard, this value made the ring
+	// look full.)
 	r.receive.store(0, (r.tail+4)&(MinCapacity-1))
 	n, dropped, err = r.write([][]byte{p, p})
-	if err != nil || n != 0 || dropped != 2 {
-		t.Fatalf("full ring: %d %d %v", n, dropped, err)
+	if err != nil || n != 2 || dropped != 0 || r.guard.counts != (guardCounts{ignoredHeads: 1}) {
+		t.Fatalf("foreign Head: %d %d %v %+v", n, dropped, err, r.guard.counts)
+	}
+	// The end of the fourth entry is one of ours, and frees four entries.
+	fourth := 4 * aligned(uint32(len(p))+4)
+	r.receive.store(0, fourth)
+	if n, _, err = r.write([][]byte{p}); err != nil || n != 1 || r.guard.room(MinCapacity) != uint64(MinCapacity-4-2*aligned(uint32(len(p))+4)) {
+		t.Fatalf("own Head: %d %v room %d", n, err, r.guard.room(MinCapacity))
+	}
+	for n == 1 {
+		if n, _, err = r.write([][]byte{p}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	windows.WaitForSingleObject(event, 0) // the fill left the event signalled
+	n, dropped, err = r.write([][]byte{p, p})
+	if err != nil || n != 0 || dropped != 2 || r.guard.room(MinCapacity) < receiveReserve {
+		t.Fatalf("full ring: %d %d %v room %d", n, dropped, err, r.guard.room(MinCapacity))
 	}
 	if result, _ := windows.WaitForSingleObject(event, 0); result != uint32(windows.WAIT_TIMEOUT) {
 		t.Fatal("empty batch woke driver")

@@ -314,7 +314,8 @@ type staleHeadEvent struct {
 // as the ring stops matching it.
 type staleHeadIO struct {
 	*Session
-	armed atomic.Bool
+	armed     atomic.Bool
+	unguarded bool // write as the writer did before the guard: the control
 
 	// Used only by the goroutine that writes.
 	seen         *rings
@@ -384,10 +385,38 @@ func (s *staleHeadIO) resolve(head uint32, capacity uint64) (uint64, bool) {
 	return at, at <= s.vtail
 }
 
-func (s *staleHeadIO) WriteBatch(packets [][]byte) (int, error) {
+func (s *staleHeadIO) WriteBatch(packets [][]byte) (n int, err error) {
 	stale, newest, replayed := s.before(packets)
-	n, err := s.Session.WriteBatch(packets)
+	if s.unguarded {
+		n, err = s.writeUnguarded(packets)
+	} else {
+		n, err = s.Session.WriteBatch(packets)
+	}
 	s.after(stale, newest, replayed)
+	return n, err
+}
+
+// writeUnguarded is Session.WriteBatch around the writer as it was before the
+// guard (unguardedWrite, in the model test file).
+func (s *staleHeadIO) writeUnguarded(packets [][]byte) (int, error) {
+	s.Session.writeMu.Lock()
+	defer s.Session.writeMu.Unlock()
+	s.Session.mu.RLock()
+	defer s.Session.mu.RUnlock()
+	switch {
+	case s.Session.closed.Load() || s.Session.rings == nil:
+		return 0, net.ErrClosed
+	case s.Session.err != nil:
+		return 0, s.Session.err
+	case s.Session.recovering.Load():
+		return 0, nil
+	}
+	n, err := unguardedWrite(s.Session.rings, packets)
+	s.Session.written.Add(uint64(n))
+	if errors.Is(err, ErrDisconnected) {
+		s.Session.fail(err)
+		err = s.Session.writeLoss()
+	}
 	return n, err
 }
 
@@ -620,9 +649,12 @@ func stalledRound(round, size int) (completed, incomplete int, differences []sta
 // costs. Control rounds come first, with nothing replayed. Each round after
 // that gets one older Head for one write batch, at a moment the ring is full.
 //
-// Like the model tests it asserts the defect: the writer overruns and
-// applications see the damage. The writer guard will turn that around. The
-// race itself is too rare to wait for: small rings kept full carried 1,920
+// Each ring size runs twice. Through the writer as it was before the guard,
+// the test asserts the defect: the writer overruns and applications see the
+// damage. Through the session's own writer it asserts the guard: every
+// replayed Head is refused, nothing is overrun and nothing is damaged.
+//
+// The race itself is too rare to wait for: small rings kept full carried 1,920
 // streams on the hosted runners without one wrong byte, for the signed DLL and
 // for us (2026-11-10).
 func TestWintunStaleReceiveHead(t *testing.T) {
@@ -632,16 +664,20 @@ func TestWintunStaleReceiveHead(t *testing.T) {
 		controlRounds = 5
 		replayRounds  = 5
 	)
-	var overruns, damaged int
-	for _, capacity := range []uint32{MinCapacity, 1 << 20} {
-		t.Run(fmt.Sprintf("%dKiB", capacity>>10), func(t *testing.T) {
+	var overruns, damaged, refused int
+	for _, run := range []struct {
+		capacity uint32
+		guarded  bool
+	}{{MinCapacity, false}, {MinCapacity, true}, {1 << 20, false}, {1 << 20, true}} {
+		capacity, mode := run.capacity, map[bool]string{false: "unguarded", true: "guarded"}[run.guarded]
+		t.Run(fmt.Sprintf("%dKiB/%s", capacity>>10, mode), func(t *testing.T) {
 			a := newAdapter(t, capacity)
 			// Ordinary 1,500-byte packets: many more of them fit the ring, and
 			// Windows keeps each one until its reader takes the data.
 			command(t, "netsh.exe", "interface", "ipv4", "set", "subinterface", "NsRingCI", "mtu=1500", "store=active")
 			f := fixtureOnAdapter(t, "ours", a)
 			session := f.io.(*Session)
-			replay := &staleHeadIO{Session: session}
+			replay := &staleHeadIO{Session: session, unguarded: !run.guarded}
 			f.stopEcho()
 			f.io = replay
 			f.stopEcho = tcpEcho(t, f)
@@ -680,25 +716,40 @@ func TestWintunStaleReceiveHead(t *testing.T) {
 			}
 			// The driver ends the session itself when the writer laps its read
 			// position: the other way one stale Head shows, besides wrong bytes.
-			report(t, map[string]any{"test": "stale_receive_head", "arch": runtime.GOARCH, "capacity": capacity, "mtu": 1500,
+			stats := session.Stats()
+			report(t, map[string]any{"test": "stale_receive_head", "arch": runtime.GOARCH, "capacity": capacity, "mode": mode, "mtu": 1500,
 				"streams_per_round": 8, "stream_bytes": streamBytes, "control": control, "control_counts": controlCounts, "replay": replayed, "counts": counts,
 				"overrun_rounds": overrunRounds, "damaged_rounds": damagedRounds, "session_lost": f.fault() != nil, "differences": differences,
+				"ignored_heads": stats.IgnoredHeads, "shifted_entries": stats.ShiftedEntries, "head_probes": stats.HeadProbes,
 				"seconds": time.Since(start).Seconds(), "session": observeSession(session), "fault": fmt.Sprint(f.fault()), "error": fmt.Sprint(problem)})
 			if control.Completed == 0 || control.Incomplete != 0 || control.Mismatched != 0 || controlCounts.Replays != 0 {
-				t.Errorf("the control rounds were not clean (%+v, %+v), so damage after a replay would prove nothing", control, controlCounts)
+				t.Errorf("the control rounds were not clean (%+v, %+v), so nothing after a replay would prove anything", control, controlCounts)
 			}
+			// A replay needs a batch that does not fit the ring. Whether the ring
+			// gets that full depends on the runner, so one size may show nothing.
 			switch {
+			case run.guarded && (counts.Overruns != 0 || replayed.Mismatched != 0 || replayed.Incomplete != 0 || f.fault() != nil):
+				t.Errorf("the guard let a replayed Head do damage: %+v, %+v, fault %v", counts, replayed, f.fault())
+			case run.guarded && counts.Replays == 0:
+				t.Logf("nothing was replayed at this ring size (%+v)", counts)
+			case run.guarded && stats.IgnoredHeads == 0:
+				t.Errorf("%d Heads were replayed and the guard refused none", counts.Replays)
+			case run.guarded:
+				refused += int(stats.IgnoredHeads)
 			case overrunRounds == 0:
-				// A replay needs a batch that does not fit the ring. Whether the ring
-				// gets that full depends on the runner, so one size may show nothing.
 				t.Logf("nothing was replayed into an overrun at this ring size (%+v)", counts)
 			case damagedRounds == 0:
 				t.Errorf("the writer overran in %d rounds and no stream was damaged: the defect did not reproduce here (%+v)", overrunRounds, counts)
 			}
-			overruns, damaged = overruns+overrunRounds, damaged+damagedRounds
+			if !run.guarded {
+				overruns, damaged = overruns+overrunRounds, damaged+damagedRounds
+			}
 		})
 	}
 	if overruns == 0 || damaged == 0 {
-		t.Errorf("no ring size showed the defect: %d overrun rounds, %d damaged", overruns, damaged)
+		t.Errorf("without the guard no ring size showed the defect: %d overrun rounds, %d damaged", overruns, damaged)
+	}
+	if refused == 0 {
+		t.Errorf("with the guard no replayed Head was refused at any ring size: the guarded runs proved nothing")
 	}
 }

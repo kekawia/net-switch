@@ -47,10 +47,18 @@ type Stats struct {
 	ReadWakes        uint64
 	Placeholders     uint64
 	OversizedPackets uint64
-	CloseNanos       uint64
-	CloseDetails     CloseDetails
-	Registrar        RegistrarStats
-	Rings            *RingState `json:",omitempty"` // absent without live rings, or while they are being replaced
+	// The writer's guard against the 0.14.1 Receive.Head race. IgnoredHeads
+	// counts published Heads that were not the end of an outstanding entry: the
+	// driver's late stores. ShiftedEntries counts packets given four trailing
+	// bytes so their entry would not end where one of the lap before ended.
+	// HeadProbes counts stall probes (see receive_guard_windows.go).
+	IgnoredHeads   uint64
+	ShiftedEntries uint64
+	HeadProbes     uint64
+	CloseNanos     uint64
+	CloseDetails   CloseDetails
+	Registrar      RegistrarStats
+	Rings          *RingState `json:",omitempty"` // absent without live rings, or while they are being replaced
 }
 
 // RingState is a live read of both ring headers, for failure capture. The
@@ -102,6 +110,8 @@ type Session struct {
 	wakeups                           atomic.Uint64
 	readWaits, readWakes              atomic.Uint64
 	placeholders, oversized           atomic.Uint64
+	ignoredHeads, shiftedEntries      atomic.Uint64
+	headProbes                        atomic.Uint64
 	closeStarted                      atomic.Int64
 	closeNanos                        atomic.Uint64
 	closeDetails                      atomic.Pointer[CloseDetails]
@@ -181,7 +191,7 @@ func (*Session) RXChecksumVerified(p []byte) bool {
 	return false
 }
 func (s *Session) Stats() Stats {
-	result := Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load(), CloseNanos: s.closeNanos.Load()}
+	result := Stats{ReadPackets: s.read.Load(), WrittenPackets: s.written.Load(), DroppedPackets: s.dropped.Load(), Corruptions: s.corruptions.Load(), Recoveries: s.recoveries.Load(), RecoveryFailures: s.failures.Load(), Wakeups: s.wakeups.Load(), ReadWaits: s.readWaits.Load(), ReadWakes: s.readWakes.Load(), Placeholders: s.placeholders.Load(), OversizedPackets: s.oversized.Load(), IgnoredHeads: s.ignoredHeads.Load(), ShiftedEntries: s.shiftedEntries.Load(), HeadProbes: s.headProbes.Load(), CloseNanos: s.closeNanos.Load()}
 	result.SessionID = s.id
 	if evidence := s.firstRejection.Load(); evidence != nil {
 		copy := *evidence
@@ -413,7 +423,13 @@ func (s *Session) WriteBatch(packets [][]byte) (int, error) {
 		s.dropped.Add(uint64(len(packets)))
 		return 0, nil
 	}
+	before := s.rings.guard.counts
 	n, drops, err := s.rings.write(packets)
+	if after := s.rings.guard.counts; after != before {
+		s.ignoredHeads.Add(after.ignoredHeads - before.ignoredHeads)
+		s.shiftedEntries.Add(after.shiftedEntries - before.shiftedEntries)
+		s.headProbes.Add(after.headProbes - before.headProbes)
+	}
 	s.written.Add(uint64(n))
 	s.dropped.Add(uint64(drops))
 	if n != 0 {

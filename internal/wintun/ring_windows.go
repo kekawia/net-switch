@@ -87,6 +87,15 @@ func (r ring) load(offset int) uint32     { return atomic.LoadUint32(r.word(offs
 func (r ring) store(offset int, n uint32) { atomic.StoreUint32(r.word(offset), n) }
 func (r ring) data() []byte               { return r.bytes[ringHeader:] }
 
+// put writes one entry at offset: the packet, then extra zero bytes that count
+// as part of it. The caller has checked that it fits.
+func (r ring) put(offset uint32, p []byte, extra uint32) {
+	data := r.data()
+	binary.LittleEndian.PutUint32(data[offset:offset+4], uint32(len(p))+extra)
+	copy(data[offset+4:], p)
+	clear(data[offset+4+uint32(len(p)):][:extra])
+}
+
 // Go atomics are sequentially consistent (stronger than the ABI's acquire and
 // release requirements), including on ARM64. Both rings live in one unnamed
 // pagefile-backed section. The engine maps one view; the registrar maps its
@@ -101,7 +110,8 @@ type rings struct {
 	closed                  bool
 	ownerExitedFirst        bool // set by end(): the owner ended before we requested a stop
 	head, tail              uint32
-	placeholders, oversized uint64 // protected by the session's read lock
+	placeholders, oversized uint64       // protected by the session's read lock
+	guard                   receiveGuard // protected by the session's write lock
 	closeProfile            CloseDetails
 }
 
@@ -447,20 +457,37 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 	if head >= capacity || head&3 != 0 || r.receive.load(4) != r.tail {
 		return 0, len(packets), corrupt(r.receive, "Receive", "invalid cursor", head, r.receive.load(4))
 	}
-	tail := r.tail
+	// Room comes from the guard's accepted Head, never from the raw word: see
+	// receive_guard_windows.go.
+	g := &r.guard
+	if !g.started {
+		g.start(capacity, r.tail)
+	}
+	g.observe(head, capacity)
+	room, tail, full := g.room(capacity), r.tail, false
+	data := r.receive.data()
 	for _, p := range packets {
 		if len(p) == 0 || len(p) > MaxPacketSize {
 			dropped++
 			continue
 		}
 		size := aligned(uint32(len(p)) + 4)
-		if size > (head-tail-4)&(capacity-1) {
+		extra, old := g.shift(size, capacity)
+		if len(p)+int(extra) > MaxPacketSize {
+			dropped++ // too large to carry the extra bytes
+			continue
+		}
+		if size += extra; uint64(size)+receiveReserve > room {
+			full = true
 			dropped++
 			continue
 		}
-		data := r.receive.data()
-		binary.LittleEndian.PutUint32(data[tail:tail+4], uint32(len(p)))
-		copy(data[tail+4:], p)
+		r.receive.put(tail, p, extra)
+		g.wrote(size, old)
+		room -= uint64(size)
+		if extra != 0 {
+			g.counts.shiftedEntries++
+		}
 		if wordBoundaryHooksEnabled {
 			wordInspection.add(data[tail+4:tail+4+uint32(len(p))], tail, written)
 		}
@@ -470,6 +497,24 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 		tail = (tail + size) & (capacity - 1)
 		written++
 	}
+	// Stall probe. The account says the ring is full and the raw Head is one it
+	// refused. If the ring in fact drained while nothing was being written,
+	// nothing outstanding is left to publish a newer Head, and this writer would
+	// wait for ever. Reading cannot tell that from a ring that really is full,
+	// so one entry Windows drops goes into the reserve: on an empty ring it
+	// comes straight back and the driver publishes its end, a real boundary
+	// ahead of the accepted Head. On a full ring nothing changes.
+	if full && g.ignoring && !g.probed {
+		size := aligned(uint32(len(headProbe)) + 4)
+		extra, old := g.shift(size, capacity)
+		if size += extra; uint64(size) <= room {
+			r.receive.put(tail, headProbe, extra)
+			g.wrote(size, old)
+			tail = (tail + size) & (capacity - 1)
+			g.probed = true
+			g.counts.headProbes++
+		}
+	}
 	if written != 0 {
 		if wordBoundaryHooksEnabled {
 			wordInspection.publish()
@@ -477,6 +522,8 @@ func (r *rings) write(packets [][]byte) (written, dropped int, err error) {
 		if integrityHooksEnabled {
 			inspection.publish()
 		}
+	}
+	if tail != r.tail {
 		r.tail = tail
 		r.receive.store(4, tail)
 		// Never consult Receive.Alertable. An auto-reset event retains this

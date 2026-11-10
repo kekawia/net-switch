@@ -79,10 +79,41 @@ A writer that computes free space from that Head then overwrites packets Windows
 has verified but not yet copied to the application. Upstream moved the write
 under the lock in dd050927 (2026-02-20); no signed build contains it.
 
+The writer therefore keeps its own account of the ring
+(`receive_guard_windows.go`) and takes its room from that, never from the raw
+word:
+
+- It records the end of every entry it writes. A published Head is accepted
+  only if it is the end of an entry still outstanding. Every late store is the
+  end of an entry that really was released, so one that lies ahead of the
+  accepted Head is safe to take; anything else is ignored (`IgnoredHeads`) and
+  the accepted Head stands.
+- An entry never ends where an entry of the lap before ended, or a late store
+  of the older end could pass for the new one. When it would, the packet gets
+  four zero bytes after it inside the entry (`ShiftedEntries`). In 0.14.1 the
+  driver hands the whole entry to Windows, which reads the length from the IP
+  header and ignores the rest; upstream's own unreleased work lets the driver
+  trim an oversized entry itself (47b16dc8, "Allow packet over-allocation on
+  send"). With mixed packet sizes about one entry in 300 is shifted.
+- One case could otherwise stop the tunnel: the ring drains while nothing is
+  being written, and the last word left in place is a late store older than
+  the accepted Head. The account then says full, and nothing outstanding is
+  left to publish a newer Head. Reading cannot tell that from a ring that
+  really is full. So the first time a batch is dropped for room while the raw
+  Head is one the account refused, the writer puts one entry Windows drops (an
+  IPv4 header with a wrong checksum) into 64 bytes it keeps in reserve
+  (`HeadProbes`). On an empty ring it comes straight back and the driver
+  publishes its end; on a full ring nothing changes.
+
+The guard covers late stores up to one lap of writes old. A return thread
+stalled for longer than that is outside it.
+
 `receive_head_model_windows_test.go` models the driver's release order against
-the real `rings.write` and needs no adapter. With releases published in order
-nothing is damaged. With the 0.14.1 order the tests assert the defect: they are
-the reproduction, and the writer guard will turn their expectations around.
+the real `rings.write` and needs no adapter. Each case also runs through the
+writer as it was before the guard, kept in the tests as a control. With releases
+published in order nothing is damaged either way. With the 0.14.1 order the
+old writer delivers wrong bytes in every traffic mix and loses nearly every
+session; the guarded writer delivers every packet intact.
 
 `wintun-head-race.yml` runs two hosted tests. `TestWintunEntryShiftProbe` asks
 whether Windows accepts four bytes after the IP packet inside an entry, or a
@@ -102,20 +133,25 @@ the same lap, placed only while the word still holds the newest one, and taken
 out again unless the driver has published in between. Control rounds without a
 replay come first and must be clean. The readers start late, so that Windows
 holds packets and the ring fills; a replay needs a batch that does not fit, and
-on a fast runner one ring size may never get there, so the defect must show at
-one size at least. Like the model tests, the test asserts the defect until the
-writer guard lands: an overrun must show as wrong delivered bytes or as the
-driver ending the session. The harness also reports any Head no release could
-have produced with nothing replayed (`natural_events`); it can only tell such a
-Head apart while the ring has room. The first one was recorded on x64 on
-2026-11-10 (run 42815757447, a control round): Head read 779044 and then
-768768, seven entries back, for 38 write batches in a row while the readers
-were stalled. The ring was four fifths empty, so the stale value only made it
-look fuller and no stream was damaged. That is the driver's own late store. The same harness runs against the model in
-`TestRingReceiveHeadReplayOverruns`, and
-`TestRingReceiveHeadAccountFollowsTheRing` checks that its account of the ring
-never drifts on healthy traffic. Neither hosted test is part of the nightly
-integrity sequence.
+on a fast runner one ring size may never get there, so each result must show at
+one size at least. Each size runs twice. Through the old writer the test
+asserts the defect: an overrun must show as wrong delivered bytes or as the
+driver ending the session (2026-11-10, before the guard: on x64 233 of 240
+streams received another stream's bytes; on ARM64 the driver ended the session
+six times out of six). Through the session's own writer it asserts the guard:
+every replayed Head is refused, nothing is overrun, no stream is damaged and
+the session stays up.
+
+The harness also reports any Head no release could have produced with nothing
+replayed (`natural_events`); it can only tell such a Head apart while the ring
+has room. The first one was recorded on x64 on 2026-11-10 (run 42815757447, a
+control round): Head read 779044 and then 768768, seven entries back, for 38
+write batches in a row while the readers were stalled. The ring was four fifths
+empty, so the stale value only made it look fuller and no stream was damaged.
+That is the driver's own late store. The same harness runs against the model
+in `TestRingReceiveHeadReplay`, and `TestRingReceiveHeadAccountFollowsTheRing`
+checks that its account of the ring never drifts on healthy traffic. Neither
+hosted test is part of the nightly integrity sequence.
 
 ## Registration owner
 
