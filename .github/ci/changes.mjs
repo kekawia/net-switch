@@ -11,11 +11,11 @@ export const groups = [
 export const areas = {
   docs: [],
   frozen: ['node', 'helper', 'installer', 'go_linux', 'control'],
-  go_shared: ['go_windows', 'go_linux', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'],
-  go_windows: ['go_windows', 'legacy_windows', 'testisp', 'wintun', 'control'],
+  go_shared: ['go_windows', 'go_linux', 'installer', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'],
+  go_windows: ['go_windows', 'installer', 'legacy_windows', 'testisp', 'wintun', 'control'],
   go_linux: ['go_linux', 'acceptance'],
   tests_linux: ['go_windows', 'go_linux', 'acceptance'],
-  tests_windows: ['node', 'go_windows', 'legacy_windows', 'testisp', 'control'],
+  tests_windows: ['node', 'go_windows', 'installer', 'legacy_windows', 'testisp', 'control'],
 };
 
 // An area name, or several joined by '+' for a file that sits among code of

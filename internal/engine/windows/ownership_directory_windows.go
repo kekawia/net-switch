@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"time"
 	"unsafe"
@@ -41,6 +42,14 @@ func ownershipDirectory(ctx context.Context, path string) (*winhandle.File, erro
 		directory = nil
 	}
 	return directory, err
+}
+
+func resolvedOwnershipDirectory() (string, error) {
+	root, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
+	if err != nil {
+		return "", err
+	}
+	return winplatform.ResolveMachineDirectory(filepath.Join(root, "Net Switch Engine Ownership"))
 }
 
 func withOwnershipPreparation(ctx context.Context, prepare func() error) (err error) {

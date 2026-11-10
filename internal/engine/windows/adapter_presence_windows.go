@@ -105,6 +105,65 @@ func nativeAdapterPresent(guid, alias string, luid uint64) (bool, error) {
 	return adapterPresent(guid, alias, luid, rows, func() (bool, error) { return presentWintunDevice(guid) }, nativeIPInterface)
 }
 
+func filterRetiredLegacyRows(rows []adapterRow, legacy []retiredLegacyAdapter, pnp func(string) (bool, error), ip func(uint64, uint16) error) ([]adapterRow, error) {
+	if len(legacy) == 0 {
+		return rows, nil
+	}
+	filtered := make([]adapterRow, 0, len(rows))
+	for _, row := range rows {
+		matchedLegacy := false
+		for _, leg := range legacy {
+			if leg.LUID != 0 && !strings.EqualFold(leg.GUID, wintun.DefaultGUID) && strings.EqualFold(row.guid, leg.GUID) && row.luid == leg.LUID {
+				matchedLegacy = true
+				break
+			}
+		}
+		if !matchedLegacy {
+			filtered = append(filtered, row)
+			continue
+		}
+		devPresent, err := pnp(row.guid)
+		if err != nil {
+			return nil, err
+		}
+		if devPresent {
+			filtered = append(filtered, row)
+			continue
+		}
+		ipLive := false
+		for _, family := range []uint16{windows.AF_INET, windows.AF_INET6} {
+			ipErr := ip(row.luid, family)
+			if ipErr == nil {
+				ipLive = true
+				break
+			}
+			if !errors.Is(ipErr, windows.ERROR_NOT_FOUND) && !errors.Is(ipErr, windows.ERROR_FILE_NOT_FOUND) {
+				return nil, ipErr
+			}
+		}
+		if ipLive {
+			filtered = append(filtered, row)
+		}
+	}
+	return filtered, nil
+}
+
+func (o *objects) activeAdapterRows() ([]adapterRow, error) {
+	rows, err := nativeAdapterRows()
+	if err != nil {
+		return nil, err
+	}
+	return filterRetiredLegacyRows(rows, o.retiredLegacy, presentWintunDevice, nativeIPInterface)
+}
+
+func (o *objects) adapterPresent(guid, alias string, luid uint64) (bool, error) {
+	rows, err := o.activeAdapterRows()
+	if err != nil {
+		return true, err
+	}
+	return adapterPresent(guid, alias, luid, rows, func() (bool, error) { return presentWintunDevice(guid) }, nativeIPInterface)
+}
+
 func nativeIPInterface(luid uint64, family uint16) error {
 	row := windows.MibIpInterfaceRow{Family: family, InterfaceLuid: luid}
 	return windows.GetIpInterfaceEntry(&row)

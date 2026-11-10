@@ -106,6 +106,36 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 		}
 		o.saveAdapterLUID = func(luid uint64) error { return disk.saveAdapterHistory(boot, luid) }
 	}
+	if _, ok := lock.(OwnershipLock); ok {
+		ownershipDir, err := resolvedOwnershipDirectory()
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		mh, err := readMachineAdapterHistory(ownershipDir, boot)
+		if err != nil {
+			s.Close()
+			return nil, err
+		}
+		o.retiredLegacy = mh.Legacy
+		if o.adapterLUID == 0 && mh.Default != 0 {
+			o.adapterLUID = mh.Default
+		}
+		prevSave := o.saveAdapterLUID
+		o.saveAdapterLUID = func(luid uint64) error {
+			if prevSave != nil {
+				if err := prevSave(luid); err != nil {
+					return err
+				}
+			}
+			cur, err := readMachineAdapterHistory(ownershipDir, boot)
+			if err != nil {
+				return err
+			}
+			cur.Default = luid
+			return writeMachineAdapterHistory(ownershipDir, cur)
+		}
+	}
 	if err := s.Cleanup(ctx); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("engine crash recovery: %w", errors.Join(err, o.closeFirewall()))

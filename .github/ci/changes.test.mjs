@@ -24,15 +24,15 @@ const cases = {
 // Expected dependencies are deliberately independent of the classifier's map.
 // Changing that map must also explain why this coverage contract has changed.
 const frozen = ['node', 'helper', 'installer', 'go_linux', 'control'];
-const goShared = ['go_windows', 'go_linux', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'];
+const goShared = ['go_windows', 'go_linux', 'installer', 'legacy_windows', 'testisp', 'wintun', 'acceptance', 'control'];
 const expected = {
   docs: [],
   frozen,
   go_shared: goShared,
-  go_windows: ['go_windows', 'legacy_windows', 'testisp', 'wintun', 'control'],
+  go_windows: ['go_windows', 'installer', 'legacy_windows', 'testisp', 'wintun', 'control'],
   go_linux: ['go_linux', 'acceptance'],
   tests_linux: ['go_windows', 'go_linux', 'acceptance'],
-  tests_windows: ['node', 'go_windows', 'legacy_windows', 'testisp', 'control'],
+  tests_windows: ['node', 'go_windows', 'installer', 'legacy_windows', 'testisp', 'control'],
   'frozen+go_shared': [...new Set([...frozen, ...goShared])],
 };
 for (const [name, paths] of Object.entries(cases)) {

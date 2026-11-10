@@ -190,6 +190,7 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	core.Run()
 	go runSessionEvents(ctx, service.Events(serviceCtx), owner.User, remote, core.SetPowerSuspended, func() error { return core.Routing(ctx, false) }, log, sessionPresence(c.Data))
 	ready()
+	go runMigrationHealthCheck(ctx, c, core, remote, log)
 	go clearRestartDelayWhenHealthy(ctx, c.Data, log)
 	// No credential, HTTP port or session token is published to a file.
 	log(fmt.Sprintf("Control ready (PID %d); owner=%s", os.Getpid(), owner.Name))

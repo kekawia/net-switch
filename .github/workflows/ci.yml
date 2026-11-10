@@ -1025,10 +1025,10 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.installer != 'false') }}
     name: Installer smoke test
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     defaults:
       run:
-        shell: powershell
+        shell: pwsh
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1043,15 +1043,53 @@ jobs:
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: wintun
-      - name: Build and test the native helper with the pinned Go
-        run: ./scripts/build-helper.ps1
-      - name: Build the tray program with the C# compiler that comes with Windows
-        run: ./scripts/build-tray.ps1
-      - name: Verify installer packaging inputs
-        run: |
-          foreach ($path in @('docs/user-guide.md', 'packaging/NetSwitch.iss', 'packaging/versions.json', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'assets/net-switch.ico', 'licenses/lucide-ISC.txt')) {
-            if (-not (Test-Path -LiteralPath $path)) { throw "Missing packaging input: $path" }
-          }
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: inno
+      - name: Run Windows x64 installer, 0.3.x migration, rollback, and uninstall suite
+        run: ./scripts/test-windows-installer.ps1 -Arch x64
+      - name: Upload installer diagnostic logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-logs-x64
+          path: dist/installer-logs-x64
+
+  installer-arm64:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.installer != 'false') }}
+    name: Installer smoke test (ARM64)
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          architecture: arm64
+          package-manager-cache: false
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: go
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: inno
+      - name: Run Windows ARM64 installer, 0.3.x migration, rollback, and uninstall suite
+        run: ./scripts/test-windows-installer.ps1 -Arch arm64
+      - name: Upload installer diagnostic logs on failure
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installer-logs-arm64
+          path: dist/installer-logs-arm64
 
   arm64:
     needs: changes

@@ -110,7 +110,7 @@ func BootID() (string, error) {
 type Lock struct{ Data, Name string }
 
 func (l Lock) Acquire(ctx context.Context) (func() error, error) {
-	if l.Name != "engine" && l.Name != "enrollment" {
+	if l.Name != "engine" && l.Name != "enrollment" && l.Name != "migration" && l.Name != "update" {
 		return nil, errors.New("invalid machine lock name")
 	}
 	if err := CheckDirectory(l.Data); err != nil {

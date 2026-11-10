@@ -13,6 +13,12 @@ import (
 )
 
 func main() {
+	if delegated, code, err := lifecycle.MaybeDelegateVersionedDesktop(os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	} else if delegated {
+		os.Exit(code)
+	}
 	background := flag.Bool("background", false, "owner sign-in startup without opening the browser")
 	autostart := flag.String("autostart", "", "on, off or status; configure only this owner's sign-in entry")
 	version := flag.Bool("version", false, "print build identity")

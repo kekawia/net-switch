@@ -144,3 +144,80 @@ func TestAdapterHistorySurvivesProcessAndJournalCheckpoint(t *testing.T) {
 		t.Fatal("failed write replaced identity", n, err)
 	}
 }
+
+func TestRetiredLegacyAdapterRowFilteringAndMachineHistory(t *testing.T) {
+	legacyGUID := "{11111111-2222-3333-4444-555555555555}"
+	unrecordedGUID := "{aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee}"
+
+	dir := t.TempDir()
+	mh, err := readMachineAdapterHistory(dir, "boot-1")
+	if err != nil || mh.Boot != "boot-1" || mh.Default != 0 || len(mh.Legacy) != 0 {
+		t.Fatalf("unexpected empty machine history: %+v %v", mh, err)
+	}
+	mh.Default = 42
+	mh.Legacy = appendRetiredLegacy(mh.Legacy, retiredLegacyAdapter{GUID: legacyGUID, LUID: 99})
+	mh.Legacy = appendRetiredLegacy(mh.Legacy, retiredLegacyAdapter{GUID: legacyGUID, LUID: 99})
+	if err := writeMachineAdapterHistory(dir, mh); err != nil {
+		t.Fatal(err)
+	}
+	got, err := readMachineAdapterHistory(dir, "boot-1")
+	if err != nil || got.Default != 42 || len(got.Legacy) != 1 || !strings.EqualFold(got.Legacy[0].GUID, legacyGUID) || got.Legacy[0].LUID != 99 {
+		t.Fatalf("machine history roundtrip mismatch: %+v %v", got, err)
+	}
+	rotated, err := readMachineAdapterHistory(dir, "boot-2")
+	if err != nil || rotated.Default != 0 || len(rotated.Legacy) != 0 {
+		t.Fatalf("boot rotation retained stale adapter history: %+v %v", rotated, err)
+	}
+
+	// Retired legacy row with no PnP devnode and no IPv4/IPv6 IP interface is filtered.
+	rows := []adapterRow{
+		{guid: legacyGUID, alias: "NetSwitch", luid: 99},
+		{guid: wintun.DefaultGUID, alias: "NetSwitch 1", luid: 42},
+	}
+	filtered, err := filterRetiredLegacyRows(rows, got.Legacy,
+		func(string) (bool, error) { return false, nil },
+		func(uint64, uint16) error { return windows.ERROR_NOT_FOUND })
+	if err != nil || len(filtered) != 1 || filtered[0].luid != 42 {
+		t.Fatalf("expected retired legacy row filtered and DefaultGUID retained: %+v %v", filtered, err)
+	}
+	present, err := adapterPresent(wintun.DefaultGUID, "NetSwitch", 42, filtered,
+		func() (bool, error) { return false, nil },
+		func(uint64, uint16) error { return windows.ERROR_NOT_FOUND })
+	if present || err != nil {
+		t.Fatalf("expected clean absence after retired legacy and DefaultGUID TIME_WAIT rows: present=%t err=%v", present, err)
+	}
+
+	// Restarted live 0.3.x adapter (reusing same GUID+LUID) with live PnP or IP must NOT be filtered and must fail closed.
+	livePnP, err := filterRetiredLegacyRows(rows, got.Legacy,
+		func(string) (bool, error) { return true, nil },
+		func(uint64, uint16) error { return windows.ERROR_NOT_FOUND })
+	if err != nil || len(livePnP) != 2 {
+		t.Fatalf("live PnP legacy adapter was wrongly filtered: %+v %v", livePnP, err)
+	}
+	if p, pErr := adapterPresent(wintun.DefaultGUID, "NetSwitch", 42, livePnP, func() (bool, error) { return false, nil }, func(uint64, uint16) error { return windows.ERROR_NOT_FOUND }); !p || pErr == nil {
+		t.Fatalf("live PnP legacy adapter did not fail closed: %t %v", p, pErr)
+	}
+
+	liveIP, err := filterRetiredLegacyRows(rows, got.Legacy,
+		func(string) (bool, error) { return false, nil },
+		func(uint64, uint16) error { return nil })
+	if err != nil || len(liveIP) != 2 {
+		t.Fatalf("live IP legacy adapter was wrongly filtered: %+v %v", liveIP, err)
+	}
+
+	// Unrecorded foreign NetSwitch row must NOT be filtered even when retired.
+	unrecorded := []adapterRow{{guid: unrecordedGUID, alias: "NetSwitch", luid: 500}}
+	keptUnrecorded, err := filterRetiredLegacyRows(unrecorded, got.Legacy,
+		func(string) (bool, error) { return false, nil },
+		func(uint64, uint16) error { return windows.ERROR_NOT_FOUND })
+	if err != nil || len(keptUnrecorded) != 1 {
+		t.Fatalf("unrecorded foreign row was wrongly filtered: %+v %v", keptUnrecorded, err)
+	}
+	if p, pErr := adapterPresent(wintun.DefaultGUID, "NetSwitch", 42, keptUnrecorded, func() (bool, error) { return false, nil }, func(uint64, uint16) error { return windows.ERROR_NOT_FOUND }); !p || pErr == nil {
+		t.Fatalf("unrecorded foreign row did not fail closed: %t %v", p, pErr)
+	}
+
+	if !isNetSwitchLegacyAlias("NetSwitch") || !isNetSwitchLegacyAlias("NetSwitch 1") || isNetSwitchLegacyAlias("TestISP") || isNetSwitchLegacyAlias("NetSwitch abc") {
+		t.Fatal("unexpected isNetSwitchLegacyAlias classification")
+	}
+}

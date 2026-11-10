@@ -326,26 +326,75 @@ func Install(c Config) error {
 	}
 	return SetOwner(c.Owner)
 }
-func Uninstall(ctx context.Context) error {
-	if err := Stop(ctx, Control); err != nil && err != windows.ERROR_SERVICE_NOT_ACTIVE {
+func InstallOrReplace(ctx context.Context, c Config) error {
+	if err := Uninstall(ctx); err != nil {
 		return err
 	}
-	// The control clean stop has already stopped the engine through IPC.
+	for {
+		err := Install(c)
+		if !errors.Is(err, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("replace service while previous deletion completes: %w", ctx.Err())
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+}
+func Uninstall(ctx context.Context) error {
+	if err := Stop(ctx, Control); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) && !errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+		return err
+	}
+	// Control's clean stop asks Engine to exit through IPC; if Control was not
+	// attached, Engine's lease expires within ~10s. Wait for Stopped before Delete.
 	for _, name := range []string{Engine, Control} {
 		s, err := open(name, windows.DELETE|windows.SERVICE_QUERY_STATUS)
+		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+			continue
+		}
 		if err != nil {
 			return err
 		}
-		status, err := s.Query()
-		if err == nil && status.State != svc.Stopped {
-			err = fmt.Errorf("%s is still running", name)
+		for {
+			status, qErr := s.Query()
+			if qErr != nil {
+				err = qErr
+				break
+			}
+			if status.State == svc.Stopped {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				err = fmt.Errorf("%s is still stopping: %w", name, ctx.Err())
+			case <-time.After(50 * time.Millisecond):
+				continue
+			}
+			break
 		}
 		if err == nil {
-			err = s.Delete()
+			if delErr := s.Delete(); delErr != nil && !errors.Is(delErr, windows.ERROR_SERVICE_MARKED_FOR_DELETE) {
+				err = delErr
+			}
 		}
 		s.Close()
 		if err != nil {
 			return err
+		}
+		for {
+			check, openErr := open(name, windows.SERVICE_QUERY_STATUS)
+			if errors.Is(openErr, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
+				break
+			}
+			if openErr == nil {
+				check.Close()
+			}
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("wait for %s deletion: %w", name, ctx.Err())
+			case <-time.After(50 * time.Millisecond):
+			}
 		}
 	}
 	return nil
