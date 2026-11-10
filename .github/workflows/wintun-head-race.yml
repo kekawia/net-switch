@@ -2,13 +2,15 @@ name: Wintun Receive.Head race
 
 # Hosted evidence for the Receive.Head race in the signed Wintun 0.14.1 driver:
 # which entry shift Windows tolerates, and what one late Head store costs on a
-# real adapter. See internal/wintun/receive_head_race_windows_test.go.
+# real adapter, without the writer's guard and with it. See
+# internal/wintun/receive_head_race_windows_test.go.
 
 on:
   pull_request:
     paths:
       - .github/workflows/wintun-head-race.yml
       - internal/wintun/receive_head_*_windows_test.go
+      - internal/wintun/receive_guard_windows.go
       - internal/wintun/ring_windows.go
   workflow_dispatch:
     inputs:
@@ -74,12 +76,12 @@ jobs:
       - name: What one late Head store costs on a real adapter
         if: ${{ !cancelled() }}
         run: |
-          "| Ring bytes | Control streams | Control mismatched | Replay rounds | Overrun rounds | Overrun bytes | Damaged rounds | Mismatched | Incomplete | Session lost | Natural regressions |`n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          "| Ring bytes | Writer | Control streams | Control mismatched | Replays | Overrun rounds | Overrun bytes | Damaged rounds | Mismatched | Incomplete | Session lost | Heads refused | Natural regressions |`n|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           ./bin/wintun.test.exe '-test.v' '-test.timeout=30m' '-test.run=^TestWintunStaleReceiveHead$' "-test.count=$env:REPEATS" 2>&1 | ForEach-Object {
             $_
             if ("$_" -match 'WINTUN_RESULT (\{.*"test":"stale_receive_head".*\})') {
               $r = $Matches[1] | ConvertFrom-Json
-              "| $($r.capacity) | $($r.control.completed_streams) | $($r.control.mismatched_streams) | $($r.replay.rounds) | $($r.overrun_rounds) | $($r.counts.overrun_bytes) | $($r.damaged_rounds) | $($r.replay.mismatched_streams) | $($r.replay.incomplete_streams) | $($r.session_lost) | $($r.counts.natural_regressions) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              "| $($r.capacity) | $($r.mode) | $($r.control.completed_streams) | $($r.control.mismatched_streams) | $($r.counts.replays) | $($r.overrun_rounds) | $($r.counts.overrun_bytes) | $($r.damaged_rounds) | $($r.replay.mismatched_streams) | $($r.replay.incomplete_streams) | $($r.session_lost) | $($r.ignored_heads) | $($r.counts.natural_regressions) |" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             }
           }
           exit $LASTEXITCODE
