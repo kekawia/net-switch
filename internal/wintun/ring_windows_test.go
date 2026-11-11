@@ -183,6 +183,33 @@ func TestRingRecoveryInjectionSurvivesPublication(t *testing.T) {
 			}
 		})
 	}
+	for _, kind := range []string{"size", "tail", "alignment", "body"} {
+		for _, initialTail := range []uint32{0, 16, 1280} {
+			for _, publish := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/tail=%d/publish=%t", kind, initialTail, publish), func(t *testing.T) {
+					r := &rings{
+						send: ring{make([]byte, MinCapacity+ringHeader+ringSlack), MinCapacity},
+						head: initialTail,
+					}
+					r.send.store(0, initialTail)
+					r.send.store(4, initialTail)
+					injectSendFault(r, kind)
+					if publish {
+						// TunSendNetBufferLists keeps its own kernel RingTail and writes
+						// discovery packets forward from initialTail, then publishes Send.Tail.
+						p := testPacket()
+						binary.LittleEndian.PutUint32(r.send.data()[initialTail:], uint32(len(p)))
+						copy(r.send.data()[initialTail+4:], p)
+						r.send.store(4, (initialTail+aligned(uint32(len(p))+4))&(r.send.capacity-1))
+					}
+					n, err := r.read([][]byte{make([]byte, MaxPacketSize)}, make([]int, 1))
+					if n != 0 || !errors.Is(err, ErrCorrupt) {
+						t.Fatalf("%s at tail=%d publish=%t did not fail with ErrCorrupt: %d %v", kind, initialTail, publish, n, err)
+					}
+				})
+			}
+		}
+	}
 }
 
 // The next three tests cover the test-only in-process baseline owner, which

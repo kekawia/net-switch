@@ -1,16 +1,29 @@
 package linux
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
+
+type inflightDial struct {
+	index  int
+	mark   uint32
+	v6     bool
+	cancel context.CancelCauseFunc
+}
 
 // A tombstone prevents an old published binding from acquiring a socket after
 // the route writer retires its slot. Dials never wait for netlink or fsync.
 type lineLease struct {
 	users    atomic.Int64
 	closedAt atomic.Pointer[time.Time]
+	dialMu   sync.Mutex
+	nextDial uint64
+	dials    map[uint64]inflightDial
 }
 
 const lineSlotQuiet = 60 * time.Second
@@ -40,6 +53,79 @@ func (l *lineLease) release() {
 	}
 }
 func (l *lineLease) retire() bool { return l == nil || l.users.CompareAndSwap(0, -1) }
+
+func (l *lineLease) watchDial(state lineState, v6 bool, cancel context.CancelCauseFunc) func() {
+	if l == nil {
+		return func() {}
+	}
+	l.dialMu.Lock()
+	l.nextDial++
+	id := l.nextDial
+	if l.dials == nil {
+		l.dials = make(map[uint64]inflightDial)
+	}
+	l.dials[id] = inflightDial{index: state.Index, mark: state.Mark, v6: v6, cancel: cancel}
+	l.dialMu.Unlock()
+	return func() {
+		l.dialMu.Lock()
+		delete(l.dials, id)
+		l.dialMu.Unlock()
+	}
+}
+
+func (l *lineLease) inFlightDials() int {
+	if l == nil {
+		return 0
+	}
+	l.dialMu.Lock()
+	defer l.dialMu.Unlock()
+	return len(l.dials)
+}
+
+func (l *lineLease) syncDials(state lineState) {
+	if l == nil {
+		return
+	}
+	usable := state.Up && state.Unavailable == ""
+	var cancels []func()
+	l.dialMu.Lock()
+	for id, d := range l.dials {
+		var cause error
+		switch {
+		case state.Unavailable != "":
+			cause = fmt.Errorf("line %s unavailable: %s", state.ID, state.Unavailable)
+		case !usable || (!d.v6 && !state.Default4) || (d.v6 && !state.Default6):
+			cause = fmt.Errorf("line %s has no usable default route", state.ID)
+		case d.index != state.Index || d.mark != state.Mark:
+			cause = fmt.Errorf("line %s binding changed during dial", state.ID)
+		}
+		if cause != nil {
+			c := d.cancel
+			cancels = append(cancels, func() { c(cause) })
+			delete(l.dials, id)
+		}
+	}
+	l.dialMu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (l *lineLease) abortAllDials(cause error) {
+	if l == nil {
+		return
+	}
+	var cancels []context.CancelCauseFunc
+	l.dialMu.Lock()
+	for id, d := range l.dials {
+		cancels = append(cancels, d.cancel)
+		delete(l.dials, id)
+	}
+	l.dialMu.Unlock()
+	for _, cancel := range cancels {
+		cancel(cause)
+	}
+}
 
 func (p *Platform) SetLineUse(used func(string) bool) { p.lineUsed = used }
 

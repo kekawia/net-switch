@@ -116,3 +116,45 @@ func TestProbeUnavailableClassifiesOnlyLocalResources(t *testing.T) {
 		}
 	}
 }
+
+func TestLineLeaseAbortsInFlightDialsOnRouteOrIndexChange(t *testing.T) {
+	lease := &lineLease{}
+	state := lineState{ID: "a", Index: 7, Mark: 0x4e530001, Up: true, Default4: true, Default6: true, lease: lease}
+	p := &Platform{lines: map[string]lineState{"a": state}}
+	p.publishBindings()
+
+	ctx4, cancel4 := context.WithCancelCause(context.Background())
+	stop4 := lease.watchDial(state, false, cancel4)
+	defer stop4()
+	ctx6, cancel6 := context.WithCancelCause(context.Background())
+	stop6 := lease.watchDial(state, true, cancel6)
+	defer stop6()
+
+	// Dropping Default4 aborts only the IPv4 dial and leaves IPv6 intact.
+	state.Default4 = false
+	p.lines["a"] = state
+	p.publishBindings()
+	if err := context.Cause(ctx4); err == nil || err.Error() != "line a has no usable default route" {
+		t.Fatalf("IPv4 dial was not aborted on Default4 loss: %v", err)
+	}
+	if err := context.Cause(ctx6); err != nil {
+		t.Fatalf("IPv6 dial was unexpectedly aborted when Default6 stayed up: %v", err)
+	}
+
+	// Changing interface index aborts remaining dials bound to the old index.
+	state.Index = 9
+	p.lines["a"] = state
+	p.publishBindings()
+	if err := context.Cause(ctx6); err == nil || err.Error() != "line a binding changed during dial" {
+		t.Fatalf("IPv6 dial was not aborted on interface index change: %v", err)
+	}
+
+	// Clearing bindings aborts any newly registered dial.
+	ctxClear, cancelClear := context.WithCancelCause(context.Background())
+	stopClear := lease.watchDial(state, false, cancelClear)
+	defer stopClear()
+	p.clearBindings()
+	if err := context.Cause(ctxClear); err == nil || err.Error() != "line bindings are unavailable" {
+		t.Fatalf("dial was not aborted on clearBindings: %v", err)
+	}
+}

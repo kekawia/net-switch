@@ -146,6 +146,25 @@ func TestDescriptorTraceStampsOnlySlowAndRunningReads(t *testing.T) {
 	if len(s.Reads.stamps) != 3 {
 		t.Fatal("a later read changed an earlier snapshot")
 	}
+
+	// Reproduce a CLOCK_REALTIME step during a slow read (job 123946767350):
+	// monotonic duration reached 231 µs while wall-clock samples stepped back,
+	// and a backward non-monotonic wall delta must never subtract from totals.
+	skew := &descriptorBatch{queued: time.Unix(0, 1_793_345_623_276_000_000), deadline: time.Now().Add(time.Second)}
+	const slowWallStart = int64(1_793_345_623_276_645_057)
+	skew.trace.finishSample(7, slowWallStart, 231*time.Microsecond)
+	skew.trace.finish(8, time.Unix(0, slowWallStart+500_000), time.Unix(0, slowWallStart+100_000))
+	skewSnap := (&descriptorFailure{job: skew, outcome: "deadline"}).snapshot()
+	if len(skewSnap.Reads.stamps) != 1 {
+		t.Fatalf("expected only the monotonic slow read to be stamped, got %+v", skewSnap.Reads.stamps)
+	}
+	gotSkew := skewSnap.Reads.stamps[0]
+	if gotSkew.FD != 7 || gotSkew.StartedNS != slowWallStart || gotSkew.FinishedNS-gotSkew.StartedNS != int64(231*time.Microsecond) {
+		t.Fatalf("slow read span corrupted by wall clock skew: %+v", gotSkew)
+	}
+	if skewSnap.DescriptorReads != 2 || skewSnap.DescriptorReadNS != int64(231*time.Microsecond) {
+		t.Fatalf("unexpected skew counters: reads=%d ns=%d", skewSnap.DescriptorReads, skewSnap.DescriptorReadNS)
+	}
 }
 
 func TestDescriptorTraceAndFailureHistoryAreBounded(t *testing.T) {

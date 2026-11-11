@@ -708,22 +708,7 @@ func TestWintunRecoveryAndCancellation(t *testing.T) {
 		before := s.Stats().Recoveries
 		s.mu.Lock()
 		r := s.rings
-		head := r.head
-		binary.LittleEndian.PutUint32(r.send.data()[head:], MaxPacketSize+1)
-		switch kind {
-		case "size":
-			r.send.store(4, (head+8)&(r.send.capacity-1))
-		case "tail":
-			r.send.store(4, r.send.capacity)
-		case "alignment":
-			r.send.store(4, head+1)
-		case "body":
-			p := testPacket()
-			p[8] ^= 1 // Real nonzero damage: invalidate the IPv4 header checksum.
-			binary.LittleEndian.PutUint32(r.send.data()[head:], uint32(len(p)))
-			copy(r.send.data()[head+4:], p)
-			r.send.store(4, (head+aligned(uint32(len(p))+4))&(r.send.capacity-1))
-		}
+		injectSendFault(r, kind)
 		windows.SetEvent(r.readEvent)
 		s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -856,6 +841,12 @@ func warmRuntimeThreads() {
 	}
 	close(release)
 	warm.Wait()
+	// semacreate opens each M's two Event handles lazily on first notesleep:
+	// park the caller's own M, let templateThread reach notesleep, and leave all
+	// Ps idle past sysmon's 10 ms poll cap so sysmon enters notetsleep too.
+	runtime.LockOSThread()
+	time.Sleep(15 * time.Millisecond)
+	runtime.UnlockOSThread()
 }
 
 func TestWintunLifetime(t *testing.T) {
@@ -936,7 +927,7 @@ func TestWintunAdapterRemoval(t *testing.T) {
 	if err := RecoverAfterCrash(owner.config); err == nil {
 		t.Fatal("crash cleanup accepted a live adapter")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	var reads, writes atomic.Uint64
@@ -966,26 +957,41 @@ func TestWintunAdapterRemoval(t *testing.T) {
 	}()
 	c := udpSocket(t)
 	defer c.Close()
+	warmDeadline := time.Now().Add(5 * time.Second)
 	for reads.Load() < 10 || writes.Load() < 10 {
-		if ctx.Err() != nil {
+		if time.Now().After(warmDeadline) {
+			cancel()
 			t.Fatal("reader/writer did not become busy")
 		}
 		c.Write([]byte("removal traffic"))
 		time.Sleep(time.Millisecond)
 	}
 	// Real PnP removal while both directions are active, including write-side
-	// observation of Receive.Head before the final Send.Tail marker.
+	// observation of Receive.Head before the final Send.Tail marker. Keep ctx
+	// alive across owner.Close so WriteBatch observes ErrAdapterRemoved rather
+	// than a pre-removal warm-up deadline expiring mid-teardown under -race.
 	must(t, owner.Close())
+	removalBound := registrarStopTimeout + registrarKillTimeout
+	removalWait := time.NewTimer(removalBound)
+	defer removalWait.Stop()
 	select {
 	case err := <-done:
 		if !errors.Is(err, ErrAdapterRemoved) {
+			cancel()
 			t.Fatalf("removal did not wake reader: %v", err)
 		}
-	case <-ctx.Done():
+	case <-removalWait.C:
+		cancel()
 		t.Fatal("adapter removal left a blocked reader")
 	}
-	if err := <-writerDone; !errors.Is(err, ErrAdapterRemoved) {
-		t.Fatalf("writer removal: %v", err)
+	select {
+	case err := <-writerDone:
+		if !errors.Is(err, ErrAdapterRemoved) {
+			t.Fatalf("writer removal: %v", err)
+		}
+	case <-removalWait.C:
+		cancel()
+		t.Fatalf("writer removal timed out after %s", removalBound)
 	}
 	must(t, s.Close())
 	runtime.GC()
@@ -1088,10 +1094,44 @@ func TestWintunCrashCleanupChild(t *testing.T) {
 }
 
 func injectRecoveryFault(r *rings) {
-	// Send.Head belongs to the reader. Unlike packet bytes and Send.Tail, the
-	// driver cannot overwrite it with discovery traffic after a reconnect.
-	// The normal ReadBatch corruption check must detect it and request recovery.
+	// Send.Head belongs to the reader. Unlike packet bytes at Send.Tail and
+	// Send.Tail itself, the driver cannot overwrite it with discovery traffic
+	// after a reconnect.
 	r.send.store(0, r.send.capacity)
+}
+
+// injectSendFault stages a deterministic Send-ring fault behind the driver's
+// private RingTail without writing Send.Tail. Wintun 0.14.1 keeps its own
+// Ctx->Device.Send.RingTail in kernel memory and overwrites data[RingTail:]
+// and Ring->Tail whenever Windows emits discovery packets after a reconnect.
+func injectSendFault(r *rings, kind string) {
+	tail := r.send.load(4)
+	mask := r.send.capacity - 1
+	switch kind {
+	case "size":
+		inject := (tail - 64) & mask
+		r.head = inject
+		r.send.store(0, inject)
+		binary.LittleEndian.PutUint32(r.send.data()[inject:], MaxPacketSize+1)
+	case "tail":
+		r.head = r.send.capacity
+		r.send.store(0, r.send.capacity)
+	case "alignment":
+		inject := ((tail - 64) & mask) | 1
+		r.head = inject
+		r.send.store(0, inject)
+	case "body":
+		p := testPacket()
+		p[8] ^= 1 // Real nonzero damage: invalidate the IPv4 header checksum.
+		entryLen := aligned(uint32(len(p)) + 4)
+		inject := (tail - entryLen) & mask
+		r.head = inject
+		r.send.store(0, inject)
+		binary.LittleEndian.PutUint32(r.send.data()[inject:], uint32(len(p)))
+		copy(r.send.data()[inject+4:], p)
+	default:
+		panic("unknown send fault kind: " + kind)
+	}
 }
 
 func TestWintunRecoveryLeak(t *testing.T) {

@@ -181,6 +181,9 @@ func NativeChildCommand(args []string) error {
 	if disconnected.Load() && !requested.Load() {
 		err = errors.Join(err, errors.New("supervisor channel lost"))
 	}
+	flushLogs, cancelFlushLogs := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	childLogs.Flush(flushLogs)
+	cancelFlushLogs()
 	end, cancelEnd := context.WithTimeout(context.Background(), time.Second)
 	defer cancelEnd()
 	message := supervisor.Message{Kind: "complete", Code: service.ExitCode(err), PID: uint32(os.Getpid())}
