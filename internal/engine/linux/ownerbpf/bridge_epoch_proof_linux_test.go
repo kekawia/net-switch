@@ -1000,3 +1000,123 @@ func TestBridgeStaleRecordMutation(t *testing.T) {
 		})
 	}
 }
+
+func TestBridgeSingleReaderPostDrainAndForeignConsume(t *testing.T) {
+	if runtime.NumCPU() < 2 {
+		t.Fatal("two CPUs required for nested-free positive control")
+	}
+	f := newBridgeFixture(t, true, unix.IFF_VNET_HDR)
+	s1, _ := bridgeSocket(t, 0)
+	s2, _ := bridgeSocket(t, 0)
+
+	// Drain a captured pre-arm frame with raw unix.Read (matching EnableProvenance ->
+	// tun.DrainNonblock) and verify its packet-map entry retired cleanly.
+	_ = bridgeSend(t, s1, []byte("pre-drain"))
+	scratch := make([]byte, 2048)
+	if _, err := unix.Read(f.fd, scratch); err != nil {
+		t.Fatalf("unarmed pre-drain read: %v", err)
+	}
+	var staleKey uint64
+	var stalePacket PacketRecord
+	it := f.b.Collection.Maps["packets"].Iterate()
+	if it.Next(&staleKey, &stalePacket) || it.Err() != nil {
+		t.Fatalf("packet map not empty after unarmed pre-drain read: key=%x err=%v", staleKey, it.Err())
+	}
+
+	if err := f.b.ConfirmSingleReaderPostDrain(); err != nil {
+		t.Fatalf("ConfirmSingleReaderPostDrain: %v", err)
+	}
+
+	// Post-drain ReadBurstInto attributes distinct sockets cleanly.
+	c1 := bridgeSend(t, s1, []byte("post-drain-1"))
+	c2 := bridgeSend(t, s2, []byte("post-drain-2"))
+	rawBufs := [][]byte{make([]byte, 2048), make([]byte, 2048)}
+	sizes := make([]int, 2)
+	decisions := make([]ReadDecision, 2)
+	gotCount, err := f.r.ReadBurstInto(f.fd, rawBufs, sizes, decisions)
+	if err != nil || gotCount != 2 {
+		t.Fatalf("post-drain ReadBurstInto: count=%d err=%v", gotCount, err)
+	}
+	if decisions[0].Status != ReadCookie || decisions[0].Packet.Cookie != c1 ||
+		decisions[1].Status != ReadCookie || decisions[1].Packet.Cookie != c2 {
+		t.Fatalf("post-drain ReadBurstInto decisions = %+v, want cookies %d and %d", decisions, c1, c2)
+	}
+
+	beforeSample, err := f.b.Sample()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Linux 5.8 predates per-program recursion_misses (beforeSample[2].Present == false,
+	// already covered by TestBridgeNestedFreeSkip), and reloading fault_*.o under ARM64
+	// TCG verifies 1.04M BPF instructions (~87s). Exercise kfree_skb recursion_misses
+	// whenever supported (or outside the verified 5.8 floor profile) before testing Mode 1.
+	if beforeSample[2].Present || !verifiedFloor58Profile() {
+		for range 500 {
+			bridgeSend(t, s1, []byte("fill-ring"))
+		}
+		l, err := netlink.LinkByName("nsbridge0")
+		if err != nil || l.Attrs().Statistics == nil {
+			t.Fatal(err)
+		}
+		beforeDrops := l.Attrs().Statistics.TxDropped
+		_, afterSample, _ := triggerNestedFreeHold(t, f, s1, beforeDrops, beforeSample)
+		if f.b.UnknownRecursionFreed.Load() != 1 {
+			t.Fatalf("single-reader post-drain bridge did not record kfree_skb recursion miss: freed=%d delta=%d",
+				f.b.UnknownRecursionFreed.Load(), afterSample[2].Misses-beforeSample[2].Misses)
+		}
+
+		reloadBridgeFixture(t, f, true)
+		if err := f.b.ConfirmSingleReaderPostDrain(); err != nil {
+			t.Fatalf("ConfirmSingleReaderPostDrain after reload: %v", err)
+		}
+	}
+
+	// Verify that capture suppression (Mode 1) fails closed under ReadBurstInto
+	// while ConfirmSingleReaderPostDrain is active.
+	s3, _ := bridgeSocket(t, 0)
+	skipCtl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 1}
+	if err := f.b.Collection.Maps["faults"].Update(uint32(0), skipCtl, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	_ = bridgeSend(t, s3, []byte("capture-skip"))
+	gotSkipCount, skipErr := f.r.ReadBurstInto(f.fd, rawBufs[:1], sizes[:1], decisions[:1])
+	if !errors.Is(skipErr, ErrEpochRebuild) || gotSkipCount != 1 || decisions[0].Status != ReadMissing {
+		t.Fatalf("capture skip under single-reader post-drain: count=%d err=%v decision=%+v", gotSkipCount, skipErr, decisions[0])
+	}
+
+	// Reload once more and verify registering a second reader refuses ConfirmSingleReaderPostDrain.
+	reloadBridgeFixture(t, f)
+	f.b.config.Enabled = 0
+	if err := f.b.Collection.Maps["config"].Update(uint32(0), f.b.config, ebpf.UpdateAny); err != nil {
+		t.Fatal(err)
+	}
+	r2ErrCh := make(chan error, 1)
+	r2Release := make(chan struct{})
+	r2Done := make(chan struct{})
+	go func() {
+		defer close(r2Done)
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		r2, regErr := f.b.Register()
+		r2ErrCh <- regErr
+		if regErr != nil {
+			return
+		}
+		<-r2Release
+		_ = r2.Close()
+	}()
+	if regErr := <-r2ErrCh; regErr != nil {
+		t.Fatalf("second reader Register: %v", regErr)
+	}
+	if err := f.b.Enable(500); err != nil {
+		close(r2Release)
+		<-r2Done
+		t.Fatal(err)
+	}
+	confirmErr := f.b.ConfirmSingleReaderPostDrain()
+	close(r2Release)
+	<-r2Done
+	if confirmErr == nil {
+		t.Fatal("ConfirmSingleReaderPostDrain succeeded with two registered readers")
+	}
+}

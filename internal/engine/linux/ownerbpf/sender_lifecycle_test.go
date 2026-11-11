@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net/netip"
+	"sync/atomic"
 	"syscall"
 	"testing"
 )
@@ -60,9 +61,9 @@ func buildTestIPv6FragmentPacket(withDestOpts bool, nextProto uint8, id uint32, 
 
 	pos := 40
 	if withDestOpts {
-		pkt[6] = 60     // NextHeader = Destination Options
-		pkt[pos] = 44   // NextHeader = Fragment
-		pkt[pos+1] = 0  // (0 + 1) * 8 = 8 bytes
+		pkt[6] = 60    // NextHeader = Destination Options
+		pkt[pos] = 44  // NextHeader = Fragment
+		pkt[pos+1] = 0 // (0 + 1) * 8 = 8 bytes
 		pos += 8
 	} else {
 		pkt[6] = 44 // NextHeader = Fragment
@@ -645,5 +646,139 @@ func TestLazySocketSlotTableGrowthAndO1Metrics(t *testing.T) {
 	assertSlotMetricsMatchScan(t, slots)
 	if sm := slots.Metrics(); sm.ActiveSlots != 0 || sm.LiveSockets != 0 || sm.RetainedSlots != 0 {
 		t.Fatalf("after releasing all envelopes: %+v, want all zero", sm)
+	}
+}
+
+func TestConcurrentActorDrainNeverPublishesBeforeSlotSync(t *testing.T) {
+	dev := EncodeKernelDev(8, 1)
+
+	// 1. Reproduce the pre-fix race: background sweep pops pending actors
+	// (clearing hasPending) before EnrichActor publishes the socket slot; an
+	// unserialized burst reader sees !hasPending and resolves IdentityUnretained.
+	{
+		ledger := NewIdentityLedger(64, 64<<10)
+		slots := NewSocketSlotTable(16)
+		rt := NewProvenanceRuntime(1, ledger, slots)
+		defer rt.Close()
+
+		var pending atomic.Bool
+		pending.Store(true)
+		popped := make(chan struct{})
+		allowPublish := make(chan struct{})
+		doneBg := make(chan struct{})
+
+		key, ev, mat := validFixtureActor(4101, 6100, 910_000, 1, dev, 71_001, "/usr/bin/app-alpha")
+		go func() {
+			defer close(doneBg)
+			if pending.CompareAndSwap(true, false) {
+				close(popped)
+				<-allowPublish
+				rt.EnrichActor(key, ev, mat)
+			}
+		}()
+
+		<-popped
+		if pending.Load() {
+			t.Fatal("expected pending flag cleared after queue pop")
+		}
+		preFixEnv := ledger.ResolvePacketEnvelope(ReadDecision{
+			Status: ReadCookie,
+			Packet: PacketRecord{Cookie: 4101, Serial: 1},
+		})
+		if preFixEnv.Identity.Status != IdentityUnknown || preFixEnv.Identity.Reason != ReasonIdentityUnretained {
+			t.Fatalf("unserialized window unexpectedly resolved %+v, want unknown_identity/identity_unretained", preFixEnv.Identity)
+		}
+		ledger.ReleaseEnvelope(&preFixEnv)
+		close(allowPublish)
+		<-doneBg
+	}
+
+	// 2. Prove ActorSyncGate closes the window: a concurrent reader arriving
+	// after hasPending becomes false waits on inFlight until EnrichActor
+	// publishes the socket slot, resolving IdentityKnown.
+	{
+		ledger := NewIdentityLedger(64, 64<<10)
+		slots := NewSocketSlotTable(16)
+		rt := NewProvenanceRuntime(1, ledger, slots)
+		defer rt.Close()
+
+		var gate ActorSyncGate
+		var pending atomic.Bool
+		var poisoned atomic.Bool
+		var poisonCalls atomic.Int32
+		pending.Store(true)
+
+		popped := make(chan struct{})
+		readerEntered := make(chan struct{})
+		readerResolved := make(chan ForwardEnvelope, 1)
+
+		key, ev, mat := validFixtureActor(4102, 6200, 920_000, 1, dev, 72_002, "/usr/bin/app-alpha")
+		go func() {
+			err := gate.Sync(
+				poisoned.Load,
+				func() { poisonCalls.Add(1); rt.PoisonEpoch() },
+				pending.Load,
+				func() error {
+					pending.Store(false)
+					close(popped)
+					<-readerEntered
+					if _, reason := rt.EnrichActor(key, ev, mat); reason != ReasonValidated {
+						return errors.New("enrich failed")
+					}
+					return nil
+				},
+			)
+			if err != nil {
+				t.Errorf("background gate.Sync failed: %v", err)
+			}
+		}()
+
+		<-popped
+		go func() {
+			close(readerEntered)
+			_ = gate.Sync(
+				poisoned.Load,
+				func() { poisonCalls.Add(1); rt.PoisonEpoch() },
+				pending.Load,
+				func() error {
+					t.Error("second caller should not re-drain after pending cleared")
+					return nil
+				},
+			)
+			env := ledger.ResolvePacketEnvelope(ReadDecision{
+				Status: ReadCookie,
+				Packet: PacketRecord{Cookie: 4102, Serial: 2},
+			})
+			readerResolved <- env
+		}()
+
+		env := <-readerResolved
+		if env.Identity.Status != IdentityKnown || env.Identity.Snapshot == nil || env.Identity.Snapshot.AppID != "/usr/bin/app-alpha" {
+			t.Fatalf("gated reader resolved %+v, want known /usr/bin/app-alpha", env.Identity)
+		}
+		ledger.ReleaseEnvelope(&env)
+
+		// Lock-free fast path when idle and unpoisoned.
+		called := false
+		if err := gate.Sync(poisoned.Load, func() { poisonCalls.Add(1) }, pending.Load, func() error { called = true; return nil }); err != nil || called {
+			t.Fatalf("idle fast path: err=%v called=%v", err, called)
+		}
+
+		// Drain error propagation and poison propagation.
+		pending.Store(true)
+		wantErr := errors.New("actor queue pop failed")
+		gotErr := gate.Sync(
+			poisoned.Load,
+			func() { poisonCalls.Add(1); rt.PoisonEpoch() },
+			pending.Load,
+			func() error {
+				pending.Store(false)
+				poisoned.Store(true)
+				return wantErr
+			},
+		)
+		if !errors.Is(gotErr, wantErr) || poisonCalls.Load() == 0 || !rt.IsEpochPoisoned() {
+			t.Fatalf("error/poison propagation: err=%v poisonCalls=%d epochPoisoned=%v", gotErr, poisonCalls.Load(), rt.IsEpochPoisoned())
+		}
 	}
 }

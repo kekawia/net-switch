@@ -54,19 +54,19 @@ func (s *ebpfBridgeBurstSource) RebuildEpoch(
 }
 
 type ebpfOwnerStats struct {
-	Epoch                        uint64                     `json:"epoch"`
-	EpochPoisoned                bool                       `json:"epochPoisoned"`
-	EpochRebuilds                uint64                     `json:"epochRebuilds"`
-	EpochRebuildDrained          uint64                     `json:"epochRebuildDrained"`
-	EpochRebuildNanos            uint64                     `json:"epochRebuildNanos"`
-	ProbePoisoned                bool                       `json:"probePoisoned"`
-	NoIOUringActive              bool                       `json:"noIOUringActive"`
-	BPFMapBytes                  uint64                     `json:"bpfMapBytes"`
-	BPFMapCount                  int                        `json:"bpfMapCount"`
-	BPFMapMeasured               bool                       `json:"bpfMapMeasured"`
-	Ledger                       ownerbpf.LedgerMetrics     `json:"ledger"`
-	SocketSlots                  ownerbpf.SocketSlotMetrics `json:"socketSlots"`
-	Classifier                   ownerbpf.ClassifierMetrics `json:"classifier"`
+	Epoch                         uint64                     `json:"epoch"`
+	EpochPoisoned                 bool                       `json:"epochPoisoned"`
+	EpochRebuilds                 uint64                     `json:"epochRebuilds"`
+	EpochRebuildDrained           uint64                     `json:"epochRebuildDrained"`
+	EpochRebuildNanos             uint64                     `json:"epochRebuildNanos"`
+	ProbePoisoned                 bool                       `json:"probePoisoned"`
+	NoIOUringActive               bool                       `json:"noIOUringActive"`
+	BPFMapBytes                   uint64                     `json:"bpfMapBytes"`
+	BPFMapCount                   int                        `json:"bpfMapCount"`
+	BPFMapMeasured                bool                       `json:"bpfMapMeasured"`
+	Ledger                        ownerbpf.LedgerMetrics     `json:"ledger"`
+	SocketSlots                   ownerbpf.SocketSlotMetrics `json:"socketSlots"`
+	Classifier                    ownerbpf.ClassifierMetrics `json:"classifier"`
 	BridgeDeliveredWithoutRecord  uint64                     `json:"bridgeDeliveredWithoutRecord"`
 	BridgeReadUnknown             uint64                     `json:"bridgeReadUnknown"`
 	BridgeUnknownRecursion        uint64                     `json:"bridgeUnknownRecursion"`
@@ -74,21 +74,21 @@ type ebpfOwnerStats struct {
 	BridgeUnknownRecursionConsume uint64                     `json:"bridgeUnknownRecursionConsume"`
 	BridgeUnknownRecursionFreed   uint64                     `json:"bridgeUnknownRecursionFreed"`
 	BridgeFaults                  uint64                     `json:"bridgeFaults"`
-	TCPKnown                     uint64                     `json:"tcpKnown"`
-	TCPUnknownIdentity           uint64                     `json:"tcpUnknownIdentity"`
-	TCPConflicting               uint64                     `json:"tcpConflicting"`
-	TCPMissingCookie             uint64                     `json:"tcpMissingCookie"`
-	TCPKernelControl             uint64                     `json:"tcpKernelControl"`
-	UDPKnown                     uint64                     `json:"udpKnown"`
-	UDPUnknownIdentity           uint64                     `json:"udpUnknownIdentity"`
-	UDPConflicting               uint64                     `json:"udpConflicting"`
-	UDPMissingCookie             uint64                     `json:"udpMissingCookie"`
-	UDPKernelControl             uint64                     `json:"udpKernelControl"`
-	UDPDatagramDrops             uint64                     `json:"udpDatagramDrops"`
-	UDPDatagramInvalidations     uint64                     `json:"udpDatagramInvalidations"`
-	RetiredCookies               uint64                     `json:"retiredCookies"`
-	ReconciledDeadCookies        uint64                     `json:"reconciledDeadCookies"`
-	ActorDrainErrors             uint64                     `json:"actorDrainErrors"`
+	TCPKnown                      uint64                     `json:"tcpKnown"`
+	TCPUnknownIdentity            uint64                     `json:"tcpUnknownIdentity"`
+	TCPConflicting                uint64                     `json:"tcpConflicting"`
+	TCPMissingCookie              uint64                     `json:"tcpMissingCookie"`
+	TCPKernelControl              uint64                     `json:"tcpKernelControl"`
+	UDPKnown                      uint64                     `json:"udpKnown"`
+	UDPUnknownIdentity            uint64                     `json:"udpUnknownIdentity"`
+	UDPConflicting                uint64                     `json:"udpConflicting"`
+	UDPMissingCookie              uint64                     `json:"udpMissingCookie"`
+	UDPKernelControl              uint64                     `json:"udpKernelControl"`
+	UDPDatagramDrops              uint64                     `json:"udpDatagramDrops"`
+	UDPDatagramInvalidations      uint64                     `json:"udpDatagramInvalidations"`
+	RetiredCookies                uint64                     `json:"retiredCookies"`
+	ReconciledDeadCookies         uint64                     `json:"reconciledDeadCookies"`
+	ActorDrainErrors              uint64                     `json:"actorDrainErrors"`
 }
 
 type ebpfOwnerState struct {
@@ -110,6 +110,7 @@ type ebpfOwnerState struct {
 	retireMu                  sync.Mutex
 	pendingRetire             map[uint64]time.Time
 	lastPressureReconcileNano atomic.Int64
+	actorSync                 ownerbpf.ActorSyncGate
 
 	bridgeDeliveredBase               atomic.Uint64
 	bridgeReadUnknownBase             atomic.Uint64
@@ -195,21 +196,21 @@ func (o *Owners) ebpfStats() *ebpfOwnerStats {
 		BridgeUnknownRecursionConsume: unknownRecConsume,
 		BridgeUnknownRecursionFreed:   unknownRecFreed,
 		BridgeFaults:                  faults,
-		TCPKnown:                     o.ebpf.tcpKnown.Load(),
-		TCPUnknownIdentity:           o.ebpf.tcpUnknownIdentity.Load(),
-		TCPConflicting:               o.ebpf.tcpConflicting.Load(),
-		TCPMissingCookie:             o.ebpf.tcpMissingCookie.Load(),
-		TCPKernelControl:             o.ebpf.tcpKernelControl.Load(),
-		UDPKnown:                     o.ebpf.udpKnown.Load(),
-		UDPUnknownIdentity:           o.ebpf.udpUnknownIdentity.Load(),
-		UDPConflicting:               o.ebpf.udpConflicting.Load(),
-		UDPMissingCookie:             o.ebpf.udpMissingCookie.Load(),
-		UDPKernelControl:             o.ebpf.udpKernelControl.Load(),
-		UDPDatagramDrops:             o.ebpf.udpDatagramDrops.Load(),
-		UDPDatagramInvalidations:     o.ebpf.udpDatagramInvalidations.Load(),
-		RetiredCookies:               o.ebpf.retiredCookies.Load(),
-		ReconciledDeadCookies:        o.ebpf.reconciledDeadCookies.Load(),
-		ActorDrainErrors:             o.ebpf.actorDrainErrors.Load(),
+		TCPKnown:                      o.ebpf.tcpKnown.Load(),
+		TCPUnknownIdentity:            o.ebpf.tcpUnknownIdentity.Load(),
+		TCPConflicting:                o.ebpf.tcpConflicting.Load(),
+		TCPMissingCookie:              o.ebpf.tcpMissingCookie.Load(),
+		TCPKernelControl:              o.ebpf.tcpKernelControl.Load(),
+		UDPKnown:                      o.ebpf.udpKnown.Load(),
+		UDPUnknownIdentity:            o.ebpf.udpUnknownIdentity.Load(),
+		UDPConflicting:                o.ebpf.udpConflicting.Load(),
+		UDPMissingCookie:              o.ebpf.udpMissingCookie.Load(),
+		UDPKernelControl:              o.ebpf.udpKernelControl.Load(),
+		UDPDatagramDrops:              o.ebpf.udpDatagramDrops.Load(),
+		UDPDatagramInvalidations:      o.ebpf.udpDatagramInvalidations.Load(),
+		RetiredCookies:                o.ebpf.retiredCookies.Load(),
+		ReconciledDeadCookies:         o.ebpf.reconciledDeadCookies.Load(),
+		ActorDrainErrors:              o.ebpf.actorDrainErrors.Load(),
 	}
 	if rt != nil {
 		out.Epoch = rt.Epoch()
@@ -447,6 +448,11 @@ func (o *Owners) rebuildProvenanceEpoch(
 				return fmt.Errorf("drain uncertified TUN frames during epoch rebuild: %w", err)
 			}
 		}
+		if err := newBridge.ConfirmSingleReaderPostDrain(); err != nil {
+			_ = newBridge.Stop()
+			o.requestProvenanceBridgeMaintenance()
+			return fmt.Errorf("confirm rebuilt eBPF provenance bridge post-drain: %w", err)
+		}
 		o.ebpf.epochRebuilds.Add(1)
 		o.ebpf.epochRebuildNanos.Add(uint64(max(time.Since(rebuildStarted), 0)))
 		// Defer oldBridge RCU tracepoint detach and next standby preload until
@@ -476,6 +482,11 @@ func (o *Owners) EnableProvenance() error {
 		_ = bridge.Stop()
 		_ = probe.Disable()
 		return fmt.Errorf("drain pre-enable TUN frames: %w", err)
+	}
+	if err := bridge.ConfirmSingleReaderPostDrain(); err != nil {
+		_ = bridge.Stop()
+		_ = probe.Disable()
+		return fmt.Errorf("confirm eBPF provenance bridge post-drain: %w", err)
 	}
 	o.startProvenanceMaintenance()
 	return nil
@@ -564,29 +575,28 @@ func (o *Owners) drainPendingActors(rt *ownerbpf.ProvenanceRuntime, probe *owner
 	if rt == nil || probe == nil {
 		return
 	}
-	if probe.IsPoisoned() {
-		rt.PoisonEpoch()
-	}
-	if !probe.HasPendingNewActors() {
-		return
-	}
-	events, err := probe.DrainNewActors(nil)
-	if err != nil {
-		o.ebpf.actorDrainErrors.Add(1)
-	}
-	if len(events) > 0 {
-		rt.SyncQueuedActorsWithOptions(events, probe.NoIOUringActive())
-		if rt.TrackedCookieCount() >= ownerbpf.DefaultEngineMaxSocketSlots/4 {
-			nowNano := time.Now().UnixNano()
-			last := o.ebpf.lastPressureReconcileNano.Load()
-			if nowNano-last >= int64(250*time.Millisecond) && o.ebpf.lastPressureReconcileNano.CompareAndSwap(last, nowNano) {
-				o.requestProvenanceReconcile()
+	_ = o.ebpf.actorSync.Sync(
+		probe.IsPoisoned,
+		rt.PoisonEpoch,
+		probe.HasPendingNewActors,
+		func() error {
+			events, err := probe.DrainNewActors(nil)
+			if err != nil {
+				o.ebpf.actorDrainErrors.Add(1)
 			}
-		}
-	}
-	if probe.IsPoisoned() {
-		rt.PoisonEpoch()
-	}
+			if len(events) > 0 {
+				rt.SyncQueuedActorsWithOptions(events, probe.NoIOUringActive())
+				if rt.TrackedCookieCount() >= ownerbpf.DefaultEngineMaxSocketSlots/4 {
+					nowNano := time.Now().UnixNano()
+					last := o.ebpf.lastPressureReconcileNano.Load()
+					if nowNano-last >= int64(250*time.Millisecond) && o.ebpf.lastPressureReconcileNano.CompareAndSwap(last, nowNano) {
+						o.requestProvenanceReconcile()
+					}
+				}
+			}
+			return err
+		},
+	)
 }
 
 // needsPacketProvenanceEnvelope reports whether gVisor can ever consult

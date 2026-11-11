@@ -123,3 +123,77 @@ func TestFloor58BurstGuard(t *testing.T) {
 		t.Fatal("program replacement accepted or poison cleared on v5.8 floor guard")
 	}
 }
+
+func TestBurstSingleReaderArmedConsumeAndPostDrainRebase(t *testing.T) {
+	before := counters()
+	before[1].Misses = 4
+
+	// Unarmed/multi-reader Certify still rejects any consume miss.
+	strictGuard, err := NewBurstGuard(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreignConsume := before
+	foreignConsume[1].Misses = 7
+	if strictGuard.Certify(foreignConsume, nil) {
+		t.Fatal("strict Certify accepted consume miss without single-reader armed TerminalConsume proof")
+	}
+
+	// Single-reader armed consume accepts monotonic foreign consume misses when
+	// capture and freed are unchanged, and rebases the baseline for later bursts.
+	g, err := NewBurstGuard(before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !g.CertifySingleReaderConsume(foreignConsume, nil) {
+		t.Fatal("single-reader armed consume rejected foreign consume_skb recursion miss")
+	}
+	if !g.Certify(foreignConsume, nil) {
+		t.Fatal("rebased baseline rejected unchanged counters on next strict check")
+	}
+
+	// Fail-closed cases: capture miss, freed miss, consume decrease, replacement,
+	// missing Present, sampleErr, and v5.8 floor profile.
+	for _, tc := range []struct {
+		name   string
+		mutate func(*[3]CounterSample) error
+	}{
+		{"capture_miss", func(s *[3]CounterSample) error { s[0].Misses++; return nil }},
+		{"freed_miss", func(s *[3]CounterSample) error { s[2].Misses++; return nil }},
+		{"consume_decrease", func(s *[3]CounterSample) error { s[1].Misses--; return nil }},
+		{"consume_replacement", func(s *[3]CounterSample) error { s[1].ProgramID = 77; return nil }},
+		{"consume_not_present", func(s *[3]CounterSample) error { s[1].Present = false; return nil }},
+		{"sample_error", func(s *[3]CounterSample) error { return errors.New("bpf_obj_get_info_by_fd failed") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := counters()
+			base[1].Misses = 5
+			guard, err := NewBurstGuard(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after := base
+			sampleErr := tc.mutate(&after)
+			if guard.CertifySingleReaderConsume(after, sampleErr) {
+				t.Fatalf("%s accepted by CertifySingleReaderConsume", tc.name)
+			}
+			if guard.CertifySingleReaderConsume(base, nil) || guard.Certify(base, nil) {
+				t.Fatalf("%s did not permanently poison guard", tc.name)
+			}
+		})
+	}
+
+	floorSamples := [3]CounterSample{{ProgramID: 10}, {ProgramID: 20}, {ProgramID: 30}}
+	fg, err := NewFloor58BurstGuard(floorSamples)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fg.CertifySingleReaderConsume(floorSamples, nil) {
+		t.Fatal("valid v5.8 floor sample rejected by CertifySingleReaderConsume")
+	}
+	floorDirty := floorSamples
+	floorDirty[1].Misses = 1
+	if fg.CertifySingleReaderConsume(floorDirty, nil) {
+		t.Fatal("non-zero consume miss accepted on v5.8 floor guard")
+	}
+}

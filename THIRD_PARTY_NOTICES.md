@@ -39,7 +39,7 @@ in `vendor/github.com/godbus/dbus/v5/LICENSE`.
 - What it does here: `helper\netswitch-helper.exe` is Net Switch's own small
   program (its source is in the repository's `helper` folder) that reads the
   line meters and the connections that go around routing. It is written in Go, so the Go runtime
-  and standard library (Go 1.27.3) and
+  and standard library (Go 1.27.4) and
   [golang.org/x/sys](https://pkg.go.dev/golang.org/x/sys) v0.49.0 are compiled
   into it, unmodified.
 - Copyright 2009 The Go Authors. Both are under the same BSD-style
@@ -71,6 +71,8 @@ TCP timeout recovery until its flight drains, independently of the opt-in hooks.
 `sack_scoreboard.go` so idle connections need no private node free list.
 `third_party/gvisor-tcp-retry-limit.patch` changes `snd.go` so only retransmission
 timeouts count against a connection's retry limit, not fast or RACK resends.
+`third_party/gvisor-tlp-recovery.patch` changes `rack.go` to align RACK tail-loss
+probe scheduling and episode completion with RFC 8985.
 The generator applies the reproducible patches in filename order. License and
 authors are preserved in the generated source and vendor trees. wireguard-go is
 copyright WireGuard LLC and is used unmodified for Linux TUN I/O. cilium/ebpf is
@@ -79,7 +81,7 @@ for Linux eBPF program and map loading. netlink and netns are used unmodified fo
 Linux routing and network namespaces.
 
 <!-- engine-modules:start -->
-Go 1.27.3 runtime and standard library: BSD-3-Clause (the toolchain's LICENSE and PATENTS).
+Go 1.27.4 runtime and standard library: BSD-3-Clause (the toolchain's LICENSE and PATENTS).
 
 - github.com/cilium/ebpf `v0.22.0`, MIT; license: `vendor/github.com/cilium/ebpf/LICENSE`.
 - github.com/godbus/dbus/v5 `v5.2.4`, BSD-2-Clause; license: `vendor/github.com/godbus/dbus/v5/LICENSE`.

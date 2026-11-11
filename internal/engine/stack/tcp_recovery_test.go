@@ -218,3 +218,316 @@ func tcpRecoveryAfterLostWindow(t *testing.T, mode string) {
 		t.Fatalf("needed %d retransmission timeouts to recover one lost window", got)
 	}
 }
+
+func readDataSegments(t *testing.T, p *peer, count, mss int) header.TCP {
+	t.Helper()
+	var last header.TCP
+	for read := 0; read < count; {
+		h := p.read(time.Second)
+		if h == nil {
+			t.Fatalf("expected %d data segments, stopped after %d", count, read)
+		}
+		data := h[h.DataOffset():]
+		if len(data) == 0 {
+			continue
+		}
+		if len(data) != mss {
+			t.Fatalf("segment %d payload len = %d, want %d (%s)", read, len(data), mss, segmentDescription(h))
+		}
+		last = h
+		read++
+	}
+	return last
+}
+
+type ptoClock struct {
+	*faketime.ManualClock
+	watch atomic.Bool
+	armed chan time.Duration
+}
+
+type ptoTimer struct {
+	tcpip.Timer
+	clock *ptoClock
+}
+
+func (c *ptoClock) record(d time.Duration) {
+	if d > 0 && d < 100*time.Millisecond && c.watch.CompareAndSwap(true, false) {
+		c.armed <- d
+	}
+}
+
+func (c *ptoClock) AfterFunc(d time.Duration, f func()) tcpip.Timer {
+	c.record(d)
+	return &ptoTimer{Timer: c.ManualClock.AfterFunc(d, f), clock: c}
+}
+
+func (t *ptoTimer) Reset(d time.Duration) {
+	t.clock.record(d)
+	t.Timer.Reset(d)
+}
+
+func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
+	t.Run("sub_ms_jitter_does_not_probe", func(t *testing.T) {
+		clock := &ptoClock{ManualClock: faketime.NewManualClock(), armed: make(chan time.Duration, 1)}
+		options := ns.DefaultOptions()
+		options.Clock = clock
+		options.ClockResolution = 0
+		p := newPeerOptions(t, true, flows.Defaults(), options)
+		p.fixedSendBuffer = 256 << 10
+		p.openWith(1000, func(b []byte) {
+			p.inject(tcpWithOptions(b, []byte{2, 4, 5, 180, 4, 2, 1, 1}))
+		})
+		p.upload([]byte("download"))
+		ep := p.endpoint()
+		var initial tcpip.TCPInfoOption
+		if err := ep.GetSockOpt(&initial); err != nil || initial.SndMss == 0 {
+			t.Fatalf("negotiated TCP MSS: %+v, %v", initial, err)
+		}
+		mss := int(initial.SndMss)
+
+		// Establish the 1 ms floor SRTT typical of an in-host Linux TUN leg.
+		warm := make([]byte, mss)
+		if _, err := p.current.conn.Write(warm); err != nil {
+			t.Fatal(err)
+		}
+		readDataSegments(t, p, 1, mss)
+		clock.Advance(500 * time.Microsecond)
+		p.ack += uint32(mss)
+		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+		awaitSendBuffer(t, ep, 0)
+
+		// Fill a multi-segment flight and verify the armed PTO includes the
+		// minimum timer margin (>= 4 ms at 1 ms SRTT, not bare 2*SRTT = 2 ms)
+		// so a 2-3 ms GOMEMLIMIT GC assist pause on the TUN reader cannot fire
+		// a spurious TLP probe.
+		clock.watch.Store(true)
+		const flightSegs = 6
+		if _, err := p.current.conn.Write(make([]byte, mss*flightSegs)); err != nil {
+			t.Fatal(err)
+		}
+		readDataSegments(t, p, flightSegs, mss)
+		var pto time.Duration
+		select {
+		case pto = <-clock.armed:
+		case <-time.After(time.Second):
+			t.Fatal("multi-segment flight did not arm PTO timer")
+		}
+		if pto < 4*time.Millisecond {
+			t.Fatalf("multi-segment PTO on 1 ms SRTT = %v, want >= 4ms", pto)
+		}
+	})
+
+	for _, mode := range []string{"dsack", "pure_dupack"} {
+		t.Run("spurious_probe_"+mode, func(t *testing.T) {
+			clock := faketime.NewManualClock()
+			options := ns.DefaultOptions()
+			options.Clock = clock
+			options.ClockResolution = 0
+			p := newPeerOptions(t, true, flows.Defaults(), options)
+			p.fixedSendBuffer = 256 << 10
+			p.openWith(1000, func(b []byte) {
+				p.inject(tcpWithOptions(b, []byte{2, 4, 5, 180, 4, 2, 1, 1}))
+			})
+			p.upload([]byte("download"))
+			ep := p.endpoint()
+			var initial tcpip.TCPInfoOption
+			if err := ep.GetSockOpt(&initial); err != nil || initial.SndMss == 0 {
+				t.Fatalf("negotiated TCP MSS: %+v, %v", initial, err)
+			}
+			mss := int(initial.SndMss)
+
+			// Seed a 1 ms SRTT and wait for ACK processing to finish.
+			if _, err := p.current.conn.Write(make([]byte, mss)); err != nil {
+				t.Fatal(err)
+			}
+			readDataSegments(t, p, 1, mss)
+			clock.Advance(time.Millisecond)
+			p.ts++
+			p.ack += uint32(mss)
+			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+			awaitSendBuffer(t, ep, 0)
+
+			var beforeInfo tcpip.TCPInfoOption
+			if err := ep.GetSockOpt(&beforeInfo); err != nil {
+				t.Fatal(err)
+			}
+			flightSegs := int(beforeInfo.SndCwnd)
+			written := make(chan error, 1)
+			go func() {
+				_, err := p.current.conn.Write(make([]byte, mss*(flightSegs+2)))
+				written <- err
+			}()
+			awaitSendBuffer(t, ep, mss*(flightSegs+2))
+			if err := <-written; err != nil {
+				t.Fatal(err)
+			}
+			readDataSegments(t, p, flightSegs, mss)
+			flightEnd := p.ack + uint32(flightSegs*mss)
+			tailStart := flightEnd - uint32(mss)
+
+			// Delay reading the peer's cumulative ACK past PTO so a spurious TLP
+			// retransmission of [tailStart, flightEnd) is sent while the original
+			// cumulative ACK is already queued in TUN.
+			clock.Advance(6 * time.Millisecond)
+			probe := readDataSegments(t, p, 1, mss)
+			if probe.SequenceNumber() != tailStart {
+				t.Fatalf("expected TLP retransmission of [%d, %d), got %s", tailStart, flightEnd, segmentDescription(probe))
+			}
+
+			// 1. First read from TUN: peer's original cumulative ACK (predates the probe, so no DSACK).
+			p.ts += 6
+			p.ack = flightEnd
+			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+			awaitSendBuffer(t, ep, 2*mss)
+			// Drain the two newly unsent segments unlocked by the cumulative ACK.
+			readDataSegments(t, p, 2, mss)
+
+			// 2. Second read from TUN: peer receives the duplicate TLP probe and replies
+			// with either a DSACK [tailStart, flightEnd) or a pure duplicate ACK.
+			clock.Advance(500 * time.Microsecond)
+			if mode == "dsack" {
+				dsack := []byte{1, 1, 5, 10, 0, 0, 0, 0, 0, 0, 0, 0}
+				binary.BigEndian.PutUint32(dsack[4:8], tailStart)
+				binary.BigEndian.PutUint32(dsack[8:12], flightEnd)
+				p.inject(tcpWithOptions(p.packet(p.seq, p.ack, header.TCPFlagAck, nil), dsack))
+			} else {
+				p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+			}
+
+			// 3. Peer cumulatively ACKs the next two segments beyond flightEnd.
+			clock.Advance(time.Millisecond)
+			p.ts++
+			p.ack = flightEnd + uint32(2*mss)
+			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+			awaitSendBuffer(t, ep, 0)
+
+			var afterInfo tcpip.TCPInfoOption
+			if err := ep.GetSockOpt(&afterInfo); err != nil {
+				t.Fatal(err)
+			}
+			if got := p.stack.Stats().TCP.SACKRecovery.Value(); got != 0 {
+				t.Fatalf("spurious TLP probe entered SACKRecovery %d times, want 0", got)
+			}
+			if got := p.stack.Stats().TCP.TLPRecovery.Value(); got != 0 {
+				t.Fatalf("spurious TLP probe counted %d TLPRecovery events, want 0", got)
+			}
+			if afterInfo.CcState != tcpip.Open {
+				t.Fatalf("CcState after spurious TLP probe = %v, want Open", afterInfo.CcState)
+			}
+			if afterInfo.SndCwnd < beforeInfo.SndCwnd {
+				t.Fatalf("spurious TLP probe collapsed SndCwnd from %d to %d", beforeInfo.SndCwnd, afterInfo.SndCwnd)
+			}
+		})
+	}
+
+	t.Run("confirmed_single_tail_loss", func(t *testing.T) {
+		clock := faketime.NewManualClock()
+		options := ns.DefaultOptions()
+		options.Clock = clock
+		options.ClockResolution = 0
+		p := newPeerOptions(t, true, flows.Defaults(), options)
+		p.fixedSendBuffer = 256 << 10
+		p.openWith(1000, func(b []byte) {
+			p.inject(tcpWithOptions(b, []byte{2, 4, 5, 180, 4, 2, 1, 1}))
+		})
+		p.upload([]byte("download"))
+		ep := p.endpoint()
+		var initial tcpip.TCPInfoOption
+		if err := ep.GetSockOpt(&initial); err != nil || initial.SndMss == 0 {
+			t.Fatalf("negotiated TCP MSS: %+v, %v", initial, err)
+		}
+		mss := int(initial.SndMss)
+
+		// Seed a 1 ms SRTT and wait for ACK processing to finish.
+		if _, err := p.current.conn.Write(make([]byte, mss)); err != nil {
+			t.Fatal(err)
+		}
+		readDataSegments(t, p, 1, mss)
+		clock.Advance(time.Millisecond)
+		p.ts++
+		p.ack += uint32(mss)
+		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+		awaitSendBuffer(t, ep, 0)
+
+		var beforeInfo tcpip.TCPInfoOption
+		if err := ep.GetSockOpt(&beforeInfo); err != nil {
+			t.Fatal(err)
+		}
+
+		// Send 4 segments; peer receives the first 3 and drops the 4th (tail loss).
+		if _, err := p.current.conn.Write(make([]byte, mss*4)); err != nil {
+			t.Fatal(err)
+		}
+		readDataSegments(t, p, 4, mss)
+		tailStart := p.ack + uint32(3*mss)
+		flightEnd := p.ack + uint32(4*mss)
+
+		clock.Advance(time.Millisecond)
+		p.ts++
+		p.ack = tailStart
+		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+		awaitSendBuffer(t, ep, mss)
+
+		// PTO expires and retransmits the lost 4th segment [tailStart, flightEnd).
+		// Note: Outstanding == 1, so PTO includes wcDelayedACKTimeout (200 ms).
+		var rtoInfo tcpip.TCPInfoOption
+		if err := ep.GetSockOpt(&rtoInfo); err != nil {
+			t.Fatal(err)
+		}
+		var probe header.TCP
+		for attempt := 0; attempt < 4 && probe == nil; attempt++ {
+			if attempt == 0 {
+				clock.Advance(10 * time.Millisecond)
+			} else {
+				clock.Advance(rtoInfo.RTO + 20*time.Millisecond)
+			}
+			for {
+				h := p.read(50 * time.Millisecond)
+				if h == nil {
+					break
+				}
+				if len(h[h.DataOffset():]) == mss {
+					probe = h
+					break
+				}
+			}
+		}
+		if probe == nil || probe.SequenceNumber() != tailStart {
+			t.Fatalf("expected TLP probe for %d, got %v", tailStart, probe)
+		}
+
+		// Peer receives the probe and cumulatively ACKs flightEnd (no DSACK, because original was lost).
+		clock.Advance(time.Millisecond)
+		p.ts++
+		p.ack = flightEnd
+		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+		awaitSendBuffer(t, ep, 0)
+
+		// Now write 2 more segments; peer receives the 1st (confirming the earlier single loss
+		// via ACK > flightEnd without DSACK/DupAck) and drops the 2nd!
+		if _, err := p.current.conn.Write(make([]byte, mss*2)); err != nil {
+			t.Fatal(err)
+		}
+		readDataSegments(t, p, 2, mss)
+		clock.Advance(time.Millisecond)
+		p.ts++
+		p.ack = flightEnd + uint32(mss)
+		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
+		awaitSendBuffer(t, ep, mss)
+
+		var afterConfirm tcpip.TCPInfoOption
+		if err := ep.GetSockOpt(&afterConfirm); err != nil {
+			t.Fatal(err)
+		}
+		if got := p.stack.Stats().TCP.TLPRecovery.Value(); got != 1 {
+			t.Fatalf("TLPRecovery = %d, want 1", got)
+		}
+		if afterConfirm.SndCwnd >= beforeInfo.SndCwnd {
+			t.Fatalf("confirmed tail loss did not reduce SndCwnd: before=%d after=%d", beforeInfo.SndCwnd, afterConfirm.SndCwnd)
+		}
+		if afterConfirm.CcState != tcpip.Open {
+			t.Fatalf("confirmed TLP single-loss repair left CcState = %v, want Open", afterConfirm.CcState)
+		}
+	})
+}

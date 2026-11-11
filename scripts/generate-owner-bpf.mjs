@@ -26,7 +26,7 @@ function run(command, args, env = {}) {
 }
 
 if (process.platform !== 'linux' || process.arch !== 'x64') throw new Error('requires hosted Linux amd64 builder; never downloads a local Windows toolchain');
-if (!run('go', ['version']).includes('go1.27.3 linux/amd64')) throw new Error('requires pinned Go 1.27.3 linux/amd64');
+if (!run('go', ['version']).includes('go1.27.4 linux/amd64')) throw new Error('requires pinned Go 1.27.4 linux/amd64');
 const mod = await readFile(join(root, 'go.mod'), 'utf8');
 if (!mod.includes('github.com/cilium/ebpf v0.22.0') || !mod.includes('tool github.com/cilium/ebpf/cmd/bpf2go')) throw new Error('loader and bpf2go must both be pinned to v0.22.0');
 await mkdir(toolchain, { recursive: true });

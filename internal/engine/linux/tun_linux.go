@@ -71,16 +71,20 @@ type Tun struct {
 	provOnBurst     func(rawBufs [][]byte, sizes []int, decisions []ownerbpf.ReadDecision, count int, out []*ownerbpf.ProvenanceEnvelope)
 	provReadBurst   func(fd int, rawBufs [][]byte, sizes []int, decisions []ownerbpf.ReadDecision) (int, error)
 	provCloseReader func() error
+	provBurstReadFn func(uintptr) bool
+	provBurstCount  int
+	provBurstErr    error
+	provBurstStart  time.Time
 	provRawStorage  []byte
-	provRawBufs    [][]byte
-	provRawSizes   []int
-	provDecisions  []ownerbpf.ReadDecision
-	provEnvs       []*ownerbpf.ProvenanceEnvelope
-	provArena      []byte
-	provSpans      []ownerbpf.VirtioSegmentSpan
-	provQueue      []queuedProvSegment
-	provNext       int
-	provPendingErr error
+	provRawBufs     [][]byte
+	provRawSizes    []int
+	provDecisions   []ownerbpf.ReadDecision
+	provEnvs        []*ownerbpf.ProvenanceEnvelope
+	provArena       []byte
+	provSpans       []ownerbpf.VirtioSegmentSpan
+	provQueue       []queuedProvSegment
+	provNext        int
+	provPendingErr  error
 }
 
 const (
@@ -521,6 +525,15 @@ func (t *Tun) ReadPacket(ctx context.Context, out []byte) (int, error) {
 	return n, nil
 }
 
+func (t *Tun) readProvenanceBurstRaw(fd uintptr) bool {
+	t.provBurstStart = time.Now()
+	t.provBurstCount, t.provBurstErr = t.provReadBurst(int(fd), t.provRawBufs, t.provRawSizes, t.provDecisions)
+	if t.provBurstCount == 0 && t.provBurstErr == nil {
+		return false
+	}
+	return true
+}
+
 func (t *Tun) ReadPacketWithProvenance(ctx context.Context, out []byte) (int, any, error) {
 	t.readMu.Lock()
 	defer t.readMu.Unlock()
@@ -552,14 +565,16 @@ func (t *Tun) ReadPacketWithProvenance(ctx context.Context, out []byte) (int, an
 			burstReadStart time.Time
 		)
 		if t.rawConn != nil {
-			rawErr := t.rawConn.Read(func(fd uintptr) bool {
-				burstReadStart = time.Now()
-				count, burstErr = t.provReadBurst(int(fd), t.provRawBufs, t.provRawSizes, t.provDecisions)
-				if count == 0 && burstErr == nil {
-					return false
-				}
-				return true
-			})
+			if t.provBurstReadFn == nil {
+				t.provBurstReadFn = t.readProvenanceBurstRaw
+			}
+			t.provBurstCount = 0
+			t.provBurstErr = nil
+			t.provBurstStart = time.Time{}
+			rawErr := t.rawConn.Read(t.provBurstReadFn)
+			count = t.provBurstCount
+			burstErr = t.provBurstErr
+			burstReadStart = t.provBurstStart
 			if rawErr != nil && burstErr == nil {
 				burstErr = rawErr
 			}
