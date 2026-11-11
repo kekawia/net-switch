@@ -181,19 +181,9 @@ func runPrivateSuite() error {
 		"NS_BRIDGE_FAULT_OBJECT="+faultObj,
 	)
 
-	suites := []struct {
-		name    string
-		pattern string
-		timeout string
-	}{
-		{"kernel-proof", "^TestKernelProof$", "5m"},
-		{"bridge-proof", "^TestBridge", "15m"},
-		{"identity-proof", "^TestIdentity", "10m"},
-		{"sender-lifecycle-proof", "^(TestSenderP3|TestSenderEngineSpecLoad|TestOffloadAndFragmentsP4|TestLifecycleL1|TestLifecycleL2)$", "10m"},
-	}
-	for _, s := range suites {
-		fmt.Printf("FLOOR_GUEST_SUITE_START suite=%s pattern=%s\n", s.name, s.pattern)
-		cmd := exec.Command("/bin/ownerbpf-proof.test", "-test.v", "-test.count=1", "-test.timeout="+s.timeout, "-test.run="+s.pattern)
+	for _, s := range ownerbpf.FloorGuestSuites() {
+		fmt.Printf("FLOOR_GUEST_SUITE_START suite=%s pattern=%s\n", s.Name, s.Pattern)
+		cmd := exec.Command("/bin/ownerbpf-proof.test", "-test.v", "-test.count=1", "-test.timeout="+s.Timeout, "-test.run="+s.Pattern)
 		cmd.Env = baseEnv
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -201,10 +191,10 @@ func runPrivateSuite() error {
 		err := cmd.Run()
 		elapsed := time.Since(start)
 		if err != nil {
-			fmt.Printf("FLOOR_GUEST_SUITE_END suite=%s status=fail elapsed_ms=%d err=%v\n", s.name, elapsed.Milliseconds(), err)
-			return fmt.Errorf("suite %s failed: %w", s.name, err)
+			fmt.Printf("FLOOR_GUEST_SUITE_END suite=%s status=fail elapsed_ms=%d err=%v\n", s.Name, elapsed.Milliseconds(), err)
+			return fmt.Errorf("suite %s failed: %w", s.Name, err)
 		}
-		fmt.Printf("FLOOR_GUEST_SUITE_END suite=%s status=pass elapsed_ms=%d\n", s.name, elapsed.Milliseconds())
+		fmt.Printf("FLOOR_GUEST_SUITE_END suite=%s status=pass elapsed_ms=%d\n", s.Name, elapsed.Milliseconds())
 	}
 	return nil
 }

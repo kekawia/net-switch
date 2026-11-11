@@ -1042,32 +1042,37 @@ func TestBridgeSingleReaderPostDrainAndForeignConsume(t *testing.T) {
 		t.Fatalf("post-drain ReadBurstInto decisions = %+v, want cookies %d and %d", decisions, c1, c2)
 	}
 
-	// With ConfirmSingleReaderPostDrain active, a real kernel kfree_skb recursion
-	// skip still fails closed with ErrEpochRebuild.
-	for range 500 {
-		bridgeSend(t, s1, []byte("fill-ring"))
-	}
-	l, err := netlink.LinkByName("nsbridge0")
-	if err != nil || l.Attrs().Statistics == nil {
-		t.Fatal(err)
-	}
-	beforeDrops := l.Attrs().Statistics.TxDropped
 	beforeSample, err := f.b.Sample()
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, afterSample, _ := triggerNestedFreeHold(t, f, s1, beforeDrops, beforeSample)
-	if beforeSample[2].Present && f.b.UnknownRecursionFreed.Load() != 1 {
-		t.Fatalf("single-reader post-drain bridge did not record kfree_skb recursion miss: freed=%d delta=%d",
-			f.b.UnknownRecursionFreed.Load(), afterSample[2].Misses-beforeSample[2].Misses)
+	// Linux 5.8 predates per-program recursion_misses (beforeSample[2].Present == false,
+	// already covered by TestBridgeNestedFreeSkip), and reloading fault_*.o under ARM64
+	// TCG verifies 1.04M BPF instructions (~87s). Exercise kfree_skb recursion_misses
+	// whenever supported (or outside the verified 5.8 floor profile) before testing Mode 1.
+	if beforeSample[2].Present || !verifiedFloor58Profile() {
+		for range 500 {
+			bridgeSend(t, s1, []byte("fill-ring"))
+		}
+		l, err := netlink.LinkByName("nsbridge0")
+		if err != nil || l.Attrs().Statistics == nil {
+			t.Fatal(err)
+		}
+		beforeDrops := l.Attrs().Statistics.TxDropped
+		_, afterSample, _ := triggerNestedFreeHold(t, f, s1, beforeDrops, beforeSample)
+		if f.b.UnknownRecursionFreed.Load() != 1 {
+			t.Fatalf("single-reader post-drain bridge did not record kfree_skb recursion miss: freed=%d delta=%d",
+				f.b.UnknownRecursionFreed.Load(), afterSample[2].Misses-beforeSample[2].Misses)
+		}
+
+		reloadBridgeFixture(t, f, true)
+		if err := f.b.ConfirmSingleReaderPostDrain(); err != nil {
+			t.Fatalf("ConfirmSingleReaderPostDrain after reload: %v", err)
+		}
 	}
 
-	// Reload into a fresh epoch, confirm single-reader post-drain again, and verify
-	// that capture suppression (Mode 1) also fails closed under ReadBurstInto.
-	reloadBridgeFixture(t, f, true)
-	if err := f.b.ConfirmSingleReaderPostDrain(); err != nil {
-		t.Fatalf("ConfirmSingleReaderPostDrain after reload: %v", err)
-	}
+	// Verify that capture suppression (Mode 1) fails closed under ReadBurstInto
+	// while ConfirmSingleReaderPostDrain is active.
 	s3, _ := bridgeSocket(t, 0)
 	skipCtl := BridgeFault{Epoch: f.epoch, CPU: uint32(f.cpu), Mode: 1}
 	if err := f.b.Collection.Maps["faults"].Update(uint32(0), skipCtl, ebpf.UpdateAny); err != nil {

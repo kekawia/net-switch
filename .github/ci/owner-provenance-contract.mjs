@@ -13,6 +13,7 @@ const expected = new Set([
   'TestBurstCounterFailures',
   'TestBurstStaleEvidenceMutationModel',
   'TestFloor58BurstGuard',
+  'TestFloorGuestSuitesPartitionEveryBridgeProof',
   'TestBurstSingleReaderArmedConsumeAndPostDrainRebase',
   'TestLoadErrorRetainsEveryVerifierLine',
   'TestConsumeContextLayoutRefusesMismatch',
