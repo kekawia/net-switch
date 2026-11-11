@@ -33,7 +33,8 @@ func bindSocket(raw syscall.RawConn, l lineState) error {
 	return errors.Join(control, err)
 }
 func (p *Platform) DialTCP(ctx context.Context, id string, dst netip.AddrPort) (platform.TCPConn, error) {
-	l, release, err := p.acquireBinding(id, dst.Addr().Is6())
+	v6 := dst.Addr().Is6()
+	l, release, err := p.acquireBinding(id, v6)
 	if err != nil {
 		return nil, err
 	}
@@ -43,12 +44,40 @@ func (p *Platform) DialTCP(ctx context.Context, id string, dst netip.AddrPort) (
 			release()
 		}
 	}()
-	d := net.Dialer{Control: func(_, _ string, raw syscall.RawConn) error { return bindSocket(raw, l) }}
-	c, err := d.DialContext(ctx, "tcp", dst.String())
+	dialCtx, cancelDial := context.WithCancelCause(ctx)
+	stopWatch := l.lease.watchDial(l, v6, cancelDial)
+	defer stopWatch()
+	defer cancelDial(nil)
+	d := net.Dialer{Control: func(_, _ string, raw syscall.RawConn) error {
+		if err := bindSocket(raw, l); err != nil {
+			return err
+		}
+		current, err := p.binding(id, v6)
+		if err != nil {
+			return err
+		}
+		if current.Index != l.Index || current.Mark != l.Mark {
+			return fmt.Errorf("line %s binding changed during dial", id)
+		}
+		return nil
+	}}
+	c, err := d.DialContext(dialCtx, "tcp", dst.String())
 	if err != nil {
+		if ctx.Err() == nil {
+			if cause := context.Cause(dialCtx); cause != nil {
+				return nil, cause
+			}
+		}
 		return nil, err
 	}
 	tcp := c.(*net.TCPConn)
+	if ctx.Err() == nil {
+		if cause := context.Cause(dialCtx); cause != nil {
+			_ = tcp.SetLinger(0)
+			tcp.Close()
+			return nil, cause
+		}
+	}
 	raw, err := tcp.SyscallConn()
 	if err != nil {
 		tcp.Close()

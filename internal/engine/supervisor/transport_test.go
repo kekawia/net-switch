@@ -5,7 +5,9 @@ import (
 	"context"
 	"io"
 	"net"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -98,5 +100,61 @@ func TestFrameLimitAndPartialFrame(t *testing.T) {
 		if _, err := Line(bufio.NewReader(strings.NewReader(input)), 4096); err == nil {
 			t.Fatal("accepted bad frame")
 		}
+	}
+}
+
+type gatedSink struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	records []string
+}
+
+func (g *gatedSink) Write(b []byte) (int, error) {
+	g.once.Do(func() {
+		close(g.entered)
+		<-g.release
+	})
+	g.mu.Lock()
+	g.records = append(g.records, string(b))
+	g.mu.Unlock()
+	return len(b), nil
+}
+
+func TestCriticalLogsSurviveBulkFloodAndFlushDrainsOrTimesOut(t *testing.T) {
+	sink := &gatedSink{entered: make(chan struct{}), release: make(chan struct{})}
+	logs := NewLog(sink)
+	logs.Write([]byte("bulk-0"))
+	<-sink.entered
+	for range 512 {
+		logs.Write([]byte("bulk-flood"))
+	}
+	if logs.Dropped.Load() == 0 {
+		t.Fatal("bulk flood did not exercise 64-slot queue drop")
+	}
+	for _, msg := range []string{"NATIVE_TERMINATE", "NATIVE_TERMINATED", "NATIVE_CLEANED"} {
+		logs.WriteCritical([]byte(msg))
+	}
+	// While the sink is wedged, Flush must respect its context deadline promptly.
+	wedgedCtx, cancelWedged := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelWedged()
+	if logs.Flush(wedgedCtx) {
+		t.Fatal("Flush reported idle while sink was still blocked")
+	}
+	close(sink.release)
+	drainCtx, cancelDrain := context.WithTimeout(context.Background(), time.Second)
+	defer cancelDrain()
+	if !logs.Flush(drainCtx) {
+		t.Fatal("Flush did not drain after sink unblocked")
+	}
+	sink.mu.Lock()
+	got := slices.Clone(sink.records)
+	sink.mu.Unlock()
+	// After the in-progress bulk-0 write finishes, all three critical milestones
+	// must drain ahead of the remaining 64 queued bulk-flood chunks.
+	wantPrefix := []string{"bulk-0", "NATIVE_TERMINATE", "NATIVE_TERMINATED", "NATIVE_CLEANED"}
+	if len(got) < len(wantPrefix) || !slices.Equal(got[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("critical milestones did not survive and preempt bulk flood: got prefix %v", got[:min(len(got), 8)])
 	}
 }

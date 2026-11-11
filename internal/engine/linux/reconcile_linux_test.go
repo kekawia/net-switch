@@ -238,7 +238,7 @@ func TestKernelReconcileUnpublishesRemovedDefaultBeforeRouteDelete(t *testing.T)
 		Family:    unix.AF_INET,
 		LinkIndex: veth.Attrs().Index,
 		Dst:       prefix("0.0.0.0/0"),
-		Gw:        net.IPv4(192, 0, 2, 1),
+		Gw:        net.IPv4(192, 0, 2, 254), // unanswering neighbor: connect stays in EINPROGRESS until cancelled
 		Table:     unix.RT_TABLE_MAIN,
 		Type:      unix.RTN_UNICAST,
 	}
@@ -272,18 +272,46 @@ func TestKernelReconcileUnpublishesRemovedDefaultBeforeRouteDelete(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	inFlightCtx, inFlightCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer inFlightCancel()
+	inFlightDone := make(chan error, 1)
+	go func() {
+		c, err := p.DialTCP(inFlightCtx, "line", netip.MustParseAddrPort("198.51.100.10:7003"))
+		if err == nil {
+			c.Close()
+		}
+		inFlightDone <- err
+	}()
+	lease := p.lines["line"].lease
+	waitInFlight := time.Now().Add(time.Second)
+	for lease.inFlightDials() == 0 {
+		if time.Now().After(waitInFlight) {
+			t.Fatal("in-flight dial never registered")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(15 * time.Millisecond) // allow connect() to enter EINPROGRESS/ARP wait
 	if err := netlink.RouteDel(&def); err != nil {
 		t.Fatal(err)
 	}
 	store.paused.Store(true)
 	var resume sync.Once
 	defer resume.Do(func() { close(store.resume) })
+	reconcileStarted := time.Now()
 	reconciled := make(chan error, 1)
 	go func() { p.routeMu.Lock(); err := p.reconcileLocked(ctx); p.routeMu.Unlock(); reconciled <- err }()
 	select {
 	case <-store.started:
 	case <-ctx.Done():
 		t.Fatal("route removal did not hit journal append")
+	}
+	select {
+	case err := <-inFlightDone:
+		if err == nil || errors.Is(err, context.DeadlineExceeded) || time.Since(reconcileStarted) > 250*time.Millisecond {
+			t.Fatalf("already in-flight DialTCP did not abort promptly (%s): %v", time.Since(reconcileStarted), err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("already in-flight DialTCP stayed blocked in ARP/SYN wait after default route was unpublished")
 	}
 	routes, err := allRoutes(ctx)
 	if err != nil {

@@ -102,7 +102,28 @@ func (p *Platform) publishBindings() {
 	for id, l := range p.lines {
 		view.lines[id] = l
 	}
-	p.bindings.Store(view)
+	old := p.bindings.Swap(view)
+	for _, l := range view.lines {
+		l.lease.syncDials(l)
+	}
+	if old != nil {
+		for id, oldLine := range old.lines {
+			if current, ok := view.lines[id]; !ok || current.lease != oldLine.lease {
+				oldLine.lease.abortAllDials(fmt.Errorf("line %s has no usable default route", id))
+			}
+		}
+	}
+}
+
+func (p *Platform) clearBindings() {
+	old := p.bindings.Swap(nil)
+	if old == nil {
+		return
+	}
+	cause := errors.New("line bindings are unavailable")
+	for _, l := range old.lines {
+		l.lease.abortAllDials(cause)
+	}
 }
 
 type ownedObject struct {
@@ -440,9 +461,16 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 		p.lines = old
 		p.configured = oldConfigured
 		if p.capturing {
-			p.bindings.Store(nil)
+			p.clearBindings()
 		} else {
 			p.bindings.Store(oldBindings)
+			if oldBindings == nil {
+				p.clearBindings()
+			} else {
+				for _, l := range oldBindings.lines {
+					l.lease.syncDials(l)
+				}
+			}
 		}
 		if p.capturing && p.Fatal != nil {
 			go p.Fatal(fmt.Errorf("cannot reconcile line revision safely: %w", err))
@@ -895,7 +923,7 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 			down, removed = lineChanges(old, p.lines)
 		}
 		if err != nil {
-			p.bindings.Store(nil)
+			p.clearBindings()
 		}
 		p.routeMu.Unlock()
 		if err != nil {
@@ -967,13 +995,16 @@ func (p *Platform) Quiesce() {
 }
 
 func (p *Platform) Cleanup(ctx context.Context) error {
-	p.bindings.Store(nil)
+	p.clearBindings()
 	p.Quiesce()
 	p.routeMu.Lock()
 	defer p.routeMu.Unlock()
 	p.monitorCancel = nil
 	p.monitorDone = nil
-	p.bindings.Store(nil)
+	p.clearBindings()
+	for _, l := range p.lines {
+		l.lease.abortAllDials(errors.New("line bindings are unavailable"))
+	}
 	// A stop or a lapse: the engine's own TUN is closed by now, so the
 	// connections it carried are ended from the ownership record (spec §2).
 	p.lastRetirement = retireRoutedSockets(ctx, p.journal, p.objects.boot, p.objects.netns)

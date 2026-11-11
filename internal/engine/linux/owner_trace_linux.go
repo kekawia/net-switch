@@ -74,14 +74,24 @@ func (r descriptorReads) MarshalJSON() ([]byte, error) {
 }
 
 type descriptorTrace struct {
-	mu      sync.Mutex
-	reads   []descriptorReadStamp
-	omitted int
+	mu         sync.Mutex
+	reads      []descriptorReadStamp
+	stageStart time.Time
+	omitted    int
 	// Only the scan's worker writes these; a snapshot reads them at any time.
 	// runningNS is the wall-clock start of the descriptor read in progress,
 	// 0 between reads.
 	runningFD, runningNS              atomic.Int64
 	descriptorReads, descriptorReadNS atomic.Int64
+}
+
+// monotonicUnixNano stamps at relative to base using Go's monotonic clock when
+// both carry one, so a CLOCK_REALTIME step cannot invert start/finish order.
+func monotonicUnixNano(base, at time.Time) int64 {
+	if base.IsZero() {
+		return at.UnixNano()
+	}
+	return base.UnixNano() + int64(max(0, at.Sub(base)))
 }
 
 // record appends a stamp under t.mu, or counts it as omitted at the bound.
@@ -98,10 +108,11 @@ func (t *descriptorTrace) record(stamp descriptorReadStamp) int {
 }
 
 func (t *descriptorTrace) begin(fd int64) int {
-	now := time.Now().UnixNano()
+	now := time.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.record(descriptorReadStamp{FD: fd, StartedNS: now})
+	t.stageStart = now
+	return t.record(descriptorReadStamp{FD: fd, StartedNS: now.UnixNano()})
 }
 
 // reading marks a descriptor read as running, from started.
@@ -117,17 +128,29 @@ func (t *descriptorTrace) read(fd int64, started time.Time) {
 
 // finish records a descriptor read that ran from started to finished: it is
 // counted, and stamped only if it was slow. The fast path takes no lock and
-// allocates nothing.
+// allocates nothing. FinishedNS is derived from started plus the monotonic
+// duration so a concurrent CLOCK_REALTIME adjustment cannot record a fast or
+// negative span on a genuinely slow read.
 func (t *descriptorTrace) finish(fd int64, started, finished time.Time) {
+	t.finishSample(fd, started.UnixNano(), finished.Sub(started))
+}
+
+func (t *descriptorTrace) finishSample(fd, startedNS int64, took time.Duration) {
 	t.runningNS.Store(0)
-	took := finished.Sub(started)
+	if took < 0 {
+		took = 0
+	}
 	t.descriptorReads.Store(t.descriptorReads.Load() + 1)
 	t.descriptorReadNS.Store(t.descriptorReadNS.Load() + int64(took))
 	if took < descriptorSlowRead {
 		return
 	}
+	endNS := startedNS + int64(took)
+	if endNS == 0 {
+		endNS = 1
+	}
 	t.mu.Lock()
-	t.record(descriptorReadStamp{FD: fd, StartedNS: started.UnixNano(), FinishedNS: finished.UnixNano()})
+	t.record(descriptorReadStamp{FD: fd, StartedNS: startedNS, FinishedNS: endNS})
 	t.mu.Unlock()
 }
 
@@ -149,9 +172,13 @@ func (t *descriptorTrace) end(index int) {
 	if index < 0 {
 		return
 	}
-	now := time.Now().UnixNano()
+	finished := time.Now()
 	t.mu.Lock()
-	t.reads[index].FinishedNS = now
+	endNS := t.reads[index].StartedNS + int64(max(0, finished.Sub(t.stageStart)))
+	if endNS == 0 {
+		endNS = 1
+	}
+	t.reads[index].FinishedNS = endNS
 	t.mu.Unlock()
 }
 

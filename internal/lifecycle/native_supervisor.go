@@ -132,7 +132,12 @@ func (l nativeLog) Write(b []byte) (int, error) { l(string(b)); return len(b), n
 
 func nativeEngineService(ctx context.Context, ready func(), c Config, report func(string)) (result error) {
 	logs := supervisor.NewLog(nativeLog(nativeProofLogSink(ctx, c.Data, report)))
-	log := func(s string) { logs.Write([]byte(s)) }
+	defer func() {
+		flushCtx, cancelFlush := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		logs.Flush(flushCtx)
+		cancelFlush()
+	}()
+	log := func(s string) { logs.WriteCritical([]byte(s)) }
 	var token [16]byte
 	var key [32]byte
 	if _, err := rand.Read(token[:]); err != nil {

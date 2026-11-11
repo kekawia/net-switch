@@ -221,18 +221,18 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 	b := &o.batches
 	job.stage.Store(1)
 	started := time.Now()
-	job.startedNS.Store(started.UnixNano())
+	job.startedNS.Store(monotonicUnixNano(job.queued, started))
 	job.queueAtStart.Store(int64(len(b.jobs)))
 	job.inFlightAtStart.Store(b.active.Add(1))
 	defer b.active.Add(-1)
-	queued := uint64(started.Sub(job.queued))
+	queued := uint64(max(0, started.Sub(job.queued)))
 	b.queueNanos.Add(queued)
 	recordLookupMaximum(&b.maxQueue, queued)
 	job.result = o.readDescriptorBatch(job)
 	job.stage.Store(5)
 	job.caller = nil
 	serviced := time.Now()
-	service := uint64(serviced.Sub(started))
+	service := uint64(max(0, serviced.Sub(started)))
 	b.serviceNanos.Add(service)
 	recordLookupMaximum(&b.maxService, service)
 	if errors.Is(job.result.err, context.DeadlineExceeded) || errors.Is(job.result.err, context.Canceled) {
@@ -263,8 +263,8 @@ func (o *Owners) completeDescriptorBatch(job *descriptorBatch) {
 		recordLookupMaximum(&b.maxUnlock, unlocked)
 	}
 	job.completed = time.Now()
-	job.completedNS.Store(job.completed.UnixNano())
-	completion := uint64(job.completed.Sub(serviced))
+	job.completedNS.Store(monotonicUnixNano(job.queued, job.completed))
+	completion := uint64(max(0, job.completed.Sub(serviced)))
 	b.completionNanos.Add(completion)
 	recordLookupMaximum(&b.maxCompletion, completion)
 	// Publish the immutable result before notifying callers. Neither step
