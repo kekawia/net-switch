@@ -197,15 +197,55 @@ func TestRingRemovalBetweenMarkerCheckAndClose(t *testing.T) {
 	}
 }
 
+// Go's Windows runtime creates each M's waitsema and resumesema Event handles
+// lazily in semacreate on first notesleep/notetsleep (including the caller M,
+// templateThread, and sysmon when all Ps go idle; job 130787452543 lost a freed
+// handle value 0x318 to such an "Event"). warmRuntimeThreads must force those
+// lazy Event opens before a handle baseline or handle-reuse window starts.
+func TestRingWarmRuntimeThreadsOpensLazyEvents(t *testing.T) {
+	if os.Getenv("NETSWITCH_WINTUN_WARM_CHILD") == "1" {
+		runtime.LockOSThread()
+		defer runtime.UnlockOSThread()
+		warmRuntimeThreads()
+		before := handleSnapshot(t)
+		time.Sleep(15 * time.Millisecond)
+		after := handleSnapshot(t)
+		var newEvents []windows.Handle
+		for h := range after {
+			if before[h] {
+				continue
+			}
+			if kind, err := objectType(h); err == nil && kind == "Event" {
+				newEvents = append(newEvents, h)
+			}
+		}
+		if len(newEvents) != 0 {
+			t.Fatalf("runtime opened %d lazy Event handle(s) (%v) after warmRuntimeThreads", len(newEvents), newEvents)
+		}
+		return
+	}
+	exe, err := os.Executable()
+	must(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "-test.v", "-test.run=^TestRingWarmRuntimeThreadsOpensLazyEvents$")
+	cmd.Env = append(os.Environ(), "NETSWITCH_WINTUN_WARM_CHILD=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("fresh child saw lazy Event allocation after warmRuntimeThreads: %v\n%s", err, output)
+	}
+}
+
 func legacyCloseWindow(t *testing.T, tracked bool) {
 	// Each new Go OS thread opens native handles of its own, and the runtime
 	// may start one while this test sits in a syscall. Run 39564185852 still
 	// missed the freed value 4,096 times with the thread pinned, which fits a
-	// new thread taking it. Start the threads first; a miss below reports
-	// what object now holds the value.
-	warmRuntimeThreads()
+	// new thread taking it, and job 130787452543 caught a lazy runtime Event
+	// occupying 0x318. Lock this M before warming so it stays on the warmed M.
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	warmRuntimeThreads()
 	processor, restore := pinToCurrentProcessor(t)
 	defer restore()
 	r, err := allocateRings(MinCapacity)

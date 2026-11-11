@@ -841,6 +841,12 @@ func warmRuntimeThreads() {
 	}
 	close(release)
 	warm.Wait()
+	// semacreate opens each M's two Event handles lazily on first notesleep:
+	// park the caller's own M, let templateThread reach notesleep, and leave all
+	// Ps idle past sysmon's 10 ms poll cap so sysmon enters notetsleep too.
+	runtime.LockOSThread()
+	time.Sleep(15 * time.Millisecond)
+	runtime.UnlockOSThread()
 }
 
 func TestWintunLifetime(t *testing.T) {

@@ -36,6 +36,12 @@ func installSnapInputs(ctx context.Context, host fixtureHost, logf func(string, 
 	if cache == "" {
 		return "", fmt.Errorf("NSACCEPT_SNAP_CACHE is required: run tests/linux/snap-inputs.sh fetch <directory> first; snap provisioning never downloads from the store")
 	}
+	// Socket-activated snapd seeds local snaps and AppArmor profiles on first
+	// contact (~40-65 s on cold Ubuntu ARM64 runners, job 130787442792) before
+	// accepting config changes. Wait for local seeding separately first.
+	if _, err := host(2*time.Minute, 1, "snap", "wait", "system", "seed.loaded"); err != nil {
+		return "", fmt.Errorf("waiting for snapd seed: %w", err)
+	}
 	if _, err := host(time.Minute, 1, "snap", "set", "system", "store.access=offline"); err != nil {
 		return "", fmt.Errorf("disabling Snap Store access: %w", err)
 	}
