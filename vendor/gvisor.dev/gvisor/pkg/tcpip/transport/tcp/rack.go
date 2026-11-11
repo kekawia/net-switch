@@ -13,6 +13,7 @@
 // limitations under the License.
 
 // Modified by Net Switch, 2026-10-20: preserve timeout recovery until its flight drains.
+// Modified by Net Switch, 2026-11-11: align RACK TLP probe scheduling and episode completion with RFC 8985.
 
 package tcp
 
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/seqnum"
 )
 
@@ -31,6 +33,12 @@ const (
 	// at the receiver.
 	// See: https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-7.5.
 	wcDelayedACKTimeout = 200 * time.Millisecond
+
+	// minPTOMargin is the minimum probe timeout slack added when multiple
+	// segments are in flight, matching Linux TCP_TIMEOUT_MIN_US (2 ms) so
+	// sub-millisecond in-host RTTs do not fire spurious tail probes on
+	// routine reader or GC scheduling jitter.
+	minPTOMargin = 2 * time.Millisecond
 
 	// tcpRACKRecoveryThreshold is the number of loss recoveries for which
 	// the reorder window is inflated and after that the reorder window is
@@ -185,6 +193,8 @@ func (s *sender) schedulePTO() {
 		pto = s.rtt.TCPRTTState.SRTT * 2
 		if s.Outstanding == 1 {
 			pto += wcDelayedACKTimeout
+		} else {
+			pto += minPTOMargin
 		}
 	}
 	s.rtt.Unlock()
@@ -211,7 +221,7 @@ func (s *sender) probeTimerExpired() tcpip.Error {
 	}
 
 	var dataSent bool
-	if s.writeNext != nil && s.writeNext.xmitCount == 0 && s.Outstanding < s.SndCwnd {
+	if !s.rc.tlpRxtOut && s.writeNext != nil && s.writeNext.xmitCount == 0 && s.Outstanding < s.SndCwnd {
 		dataSent = s.maybeSendSegment(s.writeNext, int(s.ep.scoreboard.SMSS()), s.SndUna.Add(s.SndWnd))
 		if dataSent {
 			s.Outstanding += s.pCount(s.writeNext, s.MaxPayloadSize)
@@ -253,40 +263,54 @@ func (s *sender) probeTimerExpired() tcpip.Error {
 
 // detectTLPRecovery detects if recovery was accomplished by the loss probes
 // and updates TLP state accordingly.
-// See https://tools.ietf.org/html/draft-ietf-tcpm-rack-08#section-7.6.3.
+// See RFC 8985 Section 7.4.2 (TLP_process_ack).
 //
 // +checklocks:s.ep.mu
 func (s *sender) detectTLPRecovery(ack seqnum.Value, rcvdSeg *segment) {
 	if !(s.ep.SACKPermitted && s.rc.tlpRxtOut) {
 		return
 	}
-
-	// Step 1.
-	if s.isDupAck(rcvdSeg) && ack == s.rc.tlpHighRxt {
-		var sbAboveTLPHighRxt bool
-		for _, sb := range rcvdSeg.parsedOptions.SACKBlocks {
-			if s.rc.tlpHighRxt.LessThan(sb.End) {
-				sbAboveTLPHighRxt = true
-				break
-			}
-		}
-		if !sbAboveTLPHighRxt {
-			// TLP episode is complete.
-			s.rc.tlpRxtOut = false
-		}
+	if ack.LessThan(s.rc.tlpHighRxt) {
+		return
 	}
 
-	if s.rc.tlpRxtOut && s.rc.tlpHighRxt.LessThanEq(ack) {
-		// TLP episode is complete.
+	// Case 1: DSACK confirms the probe (or original segment) arrived in
+	// duplicate, so no packet was lost and cwnd must not be reduced.
+	if checkDSACK(rcvdSeg) {
 		s.rc.tlpRxtOut = false
-		if !checkDSACK(rcvdSeg) {
-			// Step 2. Either the original packet or the retransmission (in the
-			// form of a probe) was lost. Invoke a congestion control response
-			// equivalent to fast recovery.
+		return
+	}
+
+	// Case 2: Cumulative ACK strictly beyond tlpHighRxt without an earlier
+	// DSACK or pure duplicate ACK confirms the TLP probe repaired a single
+	// tail loss. Apply the congestion-window reduction once without leaving
+	// sender.state stuck in SACKRecovery when newer data is already in flight.
+	if s.rc.tlpHighRxt.LessThan(ack) {
+		s.rc.tlpRxtOut = false
+		s.ep.stack.Stats().TCP.TLPRecovery.Increment()
+		if !s.inRecovery() {
 			s.cc.HandleLossDetected()
-			s.enterRecovery()
-			s.leaveRecovery()
+			s.SndCwnd = s.Ssthresh
+			s.cc.PostRecovery()
+			s.rc.exitRecovery()
+			if s.state == tcpip.Disorder && s.ep.scoreboard.Sacked() == 0 && !s.FastRecovery.Active {
+				s.state = tcpip.Open
+			}
 		}
+		return
+	}
+
+	// Case 3 (ack == tlpHighRxt): Keep the episode open on the first
+	// cumulative ACK advancing SND.UNA to tlpHighRxt so a trailing DSACK or
+	// pure duplicate ACK from a spurious probe can arrive next. If SND.UNA
+	// was already at tlpHighRxt and this segment is a pure duplicate ACK
+	// carrying no SACK blocks, the probe was spurious (non-DSACK peer).
+	if ack == s.SndUna &&
+		len(rcvdSeg.parsedOptions.SACKBlocks) == 0 &&
+		rcvdSeg.logicalLen() == 0 &&
+		!rcvdSeg.flags.Intersects(header.TCPFlagFin|header.TCPFlagSyn) &&
+		rcvdSeg.window == s.SndWnd {
+		s.rc.tlpRxtOut = false
 	}
 }
 

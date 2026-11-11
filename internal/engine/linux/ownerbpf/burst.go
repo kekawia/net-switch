@@ -81,3 +81,39 @@ func (g *BurstGuard) Certify(after [3]CounterSample, sampleErr error) bool {
 	g.previous = after
 	return true
 }
+
+// CertifySingleReaderConsume certifies a burst for an exclusively owned TUN
+// descriptor whose single registered reader already observed a valid armed
+// TerminalConsume completion for every read in the burst (and during post-drain
+// epoch arming before any armed read runs). Because Linux drivers/net/tun.c
+// invokes consume_skb on a TUN TX skb only upon a successful tun_do_read return
+// (and uses kfree_skb on queue purge, close, or read error), any consume_skb
+// recursion_misses increment while capture (index 0) and freed (index 2)
+// remain unchanged and monotonic came from an unrelated skb outside this TUN's
+// armed reads. Program identity, presence, error, and monotonicity checks
+// remain fail-closed on all three programs.
+func (g *BurstGuard) CertifySingleReaderConsume(after [3]CounterSample, sampleErr error) bool {
+	if g.poisoned || sampleErr != nil {
+		g.poisoned = true
+		return false
+	}
+	for i, c := range after {
+		if c.Present != !g.floor58 || c.ProgramID != g.previous[i].ProgramID {
+			g.poisoned = true
+			return false
+		}
+		if i == 1 && !g.floor58 {
+			if c.Misses < g.previous[i].Misses {
+				g.poisoned = true
+				return false
+			}
+			continue
+		}
+		if c.Misses != g.previous[i].Misses {
+			g.poisoned = true
+			return false
+		}
+	}
+	g.previous = after
+	return true
+}

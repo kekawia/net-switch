@@ -326,6 +326,9 @@ func TestDescriptorReservationAlreadySized(t *testing.T) {
 // descriptorTarget never asks past the soft limit, so a refusal is driven
 // here directly: the kernel rejects F_DUPFD at or above RLIMIT_NOFILE.
 func TestRefusedReservationIsReportedAndLeavesNothingOpen(t *testing.T) {
+	if !freshDescriptorProcess(t, "TestRefusedReservationIsReportedAndLeavesNothingOpen") {
+		return
+	}
 	var limit unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &limit); err != nil {
 		t.Fatal(err)

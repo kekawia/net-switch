@@ -56,6 +56,8 @@ type Bridge struct {
 	activeReads                                                             sync.WaitGroup
 	readers                                                                 [ReaderLimit]bool
 	next                                                                    uint64
+	singleReader                                                            *BridgeReader
+	singleReaderArmedOnly                                                   bool
 	stopped                                                                 bool
 	UnknownRecursion, AffectedPackets, DeliveredWithoutRecord, ReadUnknown  atomic.Uint64
 	UnknownRecursionCapture, UnknownRecursionConsume, UnknownRecursionFreed atomic.Uint64
@@ -529,7 +531,42 @@ func (b *Bridge) Register() (_ *BridgeReader, err error) {
 		return nil, err
 	}
 	b.readers[index] = true
+	if b.next == 1 {
+		b.singleReader = r
+	} else {
+		b.singleReader = nil
+		b.singleReaderArmedOnly = false
+	}
 	return r, nil
+}
+
+// ConfirmSingleReaderPostDrain rebases the single registered reader's consume
+// recursion baseline after the caller has enabled capture and drained all
+// pre-enable unarmed frames from its exclusively owned TUN descriptor, while
+// still failing closed if capture or kfree_skb missed any event since Register.
+func (b *Bridge) ConfirmSingleReaderPostDrain() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.stopped || b.config.Enabled == 0 || b.next != 1 || b.singleReader == nil || b.singleReader.closed {
+		return errors.New("post-drain single-reader confirmation requires one active reader in an enabled epoch")
+	}
+	if health := b.Faults(); health != 0 {
+		b.stopped = true
+		return fmt.Errorf("%w: post-drain health=%d", ErrEpochRebuild, health)
+	}
+	burstBarrier()
+	after, sampleErr := b.Sample()
+	var changed uint8
+	if sampleErr == nil {
+		changed = b.singleReader.guard.ChangedMask(after)
+	}
+	if !b.singleReader.guard.CertifySingleReaderConsume(after, sampleErr) {
+		b.recordUnknownRecursion(changed)
+		b.stopped = true
+		return errors.Join(ErrEpochRebuild, sampleErr)
+	}
+	b.singleReaderArmedOnly = true
+	return nil
 }
 
 type ReadFrame struct {
@@ -565,6 +602,8 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 	defer b.activeReads.Done()
 	frames := make([]ReadFrame, 0, limit)
 	var readFailure error
+	sawZeroRead := false
+	allCompletedConsume := true
 	for len(frames) < limit {
 		if health := b.Faults(); health != 0 || r.sequence == ^uint64(0) {
 			readFailure = fmt.Errorf("%w: before syscall health=%d sequence=%d", ErrEpochRebuild, health, r.sequence)
@@ -591,6 +630,9 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 		decision := CheckRead(ReadBinding{Slot: r.reg.Slot, Ifindex: r.reg.Ifindex, NetNS: r.reg.NetNS, Registration: r.reg.Generation, Epoch: r.reg.Epoch, Sequence: r.sequence}, r.reg, snapshot, n, e, b.Faults())
 		if n > 0 && e == nil {
 			frames = append(frames, ReadFrame{Data: data[:n], Decision: decision})
+			if (decision.Status != ReadCookie && decision.Status != ReadUnknown) || decision.Rebuild {
+				allCompletedConsume = false
+			}
 			switch decision.Status {
 			case ReadMissing:
 				b.DeliveredWithoutRecord.Add(1)
@@ -610,11 +652,11 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 			break
 		}
 		if n == 0 {
+			sawZeroRead = true
 			break
 		}
 	}
-	valid := true
-	var changed uint8
+	var after [3]CounterSample
 	var sampleErr error
 	if !r.SkipPostCheck {
 		var sampleStart time.Time
@@ -622,18 +664,26 @@ func (r *BridgeReader) readBurst(fd int, limit int, read func(int, []byte) (int,
 			sampleStart = time.Now()
 		}
 		burstBarrier()
-		var after [3]CounterSample
 		after, sampleErr = b.Sample()
 		if r.Measure {
 			r.LastSample = time.Since(sampleStart)
 		}
-		if sampleErr == nil {
-			changed = r.guard.ChangedMask(after)
-		}
-		valid = r.guard.Certify(after, sampleErr)
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	valid := true
+	var changed uint8
+	if !r.SkipPostCheck {
+		if sampleErr == nil {
+			changed = r.guard.ChangedMask(after)
+		}
+		if b.singleReaderArmedOnly && !b.stopped && b.next == 1 && b.singleReader == r &&
+			readFailure == nil && !sawZeroRead && allCompletedConsume && b.Faults() == 0 {
+			valid = r.guard.CertifySingleReaderConsume(after, sampleErr)
+		} else {
+			valid = r.guard.Certify(after, sampleErr)
+		}
+	}
 	if !valid {
 		b.recordUnknownRecursion(changed)
 		b.AffectedPackets.Add(uint64(len(frames)))
@@ -687,6 +737,8 @@ func (r *BridgeReader) readBurstInto(fd int, rawBufs [][]byte, sizes []int, deci
 
 	count := 0
 	var readFailure error
+	sawZeroRead := false
+	allCompletedConsume := true
 	for count < limit {
 		if health := b.Faults(); health != 0 || r.sequence == ^uint64(0) {
 			readFailure = fmt.Errorf("%w: before syscall health=%d sequence=%d", ErrEpochRebuild, health, r.sequence)
@@ -720,6 +772,9 @@ func (r *BridgeReader) readBurstInto(fd int, rawBufs [][]byte, sizes []int, deci
 			sizes[count] = n
 			decisions[count] = decision
 			count++
+			if (decision.Status != ReadCookie && decision.Status != ReadUnknown) || decision.Rebuild {
+				allCompletedConsume = false
+			}
 			switch decision.Status {
 			case ReadMissing:
 				b.DeliveredWithoutRecord.Add(1)
@@ -739,32 +794,41 @@ func (r *BridgeReader) readBurstInto(fd int, rawBufs [][]byte, sizes []int, deci
 			break
 		}
 		if n == 0 {
+			sawZeroRead = true
 			break
 		}
 	}
 
-	valid := true
-	var changed uint8
+	var after [3]CounterSample
 	var sampleErr error
-	if !r.SkipPostCheck && (count > 0 || readFailure != nil) {
+	needPostCheck := !r.SkipPostCheck && (count > 0 || readFailure != nil)
+	if needPostCheck {
 		var sampleStart time.Time
 		if r.Measure {
 			sampleStart = time.Now()
 		}
 		burstBarrier()
-		var after [3]CounterSample
 		after, sampleErr = b.Sample()
 		if r.Measure {
 			r.LastSample = time.Since(sampleStart)
 		}
-		if sampleErr == nil {
-			changed = r.guard.ChangedMask(after)
-		}
-		valid = r.guard.Certify(after, sampleErr)
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	valid := true
+	var changed uint8
+	if needPostCheck {
+		if sampleErr == nil {
+			changed = r.guard.ChangedMask(after)
+		}
+		if b.singleReaderArmedOnly && !b.stopped && b.next == 1 && b.singleReader == r &&
+			count > 0 && readFailure == nil && !sawZeroRead && allCompletedConsume && b.Faults() == 0 {
+			valid = r.guard.CertifySingleReaderConsume(after, sampleErr)
+		} else {
+			valid = r.guard.Certify(after, sampleErr)
+		}
+	}
 	if !valid {
 		b.recordUnknownRecursion(changed)
 		b.AffectedPackets.Add(uint64(count))
@@ -808,6 +872,10 @@ func (r *BridgeReader) Close() error {
 	r.b.mu.Lock()
 	defer r.b.mu.Unlock()
 	atomic.StoreUint64(&r.slot.Control.Armed, 0)
+	if r.b.singleReader == r {
+		r.b.singleReader = nil
+		r.b.singleReaderArmedOnly = false
+	}
 	err := r.b.Collection.Maps["readers"].Delete(r.key)
 	if err != nil {
 		r.b.stopped = true
@@ -823,6 +891,7 @@ func (b *Bridge) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.stopped = true
+	b.singleReaderArmedOnly = false
 	for _, used := range b.readers {
 		if used {
 			return errors.New("join and unregister readers before closing bridge")
@@ -837,6 +906,7 @@ func (b *Bridge) Close() error {
 func (b *Bridge) Stop() error {
 	b.mu.Lock()
 	b.stopped = true
+	b.singleReaderArmedOnly = false
 	b.mu.Unlock()
 	b.activeReads.Wait()
 	b.mu.Lock()

@@ -71,6 +71,8 @@ TCP timeout recovery until its flight drains, independently of the opt-in hooks.
 `sack_scoreboard.go` so idle connections need no private node free list.
 `third_party/gvisor-tcp-retry-limit.patch` changes `snd.go` so only retransmission
 timeouts count against a connection's retry limit, not fast or RACK resends.
+`third_party/gvisor-tlp-recovery.patch` changes `rack.go` to align RACK tail-loss
+probe scheduling and episode completion with RFC 8985.
 The generator applies the reproducible patches in filename order. License and
 authors are preserved in the generated source and vendor trees. wireguard-go is
 copyright WireGuard LLC and is used unmodified for Linux TUN I/O. cilium/ebpf is
