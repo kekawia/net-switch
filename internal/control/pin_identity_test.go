@@ -298,3 +298,52 @@ func stateRows(t *testing.T, c *Core) map[string]map[string]any {
 	}
 	return out
 }
+
+func TestIconEndpointPNGAndSVGSandboxHeaders(t *testing.T) {
+	c, _, _, _ := testLinuxCore(t, map[string]any{"lines": testLines()})
+	svgBytes := []byte(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><rect width="16" height="16"/></svg>`)
+	pngBytes := []byte("\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRfake")
+	c.mu.Lock()
+	c.info["/usr/bin/svgapp"] = map[string]any{"icon": base64.StdEncoding.EncodeToString(svgBytes)}
+	c.info["/usr/bin/pngapp"] = map[string]any{"icon": base64.StdEncoding.EncodeToString(pngBytes)}
+	c.mu.Unlock()
+
+	handler := &HTTP{Core: c, Port: 47821, Token: "tok", ValidToken: func(s string) bool { return s == "tok" }}
+
+	reqSVG := httptest.NewRequest("GET", "http://127.0.0.1:47821/api/icon?key=%2Fusr%2Fbin%2Fsvgapp", nil)
+	reqSVG.Header.Set("X-Token", "tok")
+	recSVG := httptest.NewRecorder()
+	handler.ServeHTTP(recSVG, reqSVG)
+	if recSVG.Code != 200 {
+		t.Fatalf("svg status = %d, want 200", recSVG.Code)
+	}
+	if ct := recSVG.Header().Get("Content-Type"); ct != "image/svg+xml" {
+		t.Fatalf("svg Content-Type = %q, want image/svg+xml", ct)
+	}
+	if csp := recSVG.Header().Get("Content-Security-Policy"); csp != "default-src 'none'; style-src 'unsafe-inline'; sandbox" {
+		t.Fatalf("svg CSP = %q", csp)
+	}
+	if nosniff := recSVG.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+		t.Fatalf("svg X-Content-Type-Options = %q", nosniff)
+	}
+	if recSVG.Body.String() != string(svgBytes) {
+		t.Fatalf("svg body = %q, want %q", recSVG.Body.String(), string(svgBytes))
+	}
+
+	reqPNG := httptest.NewRequest("GET", "http://127.0.0.1:47821/api/icon?key=%2Fusr%2Fbin%2Fpngapp", nil)
+	reqPNG.Header.Set("X-Token", "tok")
+	recPNG := httptest.NewRecorder()
+	handler.ServeHTTP(recPNG, reqPNG)
+	if recPNG.Code != 200 {
+		t.Fatalf("png status = %d, want 200", recPNG.Code)
+	}
+	if ct := recPNG.Header().Get("Content-Type"); ct != "image/png" {
+		t.Fatalf("png Content-Type = %q, want image/png", ct)
+	}
+	if nosniff := recPNG.Header().Get("X-Content-Type-Options"); nosniff != "nosniff" {
+		t.Fatalf("png X-Content-Type-Options = %q", nosniff)
+	}
+	if recPNG.Body.String() != string(pngBytes) {
+		t.Fatalf("png body mismatch")
+	}
+}

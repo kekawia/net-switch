@@ -105,7 +105,13 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sendJSON(w, 404, map[string]any{"error": "Not found"})
 			return
 		}
-		w.Header().Set("Content-Type", "image/png")
+		if isSVGIcon(icon) {
+			w.Header().Set("Content-Type", "image/svg+xml")
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+		} else {
+			w.Header().Set("Content-Type", "image/png")
+		}
+		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Cache-Control", "private, max-age=86400")
 		_, _ = w.Write(icon)
 		return
@@ -207,4 +213,16 @@ func knownRoute(method, path string) bool {
 }
 func routeError(method, path string) error {
 	return fmt.Errorf("unregistered action %s %s", method, path)
+}
+
+func isSVGIcon(b []byte) bool {
+	if len(b) > 512 {
+		b = b[:512]
+	}
+	s := strings.TrimPrefix(string(b), "\xef\xbb\xbf")
+	s = strings.ToLower(strings.TrimSpace(s))
+	if strings.HasPrefix(s, "<svg") {
+		return true
+	}
+	return strings.HasPrefix(s, "<?xml") && strings.Contains(s, "<svg")
 }

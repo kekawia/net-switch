@@ -458,6 +458,17 @@ jobs:
         run: go test -count=1 -v -timeout=3m -run '^TestOwnershipLockHostileDirectoryStartupAndRecovery$' ./internal/engine/windows
       - name: Deterministic gVisor dispatch regression
         run: go test -mod=mod ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1 -timeout=5m gvisor.dev/gvisor/pkg/tcpip/transport/tcp
+      - uses: ./.github/actions/cache-pinned-archive
+        if: runner.os == 'Windows'
+        with:
+          artifact: webview2
+      - name: Stage WebView2Loader.dll for native desktop tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $arch = if ('${{ matrix.name }}' -like '*ARM64*') { 'arm64' } else { 'x64' }
+          $dir = (& .\scripts\prepare-webview2-tests.ps1 -Arch $arch | Select-Object -Last 1).Trim()
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "NETSWITCH_WEBVIEW2_LOADER_DIR=$dir`n")
       - name: Internal packages and native replay coverage
         shell: pwsh
         run: |
@@ -1055,6 +1066,9 @@ jobs:
           artifact: wintun
       - uses: ./.github/actions/cache-pinned-archive
         with:
+          artifact: webview2
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
           artifact: inno
       - name: Run Windows x64 installer, 0.3.x migration, rollback, and uninstall suite
         run: ./scripts/test-windows-installer.ps1 -Arch x64
@@ -1089,6 +1103,9 @@ jobs:
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: webview2
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: inno
