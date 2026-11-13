@@ -177,11 +177,16 @@ func (s *Shell) handleClicks() {
 				s.cb.OnToggleNotices()
 			}
 			if s.cb.NotificationsEnabled != nil {
-				if s.cb.NotificationsEnabled() {
-					s.mNotices.Check()
-				} else {
-					s.mNotices.Uncheck()
+				enabled := s.cb.NotificationsEnabled()
+				s.mu.Lock()
+				if !s.closed && !s.hidden && s.mNotices != nil {
+					if enabled {
+						s.mNotices.Check()
+					} else {
+						s.mNotices.Uncheck()
+					}
 				}
+				s.mu.Unlock()
 			}
 		case _, ok := <-s.mUpdate.ClickedCh:
 			if !ok {

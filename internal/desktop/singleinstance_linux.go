@@ -80,7 +80,7 @@ func AcquireSingleInstance(ctx context.Context, scope string, show bool, onShow 
 		sockPath: sockPath,
 		done:     make(chan struct{}),
 	}
-	go lock.serve(onShow)
+	go lock.serve(ln, onShow)
 	return lock, nil
 }
 
@@ -138,21 +138,21 @@ func notifyExistingUnix(ctx context.Context, sockPath string) error {
 	}
 }
 
-func (l *SingleInstanceLock) serve(onShow func()) {
-	defer close(l.done)
+func (l *SingleInstanceLock) serve(ln *net.UnixListener, onShow func()) {
+	var wg sync.WaitGroup
+	defer func() {
+		wg.Wait()
+		close(l.done)
+	}()
 	uid := uint32(os.Getuid())
 	for {
-		conn, err := l.listener.AcceptUnix()
+		conn, err := ln.AcceptUnix()
 		if err != nil {
-			l.mu.Lock()
-			closed := l.closed
-			l.mu.Unlock()
-			if closed {
-				return
-			}
 			return
 		}
+		wg.Add(1)
 		go func(c *net.UnixConn) {
+			defer wg.Done()
 			defer c.Close()
 			raw, err := c.SyscallConn()
 			if err != nil {
@@ -181,22 +181,25 @@ func (l *SingleInstanceLock) Close() error {
 	}
 	l.mu.Lock()
 	if l.closed {
+		done := l.done
 		l.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	l.closed = true
 	ln := l.listener
 	f := l.lockFile
 	sock := l.sockPath
-	l.listener = nil
-	l.lockFile = nil
+	done := l.done
 	l.mu.Unlock()
 
 	if ln != nil {
 		_ = ln.Close()
 	}
-	if l.done != nil {
-		<-l.done
+	if done != nil {
+		<-done
 	}
 	if sock != "" {
 		_ = os.Remove(sock)

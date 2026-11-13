@@ -14,6 +14,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -32,6 +33,7 @@ type SingleInstanceLock struct {
 	closed bool
 	mutex  windows.Handle
 	pipe   windows.Handle
+	stop   windows.Handle
 	done   chan struct{}
 }
 
@@ -90,13 +92,20 @@ func AcquireSingleInstance(ctx context.Context, scope string, show bool, onShow 
 		_ = windows.CloseHandle(hMutex)
 		return nil, fmt.Errorf("create single-instance pipe: %w", err)
 	}
+	hStop, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		_ = windows.CloseHandle(hPipe)
+		_ = windows.CloseHandle(hMutex)
+		return nil, fmt.Errorf("create single-instance stop event: %w", err)
+	}
 
 	lock := &SingleInstanceLock{
 		mutex: hMutex,
 		pipe:  hPipe,
+		stop:  hStop,
 		done:  make(chan struct{}),
 	}
-	go lock.serve(onShow)
+	go lock.serve(hPipe, hStop, onShow)
 	return lock, nil
 }
 
@@ -134,14 +143,33 @@ func notifyExistingInstance(ctx context.Context, pipeName string) error {
 	}
 }
 
-func (l *SingleInstanceLock) serve(onShow func()) {
+func waitOverlappedOrStop(h, ev, stop windows.Handle, over *windows.Overlapped, transferred *uint32) (bool, error) {
+	event, err := winapi.WaitForMultipleObjects([]windows.Handle{ev, stop}, false, windows.INFINITE)
+	if err != nil {
+		_ = windows.CancelIoEx(h, over)
+		_ = windows.GetOverlappedResult(h, over, transferred, true)
+		return false, err
+	}
+	if event != windows.WAIT_OBJECT_0 {
+		_ = windows.CancelIoEx(h, over)
+		_ = windows.GetOverlappedResult(h, over, transferred, true)
+		return true, nil
+	}
+	if err := windows.GetOverlappedResult(h, over, transferred, false); err != nil {
+		return false, err
+	}
+	return false, nil
+}
+
+func (l *SingleInstanceLock) serve(h, stop windows.Handle, onShow func()) {
 	defer close(l.done)
 	for {
-		l.mu.Lock()
-		closed := l.closed
-		h := l.pipe
-		l.mu.Unlock()
-		if closed || h == 0 {
+		if stop != 0 {
+			if event, err := windows.WaitForSingleObject(stop, 0); err == nil && event == windows.WAIT_OBJECT_0 {
+				return
+			}
+		}
+		if h == 0 {
 			return
 		}
 
@@ -154,14 +182,15 @@ func (l *SingleInstanceLock) serve(onShow func()) {
 		pinner.Pin(over)
 
 		err = windows.ConnectNamedPipe(h, over)
+		stopped := false
 		if err == windows.ERROR_IO_PENDING {
 			var ignored uint32
-			err = windows.GetOverlappedResult(h, over, &ignored, true)
+			stopped, err = waitOverlappedOrStop(h, ev, stop, over, &ignored)
 		}
 		pinner.Unpin()
 		_ = windows.CloseHandle(ev)
 
-		if err == windows.ERROR_OPERATION_ABORTED {
+		if stopped || err == windows.ERROR_OPERATION_ABORTED {
 			return
 		}
 		if err != nil && err != windows.ERROR_PIPE_CONNECTED {
@@ -181,11 +210,16 @@ func (l *SingleInstanceLock) serve(onShow func()) {
 				rp.Pin(&buf[0])
 				rp.Pin(overRead)
 				rErr := windows.ReadFile(h, buf, &n, overRead)
+				readStopped := false
 				if rErr == windows.ERROR_IO_PENDING {
-					rErr = windows.GetOverlappedResult(h, overRead, &n, true)
+					readStopped, rErr = waitOverlappedOrStop(h, evRead, stop, overRead, &n)
 				}
 				rp.Unpin()
 				_ = windows.CloseHandle(evRead)
+				if readStopped {
+					_ = windows.DisconnectNamedPipe(h)
+					return
+				}
 				if rErr == nil || errors.Is(rErr, io.EOF) || rErr == windows.ERROR_BROKEN_PIPE {
 					line, _ := bufio.NewReader(strings.NewReader(string(buf[:n]))).ReadString('\n')
 					if strings.TrimSpace(line) == "show" && onShow != nil {
@@ -205,22 +239,34 @@ func (l *SingleInstanceLock) Close() error {
 	}
 	l.mu.Lock()
 	if l.closed {
+		done := l.done
 		l.mu.Unlock()
+		if done != nil {
+			<-done
+		}
 		return nil
 	}
 	l.closed = true
 	hPipe := l.pipe
+	hStop := l.stop
 	hMutex := l.mutex
-	l.pipe = 0
-	l.mutex = 0
+	done := l.done
 	l.mu.Unlock()
 
+	if hStop != 0 {
+		_ = windows.SetEvent(hStop)
+	}
 	if hPipe != 0 {
 		_ = windows.CancelIoEx(hPipe, nil)
+	}
+	if done != nil {
+		<-done
+	}
+	if hPipe != 0 {
 		_ = windows.CloseHandle(hPipe)
 	}
-	if l.done != nil {
-		<-l.done
+	if hStop != 0 {
+		_ = windows.CloseHandle(hStop)
 	}
 	if hMutex != 0 {
 		_ = windows.CloseHandle(hMutex)
