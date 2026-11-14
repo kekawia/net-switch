@@ -35,12 +35,57 @@ func NativeRevision(r Revision, rules apppath.Rules) (policy.Revision, error) {
 	p := r.Policy
 	config := policy.Config{Combine: p.Combine, IPv6: p.IPv6, AppLines: map[string]string{}, Shares: map[string]uint64{}, Lanes: map[string]string{}, Blocked: []string{}}
 	known := map[string]bool{}
+	nonProxy := map[string]bool{}
+	mainCarrier := ""
+	fallbackCarrier := ""
 	for _, line := range p.Lines {
-		if line.ID == "" || line.Alias == "" {
+		if line.Proxy == nil && line.ID != "" {
+			nonProxy[line.ID] = true
+			if fallbackCarrier == "" {
+				fallbackCarrier = line.ID
+			}
+			if !line.VPN && mainCarrier == "" {
+				mainCarrier = line.ID
+			}
+		}
+	}
+	if mainCarrier == "" {
+		mainCarrier = fallbackCarrier
+	}
+	if mainCarrier == "" {
+		mainCarrier = "local"
+	}
+	for _, line := range p.Lines {
+		if line.ID == "" {
+			return policy.Revision{}, fmt.Errorf("line %q has no id", line.ID)
+		}
+		if line.Proxy != nil {
+			carrier := line.Proxy.Carrier
+			if carrier == "" || carrier == "main" {
+				carrier = mainCarrier
+			} else if carrier != "local" && !nonProxy[carrier] {
+				carrier = mainCarrier
+			}
+			known[line.ID] = true
+			config.Lines = append(config.Lines, platform.Line{
+				ID: line.ID,
+				Proxy: &platform.ProxyLine{
+					Protocol:       line.Proxy.Protocol,
+					Server:         line.Proxy.Server,
+					ServerName:     line.Proxy.ServerName,
+					Carrier:        carrier,
+					UDP:            line.Proxy.UDP,
+					CredentialsRef: line.Proxy.CredentialsRef,
+					CredentialsRev: line.Proxy.CredentialsRev,
+				},
+			})
+			continue
+		}
+		if line.Alias == "" {
 			return policy.Revision{}, fmt.Errorf("line %q has no interface alias", line.ID)
 		}
 		known[line.ID] = true
-		config.Lines = append(config.Lines, platform.Line{ID: line.ID, Interface: line.Alias})
+		config.Lines = append(config.Lines, platform.Line{ID: line.ID, Interface: line.Alias, VPN: line.VPN})
 	}
 	for _, pin := range p.AppLines {
 		if !known[pin.LineID] || pin.Path == "" {

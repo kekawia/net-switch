@@ -96,7 +96,19 @@ func (c *Core) Poll(ctx context.Context) error {
 		}
 	}
 	c.tracker.Ingest(routed, now)
+	needUDPStats := hasProxyLines(items)
 	c.mu.Unlock()
+	if needUDPStats {
+		if pe, ok := c.op.Engine.(engine.ProxyRuntime); ok {
+			if udpSummary, uErr := pe.ReadUnsupportedUDP(ctx); uErr == nil {
+				c.mu.Lock()
+				if gen == c.generation {
+					c.unsupportedUDP = udpSummary
+				}
+				c.mu.Unlock()
+			}
+		}
+	}
 	rules := c.pathRules()
 	paths := []string{}
 	for _, connection := range connections {
@@ -135,16 +147,23 @@ func (c *Core) sampleSelectedLinesLocked(s engine.Snapshot, only string) {
 		l.sampled = true
 		address := false
 		route := false
-		for _, a := range c.adapters {
-			if a["alias"] != item.Alias {
-				continue
+		if item.IsVirtual() {
+			address, route = c.virtualPrerequisiteLocked(item, items)
+			if item.VPN && !address && l.health.AddressMisses < linehealth.AddressMissesToFail-1 {
+				l.health.AddressMisses = linehealth.AddressMissesToFail - 1
 			}
-			ips := array(a["ipv4s"])
-			address = len(ips) > 0
-			for _, ip := range ips {
-				for _, r := range c.routes {
-					if ip == r["interfaceAddress"] {
-						route = true
+		} else {
+			for _, a := range c.adapters {
+				if a["alias"] != item.Alias {
+					continue
+				}
+				ips := array(a["ipv4s"])
+				address = len(ips) > 0
+				for _, ip := range ips {
+					for _, r := range c.routes {
+						if ip == r["interfaceAddress"] {
+							route = true
+						}
 					}
 				}
 			}
@@ -159,7 +178,12 @@ func (c *Core) sampleSelectedLinesLocked(s engine.Snapshot, only string) {
 		}
 		// Node samples health before its background route read completes. Count
 		// each native snapshot once, with the same five-second read spacing.
-		if address && now-c.routesAt <= 30000 &&
+		if item.IsVirtual() {
+			if address {
+				l.health.NoteRoute(ptr(route), now)
+				l.routeReadAt = ptr(now)
+			}
+		} else if address && now-c.routesAt <= 30000 &&
 			c.routesSequence > l.routeSequence &&
 			(l.routeReadAt == nil || now < *l.routeReadAt || now-*l.routeReadAt >= linehealth.RouteReadEveryMS) {
 			l.health.NoteRoute(ptr(route), c.routesAt)
@@ -289,7 +313,7 @@ func probeTargets(v any, custom bool) []string {
 func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 	c.mu.Lock()
 	s := c.op.Engine.Snapshot()
-	if s.Status != "on" || s.StartedWith == nil || len(s.StartedWith.Lines) < 2 {
+	if s.Status != "on" || s.StartedWith == nil || (len(s.StartedWith.Lines) < 2 && !hasVirtualLines(s.StartedWith.Lines)) {
 		c.mu.Unlock()
 		return
 	}
@@ -441,7 +465,7 @@ func (c *Core) scheduleProbes(ctx context.Context, conns []engine.Connection) {
 }
 
 func (c *Core) canTestLocked(id string, s engine.Snapshot) bool {
-	if s.Status != "on" || s.StartedWith == nil || len(s.StartedWith.Lines) < 2 || c.exhausted[id] {
+	if s.Status != "on" || s.StartedWith == nil || (len(s.StartedWith.Lines) < 2 && !hasVirtualLines(s.StartedWith.Lines)) || c.exhausted[id] {
 		return false
 	}
 	for _, line := range s.StartedWith.Lines {

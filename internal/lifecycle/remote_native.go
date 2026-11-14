@@ -19,6 +19,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
@@ -90,7 +91,7 @@ func nativeRevisionWith(r ce.Revision, rules apppath.Rules) (policy.Revision, er
 // Policy fields come from Control's own durable revision when the engine has
 // loaded exactly that revision; otherwise Control re-sends it.
 func (r *Remote) nativeSnapshotLocked(status protocol.Status) ce.Snapshot {
-	s := ce.Snapshot{Status: status.State, Instance: status.Instance, PID: status.PID, StartedAt: status.Started}
+	s := ce.Snapshot{Status: status.State, Instance: status.Instance, PID: status.PID, StartedAt: status.Started, VPNFirewall: status.VPNFirewall}
 	if s.Status == "" {
 		s.Status = "off"
 	}
@@ -143,6 +144,26 @@ func (r *Remote) nativeLoad(ctx context.Context, rpc *RPC, instance string, epoc
 	if err != nil {
 		return ce.Acknowledgement{}, err
 	}
+	if r.Credentials != nil {
+		needsCreds := r.hasPushedCreds(instance)
+		if !needsCreds {
+			for _, line := range native.Config.Lines {
+				if line.Proxy != nil && line.Proxy.CredentialsRef != "" {
+					needsCreds = true
+					break
+				}
+			}
+		}
+		if needsCreds {
+			creds, err := r.Credentials()
+			if err != nil {
+				return ce.Acknowledgement{}, err
+			}
+			if err := r.pushProxyCredentialsOn(ctx, rpc, instance, epoch, creds); err != nil {
+				return ce.Acknowledgement{}, err
+			}
+		}
+	}
 	method := "start"
 	if running {
 		method = "apply"
@@ -155,6 +176,94 @@ func (r *Remote) nativeLoad(ctx context.Context, rpc *RPC, instance string, epoc
 		return ce.Acknowledgement{}, errors.New("engine acknowledged a different revision")
 	}
 	return ce.Acknowledgement{Number: revision.Number, Hash: revision.Hash, Instance: instance, Point: applied.Point}, nil
+}
+
+func toProtocolCreds(creds map[string]proxy.Credentials) map[string]protocol.ProxyCredential {
+	out := make(map[string]protocol.ProxyCredential, len(creds))
+	for k, v := range creds {
+		if k == "" || v.Empty() {
+			continue
+		}
+		out[k] = protocol.ProxyCredential{Username: v.Username, Password: v.Password}
+	}
+	return out
+}
+
+func (r *Remote) hasPushedCreds(instance string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return instance != "" && r.credsInstance == instance
+}
+
+func (r *Remote) notePushedCreds(instance string, nonEmpty bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if nonEmpty {
+		r.credsInstance = instance
+	} else if r.credsInstance == instance {
+		r.credsInstance = ""
+	}
+}
+
+func (r *Remote) pushProxyCredentialsOn(ctx context.Context, rpc *RPC, instance string, epoch uint64, creds map[string]proxy.Credentials) error {
+	wire := toProtocolCreds(creds)
+	var ack bool
+	if err := r.sendOn(ctx, rpc, instance, epoch, "setProxyCredentials", map[string]any{"credentials": wire}, "", "", &ack); err != nil {
+		return err
+	}
+	r.notePushedCreds(instance, len(wire) > 0)
+	return nil
+}
+
+func (r *Remote) SyncProxyCredentials(ctx context.Context, creds map[string]proxy.Credentials) error {
+	r.mu.Lock()
+	rpc, instance := r.rpc, r.instance
+	r.mu.Unlock()
+	if rpc == nil || instance == "" {
+		return nil
+	}
+	wire := toProtocolCreds(creds)
+	if len(wire) == 0 && !r.hasPushedCreds(instance) {
+		return nil
+	}
+	var ack bool
+	if err := r.call(ctx, "setProxyCredentials", map[string]any{"credentials": wire}, "", &ack); err != nil {
+		return err
+	}
+	r.notePushedCreds(instance, len(wire) > 0)
+	return nil
+}
+
+func (r *Remote) TestProxyLine(ctx context.Context, req ce.ProxyTestRequest) (platform.ProxyTestResult, error) {
+	r.mu.Lock()
+	rpc := r.rpc
+	r.mu.Unlock()
+	if rpc == nil {
+		return platform.ProxyTestResult{}, errors.New("engine is not attached")
+	}
+	var res platform.ProxyTestResult
+	spec := protocol.ProxyTestSpec{
+		Line:     req.Line,
+		Username: req.Username,
+		Password: req.Password,
+		Target:   req.Target,
+	}
+	if err := r.call(ctx, "testProxyLine", map[string]any{"proxyTest": spec}, "", &res); err != nil {
+		return platform.ProxyTestResult{}, err
+	}
+	return res, nil
+}
+
+func (r *Remote) ReadUnsupportedUDP(ctx context.Context) (flows.UnsupportedUDPSummary, error) {
+	var reply struct {
+		Engine struct {
+			UnsupportedUDP flows.UnsupportedUDPSummary `json:"unsupportedUDP"`
+		} `json:"engine"`
+	}
+	if err := r.call(ctx, "stats", nil, "", &reply); err != nil {
+		return flows.UnsupportedUDPSummary{}, err
+	}
+	return reply.Engine.UnsupportedUDP, nil
 }
 
 func (r *Remote) nativeConnections(ctx context.Context) ([]ce.Connection, error) {

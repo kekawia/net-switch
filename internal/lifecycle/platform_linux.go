@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,8 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/desktop/xdg"
@@ -56,7 +59,7 @@ func linuxCall(op string, args map[string]any) (any, error) {
 		}
 		adapters := []any{}
 		for _, nic := range interfaces {
-			if nic.Flags&net.FlagLoopback != 0 || nic.Name == "NetSwitch" {
+			if nic.Flags&net.FlagLoopback != 0 || isOwnCaptureInterface(nic.Name) {
 				continue
 			}
 			read := func(name string) (uint64, error) {
@@ -80,6 +83,7 @@ func linuxCall(op string, args map[string]any) (any, error) {
 			return nil, err
 		}
 		adapters := []any{}
+		vpnAdapters := []map[string]any{}
 		routes := []any{}
 		defaults := map[string]string{}
 		b, err := os.ReadFile("/proc/net/route")
@@ -88,15 +92,16 @@ func linuxCall(op string, args map[string]any) (any, error) {
 		}
 		for _, line := range strings.Split(string(b), "\n") {
 			f := strings.Fields(line)
-			if len(f) >= 4 && f[1] == "00000000" {
+			if len(f) >= 8 && f[1] == "00000000" && f[7] == "00000000" {
 				gateway, err := strconv.ParseUint(f[2], 16, 32)
 				if err == nil {
 					defaults[f[0]] = net.IPv4(byte(gateway), byte(gateway>>8), byte(gateway>>16), byte(gateway>>24)).String()
 				}
 			}
 		}
+		vpnDefaultIfs := linuxVPNDefaultRouteIfs()
 		for _, nic := range interfaces {
-			if nic.Flags&net.FlagLoopback != 0 {
+			if nic.Flags&net.FlagLoopback != 0 || isOwnCaptureInterface(nic.Name) {
 				continue
 			}
 			addresses, err := nic.Addrs()
@@ -105,12 +110,16 @@ func linuxCall(op string, args map[string]any) (any, error) {
 			}
 			ips := []any{}
 			ipv6 := false
+			ownCapture := false
 			for _, address := range addresses {
 				ip, _, err := net.ParseCIDR(address.String())
 				if err != nil {
 					continue
 				}
 				if ip.To4() != nil {
+					if ip.String() == "198.18.0.1" {
+						ownCapture = true
+					}
 					ips = append(ips, ip.String())
 					if defaults[nic.Name] != "" {
 						routes = append(routes, map[string]any{"interfaceAddress": ip.String(), "alias": nic.Name, "index": nic.Index})
@@ -119,17 +128,47 @@ func linuxCall(op string, args map[string]any) (any, error) {
 					ipv6 = true
 				}
 			}
+			if ownCapture {
+				continue
+			}
 			status := "Down"
 			if nic.Flags&net.FlagUp != 0 {
 				status = "Up"
 			}
+			isVPN := isLinuxVPNInterface(nic)
 			media := "Ethernet"
 			if _, err := os.Stat(filepath.Join("/sys/class/net", nic.Name, "wireless")); err == nil {
 				media = "Wireless"
 			}
-			adapters = append(adapters, map[string]any{"alias": nic.Name, "name": nic.Name, "index": nic.Index, "ipv4s": ips, "ipv6": ipv6, "status": status, "mediaType": media, "gateway": defaults[nic.Name]})
+			entry := map[string]any{"alias": nic.Name, "name": nic.Name, "index": nic.Index, "ipv4s": ips, "ipv6": ipv6, "status": status, "mediaType": media, "gateway": defaults[nic.Name]}
+			if isVPN {
+				entry["virtual"] = true
+				var primary any
+				if len(ips) > 0 {
+					primary = ips[0]
+				}
+				vpnAdapters = append(vpnAdapters, map[string]any{
+					"alias":           nic.Name,
+					"index":           nic.Index,
+					"status":          status,
+					"ipv4":            primary,
+					"ipv4s":           ips,
+					"ipv6":            ipv6,
+					"hasDefaultRoute": vpnDefaultIfs[nic.Index] || defaults[nic.Name] != "",
+				})
+			}
+			adapters = append(adapters, entry)
 		}
-		return map[string]any{"adapters": adapters, "defaultRoutes": routes, "readAt": time.Now().UnixMilli(), "policy": nil}, nil
+		slices.SortFunc(vpnAdapters, func(a, b map[string]any) int {
+			sa, _ := a["alias"].(string)
+			sb, _ := b["alias"].(string)
+			return strings.Compare(sa, sb)
+		})
+		out := map[string]any{"adapters": adapters, "defaultRoutes": routes, "readAt": time.Now().UnixMilli(), "policy": nil}
+		if len(vpnAdapters) > 0 {
+			out["vpnAdapters"] = vpnAdapters
+		}
+		return out, nil
 	case "line-check":
 		return map[string]any{"outcome": "engineUnavailable", "delay": nil}, nil
 	case "close-tcp":
@@ -195,4 +234,150 @@ func DesktopCall(_ context.Context, op string, args map[string]any) (any, error)
 		return "unchanged", nil
 	}
 	return nil, fmt.Errorf("desktop operation %q refused", op)
+}
+
+func isOwnEngineTunName(lower string) bool {
+	if len(lower) != 12 || !strings.HasPrefix(lower, "ns") {
+		return false
+	}
+	for i := 2; i < len(lower); i++ {
+		c := lower[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func isOwnCaptureInterface(name string) bool {
+	lower := strings.ToLower(name)
+	if lower == "netswitch" || lower == "netswitch0" || isOwnEngineTunName(lower) {
+		return true
+	}
+	if alias, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias")); err == nil {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(string(alias))), "netswitch:") {
+			return true
+		}
+	}
+	return false
+}
+
+var linuxExcludedPrefixes = []string{
+	"docker", "br-", "veth", "virbr", "vnet", "cni", "flannel", "cali", "kube", "testisp",
+}
+
+var linuxKernelFallbackDevices = map[string]bool{
+	"tunl0": true, "sit0": true, "gre0": true, "gretap0": true,
+	"erspan0": true, "ip6tnl0": true, "ip6gre0": true, "ip_vti0": true, "ip6_vti0": true,
+}
+
+func isLinuxVPNInterface(nic net.Interface) bool {
+	lower := strings.ToLower(nic.Name)
+	if isOwnCaptureInterface(lower) || linuxKernelFallbackDevices[lower] {
+		return false
+	}
+	for _, prefix := range linuxExcludedPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return false
+		}
+	}
+	sysDir := filepath.Join("/sys/class/net", nic.Name)
+	if _, err := os.Stat(filepath.Join(sysDir, "master")); err == nil {
+		return false
+	}
+	if uevent, err := os.ReadFile(filepath.Join(sysDir, "uevent")); err == nil {
+		for _, line := range strings.Split(string(uevent), "\n") {
+			if line == "DEVTYPE=wireguard" || line == "DEVTYPE=ppp" {
+				return true
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(sysDir, "tun_flags")); err == nil {
+		return true
+	}
+	if rawType, err := os.ReadFile(filepath.Join(sysDir, "type")); err == nil {
+		switch strings.TrimSpace(string(rawType)) {
+		case "65534", "512", "768", "769", "776", "778":
+			return true
+		}
+	}
+	return nic.Flags&net.FlagPointToPoint != 0
+}
+
+func linuxVPNDefaultRouteIfs() map[int]bool {
+	out := map[int]bool{}
+	rib, err := syscall.NetlinkRIB(syscall.RTM_GETROUTE, syscall.AF_INET)
+	if err != nil {
+		return out
+	}
+	msgs, err := syscall.ParseNetlinkMessage(rib)
+	if err != nil {
+		return out
+	}
+	const rtaTable = 15
+	hasFull := map[int]bool{}
+	hasLower := map[int]bool{}
+	hasUpper := map[int]bool{}
+	for _, msg := range msgs {
+		if msg.Header.Type != syscall.RTM_NEWROUTE || len(msg.Data) < syscall.SizeofRtMsg {
+			continue
+		}
+		dstLen := msg.Data[1]
+		table := uint32(msg.Data[4])
+		rtmProto := msg.Data[6]
+		rtmType := msg.Data[7]
+		if rtmType != syscall.RTN_UNICAST || dstLen > 1 || rtmProto == 186 {
+			continue
+		}
+		attrs, err := syscall.ParseNetlinkRouteAttr(&msg)
+		if err != nil {
+			continue
+		}
+		var oif int
+		var dstFirstByte byte
+		var priority uint32
+		for _, attr := range attrs {
+			switch attr.Attr.Type {
+			case rtaTable:
+				if len(attr.Value) >= 4 {
+					table = binary.NativeEndian.Uint32(attr.Value[:4])
+				}
+			case syscall.RTA_OIF:
+				if len(attr.Value) >= 4 {
+					oif = int(binary.NativeEndian.Uint32(attr.Value[:4]))
+				}
+			case syscall.RTA_DST:
+				if len(attr.Value) >= 1 {
+					dstFirstByte = attr.Value[0]
+				}
+			case syscall.RTA_PRIORITY:
+				if len(attr.Value) >= 4 {
+					priority = binary.NativeEndian.Uint32(attr.Value[:4])
+				}
+			}
+		}
+		if oif <= 0 || table == syscall.RT_TABLE_LOCAL || (table >= 20100 && table <= 20355) || (table >= 21000 && table <= 21255) {
+			continue
+		}
+		if dstLen == 0 {
+			if table != syscall.RT_TABLE_MAIN || priority < 4096 {
+				hasFull[oif] = true
+			}
+		} else if dstLen == 1 {
+			if dstFirstByte == 0 {
+				hasLower[oif] = true
+			} else if dstFirstByte == 128 {
+				hasUpper[oif] = true
+			}
+		}
+	}
+	for idx := range hasFull {
+		out[idx] = true
+	}
+	for idx := range hasLower {
+		if hasUpper[idx] {
+			out[idx] = true
+		}
+	}
+	return out
 }

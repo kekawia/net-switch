@@ -33,9 +33,22 @@ type defaultRoute struct {
 	Metric           uint32 `json:"metric"`
 }
 
+type vpnAdapter struct {
+	Alias           string   `json:"alias"`
+	GUID            string   `json:"guid,omitempty"`
+	Index           uint32   `json:"index,omitempty"`
+	Description     string   `json:"description,omitempty"`
+	Status          string   `json:"status"`
+	IPv4            *string  `json:"ipv4"`
+	IPv4s           []string `json:"ipv4s"`
+	IPv6            bool     `json:"ipv6"`
+	HasDefaultRoute bool     `json:"hasDefaultRoute"`
+}
+
 type networkLine struct {
 	ReadAt        int64            `json:"readAt"`
 	Adapters      []networkAdapter `json:"adapters"`
+	VPNAdapters   []vpnAdapter     `json:"vpnAdapters,omitempty"`
 	DefaultRoutes []defaultRoute   `json:"defaultRoutes"`
 	Policy        any              `json:"policy"`
 }

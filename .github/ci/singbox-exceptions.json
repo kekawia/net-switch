@@ -101,7 +101,7 @@
     },
     {
       "path": "internal/lifecycle/remote_native.go",
-      "sha256": "4811914f9b3e46b2bda78adb65347e9a5987c72729c8eb67be2713fc8da567c7",
+      "sha256": "a7e7950e1cb47dec8c7b8e375f86fadcc123c2003c90c469c7297fa99521c192",
       "matches": 1,
       "category": "stand-in-refusal",
       "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"

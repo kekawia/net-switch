@@ -115,6 +115,7 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	if err != nil {
 		return err
 	}
+	remote.Credentials = core.ProxyCredentials
 	listener, err := net.Listen("tcp4", "127.0.0.1:47821")
 	if err != nil {
 		listener, err = net.Listen("tcp4", "127.0.0.1:0")

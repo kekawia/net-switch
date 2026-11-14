@@ -38,7 +38,7 @@ func (c *Core) combineActiveLocked(s engine.Snapshot) bool {
 	return n >= 2
 }
 func (c *Core) targetLocked(id string, s engine.Snapshot) string {
-	if s.StartedWith == nil || len(s.StartedWith.Lines) < 2 {
+	if s.StartedWith == nil || (len(s.StartedWith.Lines) < 2 && !hasVirtualLines(s.StartedWith.Lines)) {
 		return id
 	}
 	if l := c.lanes[id]; l != nil && l.target != nil {
@@ -60,11 +60,12 @@ func (c *Core) outrankingLocked() (map[string]any, []map[string]any) {
 	var main map[string]any
 	others := []map[string]any{}
 	items := c.itemsLocked()
-	if len(items) == 0 {
+	mainIdx := primaryPhysicalIndex(items)
+	if mainIdx < 0 {
 		return main, others
 	}
 	for _, a := range c.adapters {
-		if a["alias"] == items[0].Alias && a["connected"] == true {
+		if a["alias"] == items[mainIdx].Alias && a["connected"] == true {
 			main = a
 			break
 		}
@@ -72,7 +73,10 @@ func (c *Core) outrankingLocked() (map[string]any, []map[string]any) {
 	if main == nil {
 		return main, others
 	}
-	for _, l := range items[1:] {
+	for i, l := range items {
+		if i == mainIdx || l.IsVirtual() {
+			continue
+		}
 		for _, a := range c.adapters {
 			if a["alias"] == l.Alias && a["alias"] != main["alias"] && a["connected"] == true && metric(a) <= metric(main) {
 				others = append(others, a)
@@ -136,13 +140,14 @@ func (c *Core) State() map[string]any {
 		}
 	}
 	items := c.itemsLocked()
+	mainID := primaryDisplayID(items)
 	routing := s.Status == "on"
 	ll := []any{}
 	candidates := []any{}
 	appRows := []any{}
 	wifi := false
 	hasWifiLine := false
-	for i, line := range items {
+	for _, line := range items {
 		var adapter map[string]any
 		for _, a := range c.adapters {
 			if a["alias"] == line.Alias {
@@ -151,10 +156,14 @@ func (c *Core) State() map[string]any {
 			}
 		}
 		kind := any(line.Kind)
-		if line.Kind == nil {
+		if line.Proxy != nil {
+			kind = "proxy"
+		} else if line.VPN {
+			kind = "vpn"
+		} else if line.Kind == nil {
 			kind = adapter["kind"]
 		}
-		if (line.Kind != nil && *line.Kind == "wifi") || adapter["kind"] == "wifi" {
+		if !line.IsVirtual() && ((line.Kind != nil && *line.Kind == "wifi") || adapter["kind"] == "wifi") {
 			hasWifiLine = true
 		}
 		l := c.lanes[line.ID]
@@ -177,11 +186,16 @@ func (c *Core) State() map[string]any {
 			carrying = t == line.ID
 		}
 		var rate any
-		if m, ok := c.meters[line.Alias]; ok && c.now()-m.at <= 5000 {
+		if line.Proxy != nil {
+			if routing && c.monitorFailures < 3 {
+				r := c.tracker.LineRate(line.ID)
+				rate = rateJSON(&r)
+			}
+		} else if m, ok := c.meters[line.Alias]; ok && c.now()-m.at <= 5000 {
 			rate = rateJSON(m.rate)
 		}
 		ssid := adapter["ssid"]
-		if !js.Truth(ssid) {
+		if line.IsVirtual() || !js.Truth(ssid) {
 			ssid = nil
 		}
 		blocked := false
@@ -197,16 +211,34 @@ func (c *Core) State() map[string]any {
 				}
 			}
 		}
-		ll = append(ll, map[string]any{
+		entry := map[string]any{
 			"id": line.ID, "alias": line.Alias, "label": json.RawMessage(js.MarshalString(line.Label)),
-			"kind": kind, "main": i == 0, "connected": connected, "problem": problem, "ping": ping,
+			"kind": kind, "main": line.ID == mainID, "connected": connected, "problem": problem, "ping": ping,
 			"connections": c.connections[line.ID], "carrying": carrying, "target": target,
 			"rate": rate, "ssid": ssid, "metered": line.Metered, "strict": line.Strict,
 			"cap": line.Cap, "usage": c.usage.Used(line.ID), "exhausted": c.exhausted[line.ID],
 			"blocked": blocked, "weight": line.Weight, "share": share,
-		})
+		}
+		if line.VPN {
+			entry["vpn"] = true
+			entry["onlyChosen"] = line.IsOnlyChosen()
+			entry["fallback"] = line.AllowsFallback()
+		} else if line.Proxy != nil {
+			entry["onlyChosen"] = line.IsOnlyChosen()
+			entry["fallback"] = line.AllowsFallback()
+			entry["proxy"] = c.proxyStateJSONLocked(line.Proxy)
+		} else if line.Fallback != nil {
+			entry["fallback"] = *line.Fallback
+		}
+		if drop := c.unsupportedUDP.Lines[line.ID]; drop > 0 {
+			entry["unsupportedUdp"] = drop
+		}
+		ll = append(ll, entry)
 	}
 	for _, a := range c.adapters {
+		if c.findVPNAdapterLocked(js.Text(a["alias"]), js.Text(a["guid"])) != nil {
+			continue
+		}
 		if a["kind"] == "wifi" {
 			wifi = true
 		}
@@ -220,6 +252,26 @@ func (c *Core) State() map[string]any {
 				ssid = nil
 			}
 			candidates = append(candidates, map[string]any{"alias": a["alias"], "label": lines.LineLabel(a), "kind": a["kind"], "ssid": ssid})
+		}
+	}
+	for _, v := range c.vpnAdapters {
+		if v["connected"] != true {
+			continue
+		}
+		alias := js.Text(v["alias"])
+		taken := false
+		for _, l := range items {
+			taken = taken || l.Alias == alias
+		}
+		if !taken {
+			candidates = append(candidates, map[string]any{
+				"alias":           alias,
+				"label":           alias,
+				"kind":            "vpn",
+				"vpn":             true,
+				"hasDefaultRoute": js.Truth(v["hasDefaultRoute"]),
+				"ssid":            nil,
+			})
 		}
 	}
 	for _, a := range apps.MergeRowsWith(c.tracker.Snapshot(c.pinsLocked()), c.outside, c.pinsLocked(), c.pathRules()) {
@@ -237,6 +289,18 @@ func (c *Core) State() map[string]any {
 		// routed by guess. Windows rows and 0.3.x shapes are unchanged.
 		if a.Identity != "" {
 			row["identity"] = a.Identity
+		}
+		if len(c.unsupportedUDP.Apps) > 0 {
+			drop := c.unsupportedUDP.Apps[a.Identity]
+			if drop == 0 {
+				drop = c.unsupportedUDP.Apps[a.Key]
+			}
+			if drop == 0 {
+				drop = c.unsupportedUDP.Apps[a.Path]
+			}
+			if drop > 0 {
+				row["unsupportedUdp"] = drop
+			}
 		}
 		if a.Line != nil {
 			trackedIdentity := a.Identity
@@ -275,17 +339,21 @@ func (c *Core) State() map[string]any {
 	_, policyChanged := js.Object(undo["policy"])["value"]
 	_, others := c.outrankingLocked()
 	updates := c.op.Mode != "proxy" && c.values["checkForUpdates"] == true
+	routingState := map[string]any{
+		"status": s.Status, "wanted": c.wanted, "error": s.Error,
+		"measuring": routing && c.monitorFailures < 3,
+		"proxyPort": s.ProxyPort, "ipv6": ipv6, "retryAt": retryAt,
+	}
+	if s.VPNFirewall != nil {
+		routingState["vpnFirewall"] = s.VPNFirewall
+	}
 	state := map[string]any{
 		"mode": c.op.Mode, "elevated": c.elevated, "version": c.op.Version,
 		"update": offer, "updateChecks": updates,
 		"features": map[string]any{"reconnect": true, "combine": true, "lines": true, "installedApps": true},
 		"combine":  map[string]any{"on": s.Policy.Combine, "active": c.combineActiveLocked(s), "mode": c.values["combineMode"]},
-		"routing": map[string]any{
-			"status": s.Status, "wanted": c.wanted, "error": s.Error,
-			"measuring": routing && c.monitorFailures < 3,
-			"proxyPort": s.ProxyPort, "ipv6": ipv6, "retryAt": retryAt,
-		},
-		"lines": ll, "candidates": candidates, "apps": appRows,
+		"routing":  routingState,
+		"lines":    ll, "candidates": candidates, "apps": appRows,
 		"events": append([]map[string]any{}, c.events...),
 		"settings": map[string]any{
 			"autostart": autostart, "checkForUpdates": updates,

@@ -240,8 +240,9 @@ func readNetwork() (networkLine, error) {
 		return line, fmt.Errorf("read routes: %w", err)
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(routes))
+	allRoutes := routes.Rows()
 	defaults := []windows.MibIpForwardRow2{}
-	for _, route := range routes.Rows() {
+	for _, route := range allRoutes {
 		if route.DestinationPrefix.PrefixLength == 0 && routeIPv4(&route.DestinationPrefix.Prefix) == "0.0.0.0" {
 			defaults = append(defaults, route)
 		}
@@ -260,10 +261,12 @@ func readNetwork() (networkLine, error) {
 		return line, fmt.Errorf("read interfaces: %w", err)
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(table))
-	result, err := assembleNetwork(line, unsafe.Slice(&table.Table[0], table.NumEntries), addresses, defaults, ssids, hidden, windows.GetIpInterfaceEntry)
+	ifRows := unsafe.Slice(&table.Table[0], table.NumEntries)
+	result, err := assembleNetwork(line, ifRows, addresses, defaults, ssids, hidden, windows.GetIpInterfaceEntry)
 	for i := range result.Adapters {
 		result.Adapters[i].IPv6 = globalIPv6[result.Adapters[i].Index]
 	}
+	result.VPNAdapters = collectVPNAdapters(ifRows, addresses, globalIPv6, allRoutes)
 	return result, err
 }
 
@@ -279,6 +282,9 @@ func assembleNetwork(line networkLine, rows []windows.MibIfRow2, addresses map[u
 			continue
 		}
 		own := addresses[row.InterfaceIndex]
+		if slices.Contains(own, "198.18.0.1") || strings.EqualFold(row.InterfaceGuid.String(), "{D9B44E84-B5C7-4DC4-97A4-4E7CA6722686}") {
+			continue
+		}
 		if own == nil {
 			own = []string{}
 		}
@@ -350,6 +356,146 @@ func assembleNetwork(line networkLine, rows []windows.MibIfRow2, addresses map[u
 		return line, errors.New("Windows returned no network adapters")
 	}
 	return line, nil
+}
+
+var windowsVPNTokens = []string{
+	"wireguard",
+	"wintun",
+	"openvpn",
+	"tap-windows",
+	"ovpn-dco",
+	"tailscale",
+	"zerotier",
+	"mullvad",
+	"nordlynx",
+	"nordvpn",
+	"protonvpn",
+	"windscribe",
+	"surfshark",
+	"expressvpn",
+	"cyberghost",
+	"cloudflare warp",
+	"cisco anyconnect",
+	"cisco secure client",
+	"globalprotect",
+	"pangp",
+	"fortinet",
+	"fortissl",
+	"juniper",
+	"pulse secure",
+	"ivanti",
+	"sonicwall",
+	"softether",
+	"private internet access",
+}
+
+var windowsNonVPNDescTokens = []string{
+	"microsoft teredo",
+	"isatap",
+	"6to4",
+	"ip-https",
+	"kernel debug",
+	"wi-fi direct",
+	"hosted network",
+	"hyper-v",
+	"virtual ethernet",
+	"vmware",
+	"virtualbox",
+	"bluetooth",
+	"ndis lightweight",
+	"qos packet",
+	"wfp ",
+}
+
+func isWindowsVPNRow(row *windows.MibIfRow2, alias, desc string) bool {
+	if row.Type == 24 || row.InterfaceAndOperStatusFlags&0x82 != 0 || alias == "" {
+		return false
+	}
+	lowerAlias := strings.ToLower(strings.TrimSpace(alias))
+	lowerDesc := strings.ToLower(strings.TrimSpace(desc))
+	if strings.HasPrefix(lowerAlias, "netswitch") || strings.Contains(lowerDesc, "netswitch") {
+		return false
+	}
+	if strings.HasPrefix(lowerAlias, "testisp") {
+		return false
+	}
+	if strings.HasPrefix(lowerAlias, "vethernet") || strings.HasPrefix(lowerAlias, "local area connection*") {
+		return false
+	}
+	for _, token := range windowsNonVPNDescTokens {
+		if strings.Contains(lowerDesc, token) {
+			return false
+		}
+	}
+	if strings.Contains(lowerDesc, "wan miniport") {
+		return row.Type == 23 && row.OperStatus == 1 && !strings.HasPrefix(lowerAlias, "wan miniport")
+	}
+	if row.Type == 23 || row.Type == 53 || row.Type == 131 {
+		return true
+	}
+	if row.InterfaceAndOperStatusFlags&1 == 0 {
+		for _, token := range windowsVPNTokens {
+			if strings.Contains(lowerDesc, token) || strings.Contains(lowerAlias, token) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func collectVPNAdapters(rows []windows.MibIfRow2, addresses map[uint32][]string, globalIPv6 map[uint32]bool, allRoutes []windows.MibIpForwardRow2) []vpnAdapter {
+	hasFull := map[uint32]bool{}
+	hasLower := map[uint32]bool{}
+	hasUpper := map[uint32]bool{}
+	for _, route := range allRoutes {
+		switch route.DestinationPrefix.PrefixLength {
+		case 0:
+			if routeIPv4(&route.DestinationPrefix.Prefix) == "0.0.0.0" && route.Metric < 4096 {
+				hasFull[route.InterfaceIndex] = true
+			}
+		case 1:
+			switch routeIPv4(&route.DestinationPrefix.Prefix) {
+			case "0.0.0.0":
+				hasLower[route.InterfaceIndex] = true
+			case "128.0.0.0":
+				hasUpper[route.InterfaceIndex] = true
+			}
+		}
+	}
+	var out []vpnAdapter
+	for i := range rows {
+		row := &rows[i]
+		alias := windows.UTF16ToString(row.Alias[:])
+		desc := windows.UTF16ToString(row.Description[:])
+		if !isWindowsVPNRow(row, alias, desc) {
+			continue
+		}
+		own := addresses[row.InterfaceIndex]
+		if slices.Contains(own, "198.18.0.1") || strings.EqualFold(row.InterfaceGuid.String(), "{D9B44E84-B5C7-4DC4-97A4-4E7CA6722686}") {
+			continue
+		}
+		if own == nil {
+			own = []string{}
+		}
+		var primary *string
+		if len(own) > 0 {
+			ip := own[0]
+			primary = &ip
+		}
+		out = append(out, vpnAdapter{
+			Alias:           alias,
+			GUID:            strings.ToUpper(row.InterfaceGuid.String()),
+			Index:           row.InterfaceIndex,
+			Description:     desc,
+			Status:          adapterStatus(row),
+			IPv4:            primary,
+			IPv4s:           own,
+			IPv6:            globalIPv6[row.InterfaceIndex],
+			HasDefaultRoute: hasFull[row.InterfaceIndex] || (hasLower[row.InterfaceIndex] && hasUpper[row.InterfaceIndex]),
+		})
+	}
+	slices.SortFunc(out, func(a, b vpnAdapter) int { return strings.Compare(a.Alias, b.Alias) })
+	return out
 }
 
 func network(once bool) error {

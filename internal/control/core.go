@@ -21,7 +21,9 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/apppath"
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
+	"github.com/AyoubAchour/net-switch/internal/control/secrets"
 	"github.com/AyoubAchour/net-switch/internal/crashnet"
+	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/linehealth"
 	"github.com/AyoubAchour/net-switch/internal/lines"
@@ -46,6 +48,7 @@ type Options struct {
 	Engine                 engine.Engine
 	Platform               platform.System
 	Settings               *settings.Store
+	Secrets                *secrets.Store
 	Undo                   *settings.Store
 	Journal                *settings.Store
 	IO                     settings.Options
@@ -107,7 +110,10 @@ type Core struct {
 	laneQueue, startQueue, setupQueue            *Queue
 	values                                       map[string]any
 	lanes                                        map[string]*lane
+	secrets                                      *secrets.Store
 	adapters                                     []map[string]any
+	vpnAdapters                                  []map[string]any
+	unsupportedUDP                               flows.UnsupportedUDPSummary
 	routes                                       []map[string]any
 	routesAt                                     int64
 	networkSequence, routesSequence              uint64
@@ -226,7 +232,14 @@ func New(ctx context.Context, o Options) (*Core, error) {
 	if o.PathRules != nil && o.PathRules.Separator != "" {
 		rules = *o.PathRules
 	}
-	c := &Core{op: o, ctx: ctx, cancel: cancel, values: o.Settings.Values(), lanes: map[string]*lane{}, adapters: []map[string]any{}, routes: []map[string]any{}, meters: map[string]meter{}, tracker: apps.NewTrackerWithRules(rules), outside: apps.NewOutsideTrackerWithRules(rules), usage: usage.New(o.Location), exhausted: map[string]bool{}, closePending: map[string]bool{}, connections: map[string]int{}, info: map[string]map[string]any{}, events: []map[string]any{}, wanted: true, lastStatus: "off"}
+	c := &Core{op: o, ctx: ctx, cancel: cancel, values: o.Settings.Values(), lanes: map[string]*lane{}, secrets: o.Secrets, adapters: []map[string]any{}, vpnAdapters: []map[string]any{}, routes: []map[string]any{}, meters: map[string]meter{}, tracker: apps.NewTrackerWithRules(rules), outside: apps.NewOutsideTrackerWithRules(rules), usage: usage.New(o.Location), exhausted: map[string]bool{}, closePending: map[string]bool{}, connections: map[string]int{}, info: map[string]map[string]any{}, events: []map[string]any{}, wanted: true, lastStatus: "off"}
+	if c.secrets == nil && o.UserDir != "" {
+		c.secrets = secrets.New(o.UserDir, secrets.Options{
+			Files:      o.IO.Files,
+			SyncFile:   o.IO.SyncFile,
+			SyncParent: o.IO.SyncParent,
+		})
+	}
 	if o.ServiceMode {
 		c.wanted = false
 	}
@@ -553,6 +566,7 @@ func (c *Core) resetLocked() {
 	c.outsideStarts = map[string]string{}
 	c.evidence = map[string]map[string]int64{}
 	c.connections = map[string]int{}
+	c.unsupportedUDP = flows.UnsupportedUDPSummary{}
 	c.monitorFailures = 0
 	for _, l := range c.lanes {
 		l.generation++
@@ -668,11 +682,29 @@ func (c *Core) noteLocked(kind, id, text string) {
 }
 func (c *Core) policyLocked() engine.Policy {
 	items := c.itemsLocked()
+	ordered := c.policyLinesLocked(items)
 	up := map[string]bool{}
 	for id, l := range c.lanes {
 		up[id] = l.health.Up != nil && *l.health.Up
 	}
-	p := engine.Policy{Lines: items, AppLines: append(apps.Pins{}, c.pinsLocked()...), Combine: js.Truth(c.values["combine"]), Shares: c.sharesLocked(items), Blocked: []string{}, Lanes: map[string]string{}, IPv6: c.effectiveIPv6Locked()}
+	for _, l := range ordered {
+		if !l.IsVirtual() {
+			continue
+		}
+		addr, _ := c.virtualPrerequisiteLocked(l, ordered)
+		if !addr {
+			up[l.ID] = false
+		} else if ln := c.lanes[l.ID]; ln == nil || ln.health.Up == nil {
+			up[l.ID] = true
+		}
+	}
+	excludeVirtual := len(ordered) > 0 && ordered[0].IsVirtual() && !ordered[0].IsOnlyChosen()
+	combine := js.Truth(c.values["combine"]) && !excludeVirtual
+	shares := lines.Shares{}
+	if !excludeVirtual {
+		shares = c.sharesLocked(ordered)
+	}
+	p := engine.Policy{Lines: ordered, AppLines: append(apps.Pins{}, c.pinsLocked()...), Combine: combine, Shares: shares, Blocked: []string{}, Lanes: map[string]string{}, IPv6: c.effectiveIPv6Locked()}
 	current := c.op.Engine.Snapshot()
 	if p.Combine && current.Policy.Combine && c.values["combineMode"] == "auto" && len(p.Shares) == len(current.Policy.Shares) {
 		sameIDs, moved := true, false
@@ -684,12 +716,16 @@ func (c *Core) policyLocked() engine.Policy {
 			p.Shares = append(lines.Shares{}, current.Policy.Shares...)
 		}
 	}
-	for i, l := range items {
-		t := lines.LaneTarget(items, l.ID, up, c.exhausted)
+	for i, l := range ordered {
+		t := lines.LaneTarget(ordered, l.ID, up, c.exhausted)
 		if t != nil {
 			p.Lanes[l.ID] = *t
-			if i > 0 && c.exhausted[l.ID] && *t == l.ID {
-				p.Blocked = append(p.Blocked, l.ID)
+			if *t == l.ID {
+				if l.IsVirtual() && !l.AllowsFallback() && (!up[l.ID] || c.exhausted[l.ID]) {
+					p.Blocked = append(p.Blocked, l.ID)
+				} else if i > 0 && c.exhausted[l.ID] {
+					p.Blocked = append(p.Blocked, l.ID)
+				}
 			}
 		}
 	}
@@ -718,6 +754,18 @@ func (c *Core) ipv6Locked() bool {
 		return false
 	}
 	for _, l := range items {
+		if l.Proxy != nil {
+			if !l.Proxy.IPv6 {
+				return false
+			}
+			continue
+		}
+		if l.VPN {
+			if !c.vpnHasIPv6Locked(l.Alias) {
+				return false
+			}
+			continue
+		}
 		found := false
 		for _, a := range c.adapters {
 			if a["alias"] == l.Alias && a["ipv6"] == true {
@@ -1040,7 +1088,7 @@ func (c *Core) checkpoint(point string) {
 
 func (c *Core) recordLanesLocked(p engine.Policy) {
 	active := c.op.Engine.Snapshot()
-	if active.Status != "on" || active.StartedWith == nil || len(active.StartedWith.Lines) < 2 {
+	if active.Status != "on" || active.StartedWith == nil || (len(active.StartedWith.Lines) < 2 && !hasVirtualLines(active.StartedWith.Lines)) {
 		return
 	}
 	for _, line := range p.Lines {
@@ -1247,12 +1295,13 @@ func (c *Core) bindingChangedLocked(s engine.Snapshot) bool {
 	if s.StartedWith == nil {
 		return false
 	}
-	items := c.itemsLocked()
+	items := c.policyLinesLocked(c.itemsLocked())
 	if len(items) != len(s.StartedWith.Lines) {
 		return true
 	}
 	for i, line := range items {
-		if line.ID != s.StartedWith.Lines[i].ID || line.Alias != s.StartedWith.Lines[i].Alias {
+		started := s.StartedWith.Lines[i]
+		if line.ID != started.ID || line.Alias != started.Alias || line.VPN != started.VPN || !reflect.DeepEqual(line.Proxy, started.Proxy) {
 			return true
 		}
 	}
@@ -1331,7 +1380,7 @@ func prepareAdapters(v any) ([]map[string]any, error) {
 	out := []map[string]any{}
 	for _, v := range list {
 		a := js.Object(v)
-		if a == nil || a["alias"] == "NetSwitch" {
+		if a == nil || isCaptureAlias(js.Text(a["alias"])) {
 			continue
 		}
 		txt := js.Text(a["mediaType"]) + " " + js.Text(a["description"])
@@ -1378,6 +1427,7 @@ func (c *Core) ApplyNetwork(ctx context.Context, v map[string]any, gen, sequence
 	}
 	c.networkSequence = sequence
 	c.adapters = a
+	c.vpnAdapters = prepareVPNAdapters(v["vpnAdapters"])
 	c.scanFailures = 0
 	if v["policy"] != "unknown" {
 		c.policy = v["policy"]
@@ -1402,6 +1452,7 @@ func (c *Core) followAdapters() error {
 	adapters := c.adapters
 	now := c.now()
 	changed := false
+	vpnStateChanged := false
 	notes := []string{}
 	renamed := [][2]string{}
 	if len(items) == 0 {
@@ -1413,6 +1464,46 @@ func (c *Core) followAdapters() error {
 	}
 	normalize := func(s string) string { return strings.ToLower(strings.NewReplacer("{", "", "}", "").Replace(s)) }
 	for i, l := range items {
+		if l.Proxy != nil {
+			if ln := c.lanes[l.ID]; ln != nil {
+				ln.missingAt = nil
+				ln.missingReads = 0
+			}
+			continue
+		}
+		if l.VPN {
+			vpnFound := c.findVPNAdapterLocked(l.Alias, ptrStringValue(l.GUID))
+			if ln := c.lanes[l.ID]; ln != nil {
+				if vpnFound != nil {
+					ln.missingAt = nil
+					ln.missingReads = 0
+					alias := js.Text(vpnFound["alias"])
+					guid := js.Text(vpnFound["guid"])
+					if alias != "" && alias != l.Alias {
+						notes = append(notes, fmt.Sprintf("%s's adapter was renamed from %s to %s", l.Label, l.Alias, alias))
+						items[i].Alias = alias
+						changed = true
+					}
+					if guid != "" && (l.GUID == nil || *l.GUID != guid) {
+						items[i].GUID = &guid
+						changed = true
+					}
+				} else if ln.missingAt == nil {
+					ln.missingAt = ptr(now)
+					ln.missingReads = 1
+				} else {
+					ln.missingReads++
+				}
+				addr := vpnFound != nil && vpnFound["connected"] == true
+				hadAddr := ln.health.HadAddress != nil && *ln.health.HadAddress
+				if ln.health.Up == nil || hadAddr != addr || (!addr && *ln.health.Up) {
+					ln.health.LastPollAt = nil
+					c.sampleSelectedLinesLocked(c.op.Engine.Snapshot(), l.ID)
+					vpnStateChanged = true
+				}
+			}
+			continue
+		}
 		var found map[string]any
 		for _, a := range adapters {
 			if l.GUID != nil && normalize(js.Text(a["guid"])) == normalize(*l.GUID) {
@@ -1477,11 +1568,60 @@ func (c *Core) followAdapters() error {
 			changed = true
 		}
 	}
+	removedVPNs := c.removedVPNsLocked()
+	addedVPNID := ""
+	for _, vpn := range c.vpnAdapters {
+		if vpn["connected"] != true || len(items) >= 8 {
+			continue
+		}
+		alias := js.Text(vpn["alias"])
+		if alias == "" || slices.Contains(removedVPNs, alias) {
+			continue
+		}
+		already := false
+		for _, existing := range items {
+			if existing.Alias == alias || (existing.GUID != nil && js.Text(vpn["guid"]) != "" && normalize(*existing.GUID) == normalize(js.Text(vpn["guid"]))) {
+				already = true
+				break
+			}
+		}
+		if already {
+			continue
+		}
+		id := nextUniqueLineID(items, c.op.LineID)
+		onlyChosen := !js.Truth(vpn["hasDefaultRoute"])
+		fallback := false
+		var guidPtr *string
+		if g := js.Text(vpn["guid"]); g != "" {
+			guidPtr = &g
+		}
+		vpnLine := lines.Line{
+			ID:         id,
+			Alias:      alias,
+			GUID:       guidPtr,
+			Label:      lines.UniqueLabel(alias, items),
+			VPN:        true,
+			OnlyChosen: &onlyChosen,
+			Fallback:   &fallback,
+			Weight:     1,
+		}
+		items = append(items, vpnLine)
+		if addedVPNID == "" {
+			addedVPNID = id
+		}
+		changed = true
+		notes = append(notes, fmt.Sprintf("detected VPN %s (%s)", vpnLine.Label, alias))
+	}
 	c.mu.Unlock()
 	if !changed {
+		if vpnStateChanged && c.op.Engine.Snapshot().Status == "on" {
+			if err := c.applyPolicy(c.ctx, true); err != nil {
+				c.log("could not apply VPN state policy: %v", err)
+			}
+		}
 		return nil
 	}
-	if err := c.save(map[string]any{"lines": items}); err != nil {
+	if err := c.saveWithAddedLine(map[string]any{"lines": items}, addedVPNID); err != nil {
 		return err
 	}
 	for _, note := range notes {
@@ -1509,6 +1649,12 @@ func (c *Core) followAdapters() error {
 	c.mu.Lock()
 	c.syncLanesLocked()
 	c.mu.Unlock()
+	if c.op.ServiceMode && addedVPNID != "" && c.op.Engine.Snapshot().Status == "on" {
+		if err := c.ApplyPolicy(c.ctx); err != nil {
+			c.log("could not apply auto-discovered VPN policy: %v", err)
+		}
+		c.scheduleProbes(c.ctx, nil)
+	}
 	return nil
 }
 
