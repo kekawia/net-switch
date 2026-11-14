@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"math"
+	"net"
 	"regexp"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
@@ -19,16 +21,56 @@ type Cap struct {
 	Period   string  `json:"period"`
 	ResetDay int     `json:"resetDay,omitempty"`
 }
+
+type ProxySpec struct {
+	Protocol       string `json:"protocol"`
+	Server         string `json:"server"`
+	ServerName     string `json:"serverName,omitempty"`
+	Carrier        string `json:"carrier"`
+	UDP            bool   `json:"udp,omitempty"`
+	IPv6           bool   `json:"ipv6,omitempty"`
+	CredentialsRef string `json:"credentialsRef,omitempty"`
+	CredentialsRev uint64 `json:"credentialsRev,omitempty"`
+}
+
 type Line struct {
-	ID      string  `json:"id"`
-	Alias   string  `json:"alias"`
-	GUID    *string `json:"guid"`
-	Label   string  `json:"label"`
-	Kind    *string `json:"kind"`
-	Metered bool    `json:"metered"`
-	Strict  bool    `json:"strict"`
-	Cap     *Cap    `json:"cap"`
-	Weight  float64 `json:"weight"`
+	ID         string     `json:"id"`
+	Alias      string     `json:"alias"`
+	GUID       *string    `json:"guid"`
+	Label      string     `json:"label"`
+	Kind       *string    `json:"kind"`
+	Metered    bool       `json:"metered"`
+	Strict     bool       `json:"strict"`
+	Cap        *Cap       `json:"cap"`
+	Weight     float64    `json:"weight"`
+	VPN        bool       `json:"vpn,omitempty"`
+	OnlyChosen *bool      `json:"onlyChosen,omitempty"`
+	Fallback   *bool      `json:"fallback,omitempty"`
+	Proxy      *ProxySpec `json:"proxy,omitempty"`
+}
+
+func (line Line) IsVirtual() bool {
+	return line.VPN || line.Proxy != nil
+}
+
+func (line Line) IsOnlyChosen() bool {
+	if line.Proxy != nil {
+		return true
+	}
+	if line.OnlyChosen != nil {
+		return *line.OnlyChosen
+	}
+	return false
+}
+
+func (line Line) AllowsFallback() bool {
+	if line.Fallback != nil {
+		return *line.Fallback
+	}
+	if line.VPN || line.Proxy != nil {
+		return false
+	}
+	return true
 }
 
 func (line Line) MarshalJSON() ([]byte, error) {
@@ -45,6 +87,95 @@ func textPointer(v any) *string {
 		return nil
 	}
 	return &s
+}
+
+func boolPointer(v any) *bool {
+	b, ok := v.(bool)
+	if !ok {
+		return nil
+	}
+	return &b
+}
+
+func ValidHostPort(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", false
+	}
+	host, portStr, err := net.SplitHostPort(trimmed)
+	if err != nil || host == "" {
+		return "", false
+	}
+	for _, r := range host {
+		if r <= 0x20 || r == 0x7f {
+			return "", false
+		}
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		return "", false
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port)), true
+}
+
+func ValidServerName(raw string) (string, bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", true
+	}
+	if len(trimmed) > 253 {
+		return "", false
+	}
+	for _, r := range trimmed {
+		if r <= 0x20 || r == 0x7f {
+			return "", false
+		}
+	}
+	return trimmed, true
+}
+
+func ValidProxySpec(v any) *ProxySpec {
+	m := js.Object(v)
+	if m == nil {
+		return nil
+	}
+	proto := strings.ToLower(js.Trim(js.Text(m["protocol"])))
+	if proto != "socks5" && proto != "http" && proto != "https" {
+		return nil
+	}
+	server, ok := ValidHostPort(js.Text(m["server"]))
+	if !ok {
+		return nil
+	}
+	var serverName string
+	if proto == "https" {
+		sni, sniOK := ValidServerName(js.Text(m["serverName"]))
+		if !sniOK {
+			return nil
+		}
+		serverName = sni
+	}
+	carrier := js.Trim(js.Text(m["carrier"]))
+	if carrier == "" {
+		carrier = "main"
+	}
+	if carrier != "local" && carrier != "main" && !idPattern.MatchString(carrier) {
+		return nil
+	}
+	var credRev uint64
+	if js.Finite(m["credentialsRev"]) && js.Number(m["credentialsRev"]) > 0 {
+		credRev = uint64(math.Trunc(js.Number(m["credentialsRev"])))
+	}
+	return &ProxySpec{
+		Protocol:       proto,
+		Server:         server,
+		ServerName:     serverName,
+		Carrier:        carrier,
+		UDP:            m["udp"] == true && proto == "socks5",
+		IPv6:           m["ipv6"] == true,
+		CredentialsRef: js.Trim(js.Text(m["credentialsRef"])),
+		CredentialsRev: credRev,
+	}
 }
 func ValidCap(v any) *Cap {
 	m := js.Object(v)
@@ -82,55 +213,111 @@ var idPattern = regexp.MustCompile(`^[0-9a-f]{1,16}$`)
 func NormalizeLines(v any) []Line {
 	result := []Line{}
 	seen := map[string]bool{}
+	physicalCount := 0
 	items, _ := v.([]any)
 	for _, item := range items {
 		m := js.Object(item)
 		id, alias := js.Text(m["id"]), js.Text(m["alias"])
-		if !idPattern.MatchString(id) || alias == "" || seen[id] {
+		if !idPattern.MatchString(id) || seen[id] {
 			continue
 		}
+		var proxySpec *ProxySpec
+		if m["proxy"] != nil {
+			proxySpec = ValidProxySpec(m["proxy"])
+			if proxySpec == nil || proxySpec.Carrier == id {
+				continue
+			}
+			if alias == "" {
+				alias = "proxy:" + id
+			}
+		}
+		if alias == "" {
+			continue
+		}
+		vpn := m["vpn"] == true && proxySpec == nil
 		label := js.Trim(js.Text(m["label"]))
 		if label == "" {
-			label = alias
+			if proxySpec != nil {
+				label = proxySpec.Server
+			} else {
+				label = alias
+			}
 		} else {
 			label = js.UTF16Slice(label, 40)
 		}
-		kind := textPointer(m["kind"])
-		if kind != nil && *kind != "wired" && *kind != "wifi" && *kind != "phone" {
-			kind = nil
+		var kind *string
+		if !vpn && proxySpec == nil {
+			kind = textPointer(m["kind"])
+			if kind != nil && *kind != "wired" && *kind != "wifi" && *kind != "phone" {
+				kind = nil
+			}
 		}
 		weight := 1.0
 		if js.Finite(m["weight"]) && js.Number(m["weight"]) >= 0 {
 			weight = js.Number(m["weight"])
 		}
-		result = append(result, Line{id, alias, textPointer(m["guid"]), label, kind, m["metered"] == true, m["strict"] == true && len(result) > 0, ValidCap(m["cap"]), weight})
+		strict := !vpn && proxySpec == nil && m["strict"] == true && physicalCount > 0
+		var onlyChosen *bool
+		if vpn {
+			onlyChosen = boolPointer(m["onlyChosen"])
+		} else if proxySpec != nil {
+			t := true
+			onlyChosen = &t
+		}
+		result = append(result, Line{
+			ID:         id,
+			Alias:      alias,
+			GUID:       textPointer(m["guid"]),
+			Label:      label,
+			Kind:       kind,
+			Metered:    m["metered"] == true,
+			Strict:     strict,
+			Cap:        ValidCap(m["cap"]),
+			Weight:     weight,
+			VPN:        vpn,
+			OnlyChosen: onlyChosen,
+			Fallback:   boolPointer(m["fallback"]),
+			Proxy:      proxySpec,
+		})
+		if !vpn && proxySpec == nil {
+			physicalCount++
+		}
 		seen[id] = true
 	}
 	return result
 }
 func IsOpenLine(line Line, exhausted map[string]bool) bool {
-	return !line.Strict && !exhausted[line.ID]
+	return !line.VPN && line.Proxy == nil && !line.Strict && !exhausted[line.ID]
 }
 func SharingLines(lines []Line, exhausted map[string]bool) []Line {
 	result := []Line{}
-	for i, line := range lines {
-		if (i == 0 && !exhausted[line.ID]) || (i != 0 && IsOpenLine(line, exhausted)) {
+	firstPhysical := true
+	for _, line := range lines {
+		if line.VPN || line.Proxy != nil {
+			continue
+		}
+		if (firstPhysical && !exhausted[line.ID]) || (!firstPhysical && IsOpenLine(line, exhausted)) {
 			result = append(result, line)
 		}
+		firstPhysical = false
 	}
 	return result
 }
 func LaneTarget(lines []Line, home string, up, exhausted map[string]bool) *string {
-	found := false
-	for _, line := range lines {
-		if line.ID == home {
-			found = true
+	var homeLine *Line
+	for i := range lines {
+		if lines[i].ID == home {
+			homeLine = &lines[i]
+			break
 		}
 	}
-	if !found {
+	if homeLine == nil {
 		return nil
 	}
 	if up[home] && !exhausted[home] {
+		return &home
+	}
+	if !homeLine.AllowsFallback() {
 		return &home
 	}
 	for _, line := range lines {

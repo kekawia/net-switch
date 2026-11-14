@@ -11,6 +11,7 @@ import (
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
 	"github.com/AyoubAchour/net-switch/internal/control/engine"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 	"github.com/AyoubAchour/net-switch/internal/platform"
@@ -84,6 +85,9 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 	case "/api/combine":
 		err = c.laneQueue.Do(ctx, func() error { return c.setCombine(ctx, b) })
 	case "/api/lines/add", "/api/lines/remove", "/api/lines/order", "/api/lines/update":
+		if path == "/api/lines/add" && b["test"] == true {
+			return c.testProxyAction(ctx, b)
+		}
 		err = c.laneQueue.Do(ctx, func() error { return c.changeLines(ctx, path, b) })
 	case "/api/reconnect":
 		var result map[string]any
@@ -178,6 +182,9 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 	items := c.itemsLocked()
 	pins := append(apps.Pins{}, c.pinsLocked()...)
 	adapters := c.adapters
+	vpnAdapters := c.vpnAdapters
+	removedVPNs := c.removedVPNsLocked()
+	store := c.secrets
 	combining := c.values["combine"] == true
 	waiting := array(c.values["waitingApps"])
 	c.mu.Unlock()
@@ -194,9 +201,133 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 	clearWaiting := false
 	addedID := ""
 	note := ""
+	extraChanges := map[string]any{}
+	var deleteCredRef string
+	syncCreds := false
 	switch action {
 	case "/api/lines/add":
+		if b["proxy"] != nil {
+			if len(items) >= 8 {
+				return bad("Net Switch can use up to 8 lines.")
+			}
+			newID := nextUniqueLineID(items, c.op.LineID)
+			spec, username, password, _, clearAuth, err := parseProxyInput(b["proxy"], newID, items)
+			if err != nil {
+				return err
+			}
+			label, err := cleanLineLabel(b["label"], spec.Server, items)
+			if err != nil {
+				return err
+			}
+			fallback := false
+			if fb, ok := b["fallback"].(bool); ok {
+				fallback = fb
+			}
+			var capVal *lines.Cap
+			if v, exists := b["cap"]; exists {
+				capVal = lines.ValidCap(v)
+				if v != nil && capVal == nil {
+					return bad("Set the data cap as an amount per day or per month, then try again.")
+				}
+			}
+			if !clearAuth && (username != "" || password != "") {
+				if store == nil {
+					return fmt.Errorf("proxy secret store is not configured")
+				}
+				ref := "proxy-" + newID
+				rev, pErr := store.Put(ref, proxy.Credentials{Username: username, Password: password})
+				if pErr != nil {
+					return pErr
+				}
+				spec.CredentialsRef = ref
+				spec.CredentialsRev = rev
+				syncCreds = true
+			}
+			l := lines.Line{
+				ID:         newID,
+				Alias:      "proxy:" + newID,
+				Label:      label,
+				Metered:    b["metered"] == true,
+				Cap:        capVal,
+				Weight:     1,
+				OnlyChosen: ptr(true),
+				Fallback:   &fallback,
+				Proxy:      spec,
+			}
+			addedID = l.ID
+			note = fmt.Sprintf("added %s (%s)", l.Label, spec.Server)
+			items = append(items, l)
+			break
+		}
 		alias := js.Text(b["alias"])
+		var vpnCandidate map[string]any
+		for _, v := range vpnAdapters {
+			if v["alias"] == alias && v["connected"] == true {
+				vpnCandidate = v
+				break
+			}
+		}
+		if b["vpn"] == true || vpnCandidate != nil {
+			if vpnCandidate == nil {
+				for _, a := range adapters {
+					if a["alias"] == alias && a["status"] == "Up" {
+						vpnCandidate = a
+						break
+					}
+				}
+			}
+			taken := false
+			for _, l := range items {
+				taken = taken || l.Alias == alias
+			}
+			if vpnCandidate == nil || taken {
+				return bad("That VPN isn’t available. Check that it’s connected, then try again.")
+			}
+			if len(items) >= 8 {
+				return bad("Net Switch can use up to 8 lines.")
+			}
+			newID := nextUniqueLineID(items, c.op.LineID)
+			label, err := cleanLineLabel(b["label"], alias, items)
+			if err != nil {
+				return err
+			}
+			onlyChosen := !js.Truth(vpnCandidate["hasDefaultRoute"])
+			if oc, ok := b["onlyChosen"].(bool); ok {
+				onlyChosen = oc
+			}
+			fallback := false
+			if fb, ok := b["fallback"].(bool); ok {
+				fallback = fb
+			}
+			var guidPtr *string
+			if g := js.Text(vpnCandidate["guid"]); g != "" {
+				guidPtr = &g
+			}
+			l := lines.Line{
+				ID:         newID,
+				Alias:      alias,
+				GUID:       guidPtr,
+				Label:      label,
+				Metered:    b["metered"] == true,
+				Weight:     1,
+				VPN:        true,
+				OnlyChosen: &onlyChosen,
+				Fallback:   &fallback,
+			}
+			if slices.Contains(removedVPNs, alias) {
+				filtered := make([]string, 0, len(removedVPNs))
+				for _, r := range removedVPNs {
+					if r != alias {
+						filtered = append(filtered, r)
+					}
+				}
+				extraChanges["removedVpns"] = filtered
+			}
+			addedID = l.ID
+			note = fmt.Sprintf("added %s (%s)", l.Label, l.Alias)
+			items = append(items, l)
+			break
+		}
 		var adapter map[string]any
 		for _, a := range adapters {
 			if a["alias"] == alias && a["connected"] == true {
@@ -223,11 +354,39 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 		}
 		items = append(items, l)
 	case "/api/lines/remove":
-		note = fmt.Sprintf("removed %s (%s)", items[index].Label, items[index].Alias)
+		removed := items[index]
+		note = fmt.Sprintf("removed %s (%s)", removed.Label, removed.Alias)
 		if len(items) == 1 {
 			return bad("Net Switch needs at least one line.")
 		}
-		items = append(items[:index], items[index+1:]...)
+		remaining := append(append([]lines.Line{}, items[:index]...), items[index+1:]...)
+		hasNonProxy := false
+		needsNonLocalCarrier := false
+		for _, rem := range remaining {
+			if rem.Proxy == nil {
+				hasNonProxy = true
+			} else if rem.Proxy.Carrier != "local" {
+				needsNonLocalCarrier = true
+			}
+		}
+		if !hasNonProxy && needsNonLocalCarrier {
+			return bad("Keep at least one connection before removing the line your proxy uses.")
+		}
+		for k := range remaining {
+			if remaining[k].Proxy != nil && remaining[k].Proxy.Carrier == id {
+				cp := *remaining[k].Proxy
+				cp.Carrier = "main"
+				remaining[k].Proxy = &cp
+			}
+		}
+		items = remaining
+		if removed.VPN && !slices.Contains(removedVPNs, removed.Alias) {
+			extraChanges["removedVpns"] = append(removedVPNs, removed.Alias)
+		}
+		if removed.Proxy != nil && removed.Proxy.CredentialsRef != "" {
+			deleteCredRef = removed.Proxy.CredentialsRef
+			syncCreds = true
+		}
 		next := apps.Pins{}
 		for _, p := range pins {
 			if p.LineID != id {
@@ -286,10 +445,84 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 			if !ok {
 				return bad("Choose which apps may use this line, then try again.")
 			}
-			if val && index == 0 {
+			if next.IsVirtual() {
+				return bad("Use Only chosen apps on VPN or proxy lines.")
+			}
+			if val && index == primaryPhysicalIndex(items) {
 				return bad("The main line carries every app without a line of its own, so it can’t be kept to chosen apps.")
 			}
 			next.Strict = val
+		}
+		if v, exists := b["onlyChosen"]; exists {
+			val, ok := v.(bool)
+			if !ok {
+				return bad("Choose which apps may use this line, then try again.")
+			}
+			if next.Proxy != nil && !val {
+				return bad("Proxy lines only carry apps you move to them.")
+			}
+			next.OnlyChosen = &val
+		}
+		if v, exists := b["fallback"]; exists {
+			val, ok := v.(bool)
+			if !ok {
+				return bad("Choose whether apps may fall back to other lines, then try again.")
+			}
+			next.Fallback = &val
+		}
+		if v, exists := b["proxy"]; exists {
+			if next.Proxy == nil {
+				return bad("Only proxy lines have proxy server settings.")
+			}
+			spec, username, password, keepPassword, clearAuth, err := parseProxyInput(v, next.ID, items)
+			if err != nil {
+				return err
+			}
+			oldRef := next.Proxy.CredentialsRef
+			oldRev := next.Proxy.CredentialsRev
+			switch {
+			case clearAuth:
+				if oldRef != "" {
+					deleteCredRef = oldRef
+					syncCreds = true
+				}
+			case username != "" || password != "":
+				if store == nil {
+					return fmt.Errorf("proxy secret store is not configured")
+				}
+				ref := oldRef
+				if ref == "" {
+					ref = "proxy-" + next.ID
+				}
+				if password == "" && keepPassword && oldRef != "" {
+					saved, _, found, gErr := store.Get(oldRef)
+					if gErr != nil {
+						return gErr
+					}
+					if found {
+						if username == saved.Username {
+							spec.CredentialsRef = oldRef
+							spec.CredentialsRev = oldRev
+							break
+						}
+						password = saved.Password
+					}
+				}
+				rev, pErr := store.Put(ref, proxy.Credentials{Username: username, Password: password})
+				if pErr != nil {
+					return pErr
+				}
+				spec.CredentialsRef = ref
+				spec.CredentialsRev = rev
+				syncCreds = true
+			case keepPassword && oldRef != "":
+				spec.CredentialsRef = oldRef
+				spec.CredentialsRev = oldRev
+			case oldRef != "":
+				deleteCredRef = oldRef
+				syncCreds = true
+			}
+			next.Proxy = spec
 		}
 		if v, exists := b["cap"]; exists {
 			next.Cap = lines.ValidCap(v)
@@ -299,16 +532,28 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 		}
 		items[index] = next
 	}
-	if len(items) > 0 {
-		items[0].Strict = false
-	}
+	clearPrimaryPhysicalStrict(items)
 	combining = combining && len(lines.SharingLines(items, nil)) >= 2
 	remove := []string{}
 	if clearWaiting {
 		remove = append(remove, "waitingApps")
 	}
-	if err := c.saveWithAddedLine(map[string]any{"lines": items, "appLines": pins, "combine": combining}, addedID, remove...); err != nil {
+	changes := map[string]any{"lines": items, "appLines": pins, "combine": combining}
+	for k, v := range extraChanges {
+		changes[k] = v
+	}
+	if err := c.saveWithAddedLine(changes, addedID, remove...); err != nil {
 		return err
+	}
+	if deleteCredRef != "" && store != nil {
+		if dErr := store.Delete(deleteCredRef); dErr != nil {
+			c.log("could not delete proxy credentials %q: %v", deleteCredRef, dErr)
+		}
+	}
+	if syncCreds {
+		if sErr := c.syncEngineCredentials(ctx); sErr != nil {
+			c.log("could not sync proxy credentials to engine: %v", sErr)
+		}
 	}
 	c.mu.Lock()
 	c.syncLanesLocked()

@@ -143,3 +143,67 @@ func TestPolicyAcceptsNumericREGSZ(t *testing.T) {
 		}
 	}
 }
+
+func makeIPv4RouteRow(ifIndex uint32, addr [4]byte, prefixLen uint8, metric uint32) windows.MibIpForwardRow2 {
+	var r windows.MibIpForwardRow2
+	r.InterfaceIndex = ifIndex
+	r.DestinationPrefix.PrefixLength = prefixLen
+	r.Metric = metric
+	raw := (*windows.RawSockaddrInet4)(unsafe.Pointer(&r.DestinationPrefix.Prefix))
+	raw.Family = windows.AF_INET
+	raw.Addr = addr
+	return r
+}
+
+func makeIfRow(ifIndex, ifType, operStatus uint32, flags uint8, alias, desc string) windows.MibIfRow2 {
+	row := windows.MibIfRow2{
+		InterfaceIndex:              ifIndex,
+		Type:                        ifType,
+		AdminStatus:                 1,
+		OperStatus:                  operStatus,
+		InterfaceAndOperStatusFlags: flags,
+	}
+	copy(row.Alias[:], windows.StringToUTF16(alias))
+	copy(row.Description[:], windows.StringToUTF16(desc))
+	return row
+}
+
+func TestCollectVPNAdaptersClassifiesDefaultRoutesAndExcludesNonVPN(t *testing.T) {
+	rows := []windows.MibIfRow2{
+		makeIfRow(10, 53, 1, 0, "Mullvad", "WireGuard Tunnel"),
+		makeIfRow(11, 6, 1, 0, "OpenVPN", "TAP-Windows Adapter V9"),
+		makeIfRow(12, 53, 1, 0, "wg-split", "WireGuard Tunnel"),
+		makeIfRow(13, 53, 1, 0, "NetSwitch", "NetSwitch Wintun Adapter"),
+		makeIfRow(14, 131, 2, 0, "Teredo Tunneling Pseudo-Interface", "Microsoft Teredo Tunneling Adapter"),
+		makeIfRow(15, 6, 1, 0, "vEthernet (Default Switch)", "Hyper-V Virtual Ethernet Adapter"),
+		makeIfRow(16, 23, 2, 0, "WAN Miniport (IKEv2)", "WAN Miniport (IKEv2)"),
+		makeIfRow(17, 6, 1, 1, "Ethernet", "Intel I225-V"),
+	}
+	addrs := map[uint32][]string{
+		10: {"10.64.0.2"},
+		11: {"10.8.0.6"},
+		12: {"10.99.0.2"},
+		13: {"198.18.0.1"},
+		17: {"192.168.1.50"},
+	}
+	routes := []windows.MibIpForwardRow2{
+		makeIPv4RouteRow(10, [4]byte{0, 0, 0, 0}, 0, 0),
+		makeIPv4RouteRow(11, [4]byte{0, 0, 0, 0}, 1, 5),
+		makeIPv4RouteRow(11, [4]byte{128, 0, 0, 0}, 1, 5),
+		makeIPv4RouteRow(12, [4]byte{10, 99, 0, 0}, 24, 5),
+	}
+
+	got := collectVPNAdapters(rows, addrs, map[uint32]bool{10: true}, routes)
+	if len(got) != 3 {
+		t.Fatalf("got %d VPN adapters (%+v), want 3", len(got), got)
+	}
+	if got[0].Alias != "Mullvad" || !got[0].HasDefaultRoute || !got[0].IPv6 {
+		t.Fatalf("unexpected Mullvad VPN adapter: %+v", got[0])
+	}
+	if got[1].Alias != "OpenVPN" || !got[1].HasDefaultRoute {
+		t.Fatalf("expected OpenVPN /1+/1 default route: %+v", got[1])
+	}
+	if got[2].Alias != "wg-split" || got[2].HasDefaultRoute {
+		t.Fatalf("expected wg-split without default route: %+v", got[2])
+	}
+}

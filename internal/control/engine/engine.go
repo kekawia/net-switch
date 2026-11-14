@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 	"github.com/AyoubAchour/net-switch/internal/lines"
 )
 
@@ -40,7 +43,8 @@ type Snapshot struct {
 	// Reason classifies an error exit: "adapter-lost" is a clean exit 3 whose
 	// cleanup completed (spec §5.1); it restarts without using the crash
 	// budget until the fourth loss in ten minutes. Empty means ordinary failure.
-	Reason string `json:"reason,omitempty"`
+	Reason      string                `json:"reason,omitempty"`
+	VPNFirewall *platform.VPNFirewall `json:"vpnFirewall,omitempty"`
 }
 
 const ReasonAdapterLost = "adapter-lost"
@@ -153,6 +157,21 @@ var ErrNoAccounting = errors.New("engine has no paged accounting")
 type Accounting interface {
 	Totals(ctx context.Context, cursor string) (TotalsPage, error)
 	AckTotals(ctx context.Context, opID, receipt string) error
+}
+
+type ProxyTestRequest struct {
+	Line     platform.ProxyLine
+	Username string
+	Password string
+	Target   string
+}
+
+// ProxyRuntime is optional on Engine implementations that support native
+// outbound proxy credential sync, isolated proxy testing, and UDP drop stats.
+type ProxyRuntime interface {
+	SyncProxyCredentials(ctx context.Context, creds map[string]proxy.Credentials) error
+	TestProxyLine(ctx context.Context, req ProxyTestRequest) (platform.ProxyTestResult, error)
+	ReadUnsupportedUDP(ctx context.Context) (flows.UnsupportedUDPSummary, error)
 }
 
 // Apply acknowledges only after the adapter has applied all parts of a policy.

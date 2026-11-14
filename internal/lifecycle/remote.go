@@ -13,6 +13,7 @@ import (
 	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
 	"github.com/AyoubAchour/net-switch/internal/engine/host"
 	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
@@ -55,7 +56,9 @@ type Remote struct {
 	forceStop    func(context.Context, string) error
 	wakeGrace    time.Time
 	// outcome reads a stopped native instance's cleanup result (host.ReadOutcome).
-	outcome func(string) (host.Outcome, error)
+	outcome       func(string) (host.Outcome, error)
+	Credentials   func() (map[string]proxy.Credentials, error)
+	credsInstance string
 }
 
 func NewRemote(ctx context.Context, log func(string)) *Remote {
