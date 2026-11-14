@@ -241,13 +241,24 @@ func ServeHosted(parent context.Context, dir string, standalone bool, options ho
 		}
 		return tun, err
 	}
+	healthKey := options.HealthKey
+	if len(healthKey) != 32 {
+		var generated [32]byte
+		if _, err := rand.Read(generated[:]); err != nil {
+			return err
+		}
+		healthKey = generated[:]
+	}
 	e := engine.New(ctx, engine.Dependencies{OpenTun: openTun, Routes: routes, Dialer: dialer, Owners: owners, Identities: owners,
-		SilentSYNDiagnostics: true, HealthKey: options.HealthKey},
+		SilentSYNDiagnostics: true, HealthKey: healthKey, ProbeTLS: options.ProbeTLS},
 		flows.Defaults(), history)
+	routes.onVPNFirewall = func(fw platform.VPNFirewall) {
+		go func() { _ = e.StepAsideForVPNFirewall(context.Background(), fw) }()
+	}
 	loss := newAdapterLoss()
 	e.OnTunError = loss.handle
 	runtime := &Runtime{Engine: e, routes: routes, owners: owners, dialer: dialer, state: serviceState}
-	server := protocol.New(runtime, e.Table, dialer)
+	server := protocol.New(runtime, e.Table, e.WrapProber(dialer))
 	options.Stage("protocol-created")
 	// The ownership records and command fence identify this same engine.
 	// NewRoutes receives the instance before any OS object can be created.

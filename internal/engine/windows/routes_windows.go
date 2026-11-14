@@ -63,11 +63,19 @@ type Routes struct {
 	statsTun        atomic.Pointer[wintun.Session]
 	active          atomic.Bool
 	capture         []journal.Fingerprint
+	vpnRoutes       map[string]journal.Fingerprint
 	permissions     []journal.Creation
 	cancel          context.CancelFunc
 	done            chan struct{}
 	Table           *flows.Table
 	Fatal           func(error)
+	onVPNFirewall   func(platform.VPNFirewall)
+	fwMu            sync.Mutex
+	fwIndex         int
+	fwPort          uint16
+	fwKey           [32]byte
+	fwTimeouts      int
+	fwStepped       bool
 	timings         *phaseTimings
 	trace           *packetTrace
 }
@@ -83,7 +91,7 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 		journalStore = compactingJournalStore{measured}
 	}
 	j := &journal.Journal{Store: journalStore, Lock: lock, Kinds: make(map[string]journal.Object)}
-	for _, kind := range []string{"adapter", "interface", "dns", "address", "route", "wfp-sublayer", "wfp-filter"} {
+	for _, kind := range []string{"adapter", "interface", "dns", "address", "route", "vpn-route", "wfp-sublayer", "wfp-filter"} {
 		j.Kinds[kind] = object{o, kind}
 	}
 	// The precise boot identity is persisted for diagnosis; the complete live
@@ -141,7 +149,7 @@ func NewRoutes(store journal.Store, lock journal.Locker, instance string) (*Rout
 		return nil, fmt.Errorf("engine crash recovery: %w", errors.Join(err, o.closeFirewall()))
 	}
 	o.recovering = false
-	r := &Routes{Instance: instance, session: s, objects: o, timings: timings, trace: trace}
+	r := &Routes{Instance: instance, session: s, objects: o, vpnRoutes: map[string]journal.Fingerprint{}, timings: timings, trace: trace}
 	b := bindingTable{}
 	r.bindings.Store(&b)
 	return r, nil
@@ -330,13 +338,21 @@ func (r *Routes) Prepare(ctx context.Context, lines []platform.Line) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var osLines []platform.Line
 	wanted := make(map[string]bool, len(lines))
 	for _, l := range lines {
+		if l.Proxy != nil {
+			continue
+		}
+		osLines = append(osLines, l)
 		wanted[l.ID] = true
 	}
-	retained := retainLineSelectors(lines, r.lines, r.Table)
+	retained := retainLineSelectors(osLines, r.lines, r.Table)
 	b, err := r.resolve(retained)
 	if err != nil {
+		return err
+	}
+	if err := r.syncVPNRoutes(ctx, retained, wanted, b); err != nil {
 		return err
 	}
 	r.lines, r.configured = retained, wanted
@@ -361,6 +377,64 @@ func (r *Routes) Capture(ctx context.Context) error {
 	return nil
 }
 
+func (r *Routes) syncVPNRoutes(ctx context.Context, lines []platform.Line, configured map[string]bool, b bindingTable) error {
+	if r.tun == nil || r.session == nil {
+		return nil
+	}
+	if r.vpnRoutes == nil {
+		r.vpnRoutes = map[string]journal.Fingerprint{}
+	}
+	desired := map[string]journal.Fingerprint{}
+	for _, l := range lines {
+		if !configured[l.ID] || !l.VPN {
+			continue
+		}
+		a, ok := b[l.ID]
+		if !ok || !a.Up {
+			continue
+		}
+		if !a.Default4 && a.Index4 != 0 && hasWinAddrFamily(a.Addresses, false) {
+			fp := journal.Fingerprint{
+				"guid": a.ID, "luid": number(a.LUID), "index": number(uint64(a.Index4)),
+				"prefix": "0.0.0.0/0", "nextHop": "0.0.0.0", "metric": "4096", "protocol": "3",
+			}
+			desired[a.ID+"|4"] = fp
+			a.Default4 = true
+		}
+		if !a.Default6 && a.Index6 != 0 && hasWinAddrFamily(a.Addresses, true) {
+			fp := journal.Fingerprint{
+				"guid": a.ID, "luid": number(a.LUID), "index": number(uint64(a.Index6)),
+				"prefix": "::/0", "nextHop": "::", "metric": "4096", "protocol": "3",
+			}
+			desired[a.ID+"|6"] = fp
+			a.Default6 = true
+		}
+		b[l.ID] = a
+	}
+	for key, fp := range desired {
+		live, found, err := (object{r.objects, "vpn-route"}).Inspect(ctx, fp)
+		if err != nil {
+			return err
+		}
+		if !found || !maps.Equal(live, fp) {
+			if err := r.session.Create(ctx, "vpn-route", fp); err != nil {
+				return err
+			}
+		}
+		r.vpnRoutes[key] = fp
+	}
+	for key, fp := range r.vpnRoutes {
+		if _, ok := desired[key]; ok {
+			continue
+		}
+		if err := r.session.Remove(ctx, "vpn-route", fp); err != nil {
+			return err
+		}
+		delete(r.vpnRoutes, key)
+	}
+	return nil
+}
+
 func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 	defer close(done)
 	tick := time.NewTicker(time.Second)
@@ -382,6 +456,9 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 			r.lines = kept
 		}
 		b, err := r.resolve(r.lines)
+		if err == nil {
+			err = r.syncVPNRoutes(ctx, r.lines, r.configured, b)
+		}
 		old := r.bindings.Load()
 		if err == nil {
 			r.publishBindings(b)
@@ -438,10 +515,17 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 			}
 		}
 		fatal := r.Fatal
+		onFW := r.onVPNFirewall
 		r.mu.Unlock()
 		if err != nil && ctx.Err() == nil && fatal != nil {
 			fatal(err)
 			return
+		}
+		if err == nil && up && ctx.Err() == nil && onFW != nil {
+			if fw := r.checkLiveVPNFirewall(ctx); fw != nil {
+				onFW(*fw)
+				return
+			}
 		}
 	}
 }
@@ -482,9 +566,13 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 	r.objects.recovering = false
 	if err == nil {
 		r.capture = nil
+		r.vpnRoutes = map[string]journal.Fingerprint{}
 		r.permissions = nil
 		r.tun = nil
 		r.statsTun.Store(nil)
+		r.fwMu.Lock()
+		r.fwIndex, r.fwPort, r.fwTimeouts = 0, 0, 0
+		r.fwMu.Unlock()
 	}
 	return err
 }

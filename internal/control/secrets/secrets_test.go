@@ -82,9 +82,9 @@ func TestStoreRoundTripRevisionMonotonicityBackupAndZeroLeakInvariants(t *testin
 	dir := t.TempDir()
 	st := New(dir, Options{})
 
-	const (
-		user = "nord-proxy-user-991"
-		pass = "Sup3rS3cretP@ssw0rd!2026"
+	var (
+		user = "mock-proxy-acct"
+		pass = "fixture-" + strings.Repeat("z", 14)
 	)
 	rev1, err := st.Put("proxy-nl", proxy.Credentials{Username: user, Password: pass})
 	if err != nil {

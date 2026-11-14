@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -46,6 +47,24 @@ type object struct {
 func (o object) Validate(fp journal.Fingerprint) error {
 	if o.kind == "wfp-sublayer" || o.kind == "wfp-filter" {
 		return validateWFP(o.kind, fp)
+	}
+	if o.kind == "vpn-route" {
+		g, err := windows.GUIDFromString(fp["guid"])
+		if err != nil || strings.ToUpper(g.String()) != fp["guid"] || strings.EqualFold(fp["guid"], wintun.DefaultGUID) {
+			return errors.New("invalid VPN route GUID")
+		}
+		if uintField(fp, "luid") == 0 || uintField(fp, "index") == 0 {
+			return errors.New("missing VPN interface identity")
+		}
+		p, err := netip.ParsePrefix(fp["prefix"])
+		if err != nil || p != p.Masked() || p.Bits() != 0 {
+			return errors.New("invalid VPN default route prefix")
+		}
+		next, err := netip.ParseAddr(fp["nextHop"])
+		if err != nil || !next.IsUnspecified() || next.Is4() != p.Addr().Is4() || fp["metric"] != "4096" || fp["protocol"] != "3" {
+			return errors.New("invalid VPN default route parameters")
+		}
+		return nil
 	}
 	if fp["guid"] != wintun.DefaultGUID {
 		return errors.New("journal object is not the engine's fixed GUID")
@@ -238,7 +257,7 @@ func (o object) Inspect(ctx context.Context, fp journal.Fingerprint) (journal.Fi
 	}
 	live := maps.Clone(fp)
 	switch o.kind {
-	case "route":
+	case "route", "vpn-route":
 		r := routeRow(fp)
 		if err := windows.GetIpForwardEntry2(&r); err != nil {
 			return nil, false, ignoreMissing(err)
@@ -322,7 +341,7 @@ func (o object) Create(ctx context.Context, fp journal.Fingerprint) error {
 		return errors.New("interface identity changed before mutation")
 	}
 	switch o.kind {
-	case "route":
+	case "route", "vpn-route":
 		r := routeRow(fp)
 		return api("CreateIpForwardEntry2", uintptr(unsafe.Pointer(&r)))
 	case "address":
@@ -425,7 +444,7 @@ func (o object) Remove(ctx context.Context, fp journal.Fingerprint) error {
 			}
 			return present, err
 		})
-	case "route":
+	case "route", "vpn-route":
 		r := routeRow(fp)
 		return ignoreMissing(api("DeleteIpForwardEntry2", uintptr(unsafe.Pointer(&r))))
 	case "address":

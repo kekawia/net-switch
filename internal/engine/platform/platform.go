@@ -313,6 +313,7 @@ type Line struct {
 	ID        string       `json:"id"`
 	Interface string       `json:"interface,omitempty"`
 	Addresses []netip.Addr `json:"addresses"`
+	VPN       bool         `json:"vpn,omitempty"`
 	Proxy     *ProxyLine   `json:"proxy,omitempty"`
 }
 
@@ -327,6 +328,8 @@ type ProbeResult struct {
 	Kind      string   `json:"kind"` // quick TCP or full HTTPS; never interchangeable
 	Outcome   string   `json:"outcome,omitempty"`
 	LatencyMS *float64 `json:"latencyMs,omitempty"`
+	UDPOK     *bool    `json:"udpOk,omitempty"`
+	IPv6OK    *bool    `json:"ipv6Ok,omitempty"`
 	Error     string   `json:"error,omitempty"`
 }
 
@@ -346,4 +349,22 @@ type ConfiguredProber interface {
 
 type Echoer interface {
 	Echo(context.Context, string, netip.Addr, []byte) ([]byte, error)
+}
+
+// VPNFirewall reports a foreign VPN firewall or kill switch affecting engine capture or lines.
+type VPNFirewall struct {
+	Blocked    bool   `json:"blocked"`
+	SteppedOut bool   `json:"steppedOut,omitempty"`
+	Blocker    string `json:"blocker,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+}
+
+// ProxyTestResult summarizes a one-shot candidate proxy connectivity check.
+type ProxyTestResult struct {
+	OK        bool     `json:"ok"`
+	LatencyMS *float64 `json:"latencyMs,omitempty"`
+	UDPOK     *bool    `json:"udpOk,omitempty"`
+	IPv6OK    *bool    `json:"ipv6Ok,omitempty"`
+	ErrorKind string   `json:"errorKind,omitempty"`
+	Error     string   `json:"error,omitempty"`
 }

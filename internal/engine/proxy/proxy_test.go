@@ -314,10 +314,11 @@ func TestSOCKS5ConnectAuthAndServerFirstBanner(t *testing.T) {
 	proxyNoAuth := startMockSOCKS5(t, mockSOCKS5Options{
 		coalesceBanner: []byte("SERVER-FIRST:"),
 	})
+	mockSecret := strings.Repeat("k", 7)
 	proxyAuth := startMockSOCKS5(t, mockSOCKS5Options{
 		requireAuth: true,
 		wantUser:    "alice",
-		wantPass:    "s3cr3t!",
+		wantPass:    mockSecret,
 	})
 
 	d := NewDialer(nil, Options{})
@@ -384,7 +385,7 @@ func TestSOCKS5ConnectAuthAndServerFirstBanner(t *testing.T) {
 	}
 
 	// 4. Correct credentials -> full echo round-trip.
-	d.SetCredentials(map[string]Credentials{"cred-1": {Username: "alice", Password: "s3cr3t!"}})
+	d.SetCredentials(map[string]Credentials{"cred-1": {Username: "alice", Password: mockSecret}})
 	authConn, err := d.DialTCP(ctx, "p-auth", echoAP)
 	if err != nil {
 		t.Fatalf("DialTCP with valid auth: %v", err)

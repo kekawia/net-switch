@@ -17,6 +17,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -53,6 +54,7 @@ type session struct {
 	active, closed  bool
 	rejected        bool
 	rejectApp       string
+	rejectLine      string
 	rejectReason    string
 	rejectedAt      time.Time
 	socket          platform.UDPConn
@@ -68,6 +70,7 @@ type shard struct {
 }
 type refusedSession struct {
 	owner  platform.Owner
+	line   string
 	at     time.Time
 	reason string
 }
@@ -91,6 +94,7 @@ type NAT struct {
 	Invalid, Dropped, Rejected, IdentityErrors, Oversize, ReadErrors atomic.Uint64
 	PeakQueuePackets, PeakQueueBytes                                 atomic.Uint64
 	OpenFailed                                                       atomic.Uint64
+	UnsupportedUDP                                                   atomic.Uint64
 	GenerationMissing                                                atomic.Uint64
 	ReconcileIdentityFallbacks                                       atomic.Uint64
 	refusals                                                         refusalLog
@@ -211,6 +215,9 @@ func (n *NAT) receiveWithProvenance(source, destination netip.AddrPort, ownedByt
 		if denied, ok := b.negative[source]; ok {
 			if n.now().Sub(denied.at) < RejectLifetime {
 				b.Unlock()
+				if denied.reason == "unsupported-udp" {
+					n.recordUnsupportedUDP(denied.line, denied.owner.AppID, 1)
+				}
 				if n.control.AllowReject(denied.owner.AppID) {
 					payload, raw, _ := copyPacket()
 					n.refuseDatagram(source, destination, payload, raw, 0, denied.reason, "negative-cache")
@@ -242,8 +249,12 @@ func (n *NAT) receiveWithProvenance(source, destination netip.AddrPort, ownedByt
 	b.Unlock()
 	if s.rejected {
 		app := s.rejectApp
+		line := s.rejectLine
 		reason := s.rejectReason
 		s.mu.Unlock()
+		if reason == "unsupported-udp" {
+			n.recordUnsupportedUDP(line, app, 1)
+		}
 		if n.control.AllowReject(app) {
 			payload, raw, _ := copyPacket()
 			n.refuseDatagram(source, destination, payload, raw, 0, reason, "rejected-session")
@@ -459,8 +470,18 @@ func (s *session) run() {
 		socket, err = n.dialer.OpenUDP(ctx, decision.Line, s.source.Addr().Is6())
 	}
 	if err != nil {
+		if errors.Is(err, platform.ErrUnsupportedUDP) {
+			s.mu.Lock()
+			s.owner = owner
+			s.rejectLine = decision.Line
+			queued := uint64(len(s.queue))
+			s.mu.Unlock()
+			n.recordUnsupportedUDP(decision.Line, owner.AppID, max(queued, 1))
+			s.refuseSetup(owner.AppID, "unsupported-udp")
+			return
+		}
 		n.OpenFailed.Add(1)
-		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
+		if observer, ok := n.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil && proxy.IsLineFault(err) {
 			observer.LineError(decision.Line, err)
 		}
 		reason := "socket-open"
@@ -578,7 +599,7 @@ func (s *session) rejectPending(app, reason string) {
 			}
 			delete(b.negative, oldest)
 		}
-		b.negative[s.source] = refusedSession{owner: s.owner, at: s.n.now(), reason: reason}
+		b.negative[s.source] = refusedSession{owner: s.owner, line: s.rejectLine, at: s.n.now(), reason: reason}
 	}
 	b.Unlock()
 	defer s.mu.Unlock()
@@ -613,6 +634,13 @@ func (s *session) refuseSetup(app, reason string) {
 	s.rejectPending(app, reason)
 }
 
+func (n *NAT) recordUnsupportedUDP(line, app string, packets uint64) {
+	n.UnsupportedUDP.Add(packets)
+	if observer, ok := n.control.(interface{ UnsupportedUDP(string, string, uint64) }); ok {
+		observer.UnsupportedUDP(line, app, packets)
+	}
+}
+
 func (s *session) read(ctx context.Context) {
 	n := s.n
 	defer s.close()
@@ -621,6 +649,10 @@ func (s *session) read(ctx context.Context) {
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
 				return
+			}
+			if errors.Is(err, platform.ErrDatagramDropped) {
+				n.Dropped.Add(1)
+				continue
 			}
 			if errors.Is(err, errReplyBudget) {
 				n.Dropped.Add(1)

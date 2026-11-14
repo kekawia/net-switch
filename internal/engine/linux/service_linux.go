@@ -131,9 +131,9 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 		}
 		return tun, err
 	}
-	e := engine.New(forwarding, engine.Dependencies{OpenTun: openTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners, HealthKey: options.HealthKey}, flows.Defaults(), history)
+	e := engine.New(forwarding, engine.Dependencies{OpenTun: openTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners, HealthKey: options.HealthKey, ProbeTLS: options.ProbeTLS}, flows.Defaults(), history)
 	runtime := serviceRuntime{Engine: e, cancel: cancelForwarding, state: state}
-	srv := protocol.New(runtime, e.Table, p)
+	srv := protocol.New(runtime, e.Table, e.WrapProber(p))
 	srv.Instance = p.Instance
 	fatal := make(chan error, 1)
 	p.Fatal = func(err error) {

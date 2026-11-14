@@ -22,6 +22,7 @@ type Adapter struct {
 	LUID   uint64 `json:"luid"`
 	Index4 uint32 `json:"index4"`
 	Index6 uint32 `json:"index6"`
+	Tunnel bool   `json:"tunnel,omitempty"`
 	// Addresses are preferred: new sockets take their source from these.
 	Addresses []netip.Addr `json:"addresses"`
 	// Valid adds deprecated addresses, which existing flows keep using
@@ -97,17 +98,7 @@ func readAdapters() ([]Adapter, error) {
 		return nil, err
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(routes))
-	default4, default6 := map[uint64]bool{}, map[uint64]bool{}
-	for _, r := range routes.Rows() {
-		if r.DestinationPrefix.PrefixLength == 0 {
-			if r.DestinationPrefix.Prefix.Family == windows.AF_INET {
-				default4[r.InterfaceLuid] = true
-			}
-			if r.DestinationPrefix.Prefix.Family == windows.AF_INET6 {
-				default6[r.InterfaceLuid] = true
-			}
-		}
-	}
+	default4, default6 := markDefaultLUIDs(routes.Rows())
 	var result []Adapter
 	for p := (*windows.IpAdapterAddresses)(unsafe.Pointer(&b[0])); p != nil; p = p.Next {
 		// Virtual interfaces remain eligible. Full-tunnel VPN policy can be
@@ -123,7 +114,8 @@ func readAdapters() ([]Adapter, error) {
 			continue
 		}
 		a := Adapter{ID: id, Alias: windows.UTF16PtrToString(p.FriendlyName), LUID: p.Luid,
-			Index4: p.IfIndex, Index6: p.Ipv6IfIndex, Up: p.OperStatus == windows.IfOperStatusUp,
+			Index4: p.IfIndex, Index6: p.Ipv6IfIndex, Tunnel: p.IfType == 53 || p.IfType == 131,
+			Up:       p.OperStatus == windows.IfOperStatusUp,
 			Default4: default4[p.Luid], Default6: default6[p.Luid], MTU: p.Mtu, Metric: p.Ipv4Metric,
 			Addresses: []netip.Addr{}, Valid: []netip.Addr{}}
 		for u := p.FirstUnicastAddress; u != nil; u = u.Next {
@@ -259,4 +251,57 @@ func CapturePrefixes() []netip.Prefix {
 	visit(netip.MustParsePrefix("0.0.0.0/0"))
 	visit(netip.MustParsePrefix("::/0"))
 	return out
+}
+
+// markDefaultLUIDs identifies adapters with a native /0 default route or both
+// /1 split-default halves (e.g. OpenVPN def1 or WireGuard without kill switch).
+// Synthesized Net Switch Table=off VPN routes (metric 4096, protocol 3) are
+// ignored here so syncVPNRoutes knows whether the tunnel still needs synthesis.
+func markDefaultLUIDs(rows []windows.MibIpForwardRow2) (default4, default6 map[uint64]bool) {
+	default4, default6 = map[uint64]bool{}, map[uint64]bool{}
+	split4, split6 := map[uint64]uint8{}, map[uint64]uint8{}
+	for _, r := range rows {
+		if r.Metric == 4096 && r.Protocol == 3 {
+			continue
+		}
+		switch r.DestinationPrefix.PrefixLength {
+		case 0:
+			if r.DestinationPrefix.Prefix.Family == windows.AF_INET {
+				default4[r.InterfaceLuid] = true
+			} else if r.DestinationPrefix.Prefix.Family == windows.AF_INET6 {
+				default6[r.InterfaceLuid] = true
+			}
+		case 1:
+			addr := address(r.DestinationPrefix.Prefix)
+			if r.DestinationPrefix.Prefix.Family == windows.AF_INET && addr.Is4() {
+				bit := uint8(1)
+				if addr.As4()[0]&0x80 != 0 {
+					bit = 2
+				}
+				split4[r.InterfaceLuid] |= bit
+				if split4[r.InterfaceLuid] == 3 {
+					default4[r.InterfaceLuid] = true
+				}
+			} else if r.DestinationPrefix.Prefix.Family == windows.AF_INET6 && addr.Is6() {
+				bit := uint8(1)
+				if addr.As16()[0]&0x80 != 0 {
+					bit = 2
+				}
+				split6[r.InterfaceLuid] |= bit
+				if split6[r.InterfaceLuid] == 3 {
+					default6[r.InterfaceLuid] = true
+				}
+			}
+		}
+	}
+	return default4, default6
+}
+
+func hasWinAddrFamily(addrs []netip.Addr, v6 bool) bool {
+	for _, a := range addrs {
+		if a.Is6() == v6 {
+			return true
+		}
+	}
+	return false
 }
