@@ -14,6 +14,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 )
 
 var ErrBudget = errors.New("routing capacity exhausted")
@@ -71,7 +72,19 @@ type Gauges struct {
 	Flows, Handshakes, UDP, Unknown, UnknownUDP                                                       int
 	TCPBytes, PendingBytes, SnapshotBytes, TotalsSnapshotBytes                                        int64
 	Rejected, DroppedNotices, Admitted, LookupCount, LookupMisses, LookupAmbiguous, LookupNanoseconds uint64
+	UnsupportedUDP                                                                                    uint64
 }
+
+type UnsupportedUDPSummary struct {
+	Total uint64            `json:"total"`
+	Lines map[string]uint64 `json:"lines,omitempty"`
+	Apps  map[string]uint64 `json:"apps,omitempty"`
+}
+
+const (
+	maxUnsupportedLines = 256
+	maxUnsupportedApps  = 1024
+)
 const (
 	rejectPerAppPerSec    = 1000
 	rejectGlobalPerSec    = 5000
@@ -116,6 +129,8 @@ type Table struct {
 	rejectPriorGlobal      int
 	rejectPriorApps        map[string]int
 	rejectWaitingNextSweep time.Time
+	unsupportedLines       map[string]uint64
+	unsupportedApps        map[string]uint64
 	events                 chan flowapi.Event
 	eventsDropped          atomic.Uint64
 	pendingBytes           atomic.Int64
@@ -139,6 +154,8 @@ func New(l Limits, store StateStore) *Table {
 		rejectWaiting:     map[platform.Tuple]waitingReject{},
 		rejectWaitingApps: map[string]int{},
 		rejectPriorApps:   map[string]int{},
+		unsupportedLines:  map[string]uint64{},
+		unsupportedApps:   map[string]uint64{},
 		events:            make(chan flowapi.Event, 64),
 	}
 }
@@ -843,7 +860,48 @@ func (t *Table) Emit(event flowapi.Event) {
 }
 
 func (t *Table) LineError(line string, err error) {
+	if !proxy.IsLineFault(err) {
+		return
+	}
 	t.Emit(flowapi.Event{Type: "lineError", Line: line, Message: err.Error()})
+}
+
+func (t *Table) UnsupportedUDP(line, app string, packets uint64) {
+	if packets == 0 {
+		packets = 1
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.gauges.UnsupportedUDP += packets
+	if line != "" && len(line) <= 64 {
+		if _, ok := t.unsupportedLines[line]; ok || len(t.unsupportedLines) < maxUnsupportedLines {
+			t.unsupportedLines[line] += packets
+		}
+	}
+	if app != "" && len(app) <= 512 {
+		if _, ok := t.unsupportedApps[app]; ok || len(t.unsupportedApps) < maxUnsupportedApps {
+			t.unsupportedApps[app] += packets
+		}
+	}
+}
+
+func (t *Table) UnsupportedUDPStats() UnsupportedUDPSummary {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := UnsupportedUDPSummary{Total: t.gauges.UnsupportedUDP}
+	if len(t.unsupportedLines) > 0 {
+		out.Lines = make(map[string]uint64, len(t.unsupportedLines))
+		for k, v := range t.unsupportedLines {
+			out.Lines[k] = v
+		}
+	}
+	if len(t.unsupportedApps) > 0 {
+		out.Apps = make(map[string]uint64, len(t.unsupportedApps))
+		for k, v := range t.unsupportedApps {
+			out.Apps[k] = v
+		}
+	}
+	return out
 }
 func (t *Table) Lookup(d time.Duration, err error, owner platform.Owner) {
 	t.mu.Lock()

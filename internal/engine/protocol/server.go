@@ -19,6 +19,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 	"github.com/AyoubAchour/net-switch/internal/engine/testproxy"
 )
 
@@ -157,7 +158,7 @@ func (s *Server) explicitStop(ctx context.Context) error {
 }
 func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, error) {
 	switch r.Method {
-	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "testProxy", "testFault":
+	case "attach", "start", "apply", "stop", "closeFlows", "ackTotals", "setProxyCredentials", "testProxy", "testFault":
 		// A new controller cannot overtake an accepted mutation. Renewals
 		// remain independent of disk flushes.
 		s.mutation.Lock()
@@ -173,6 +174,11 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		v := map[string]any{"version": buildinfo.String(), "engineInstanceId": s.Instance, "appliedRevision": status.Applied, "status": status, "epoch": s.epoch, "capabilities": []string{"tcp", "udp-nat", "revisions", "snapshots", "lease", "generation-checks", "terminal-stop", "status", "paged-totals", "totals-ack"}}
 		if _, ok := s.prober.(platform.ConfiguredProber); ok {
 			v["capabilities"] = append(v["capabilities"].([]string), "probe-options")
+		}
+		if _, ok := s.runtime.(interface {
+			SetProxyCredentials(map[string]proxy.Credentials)
+		}); ok {
+			v["capabilities"] = append(v["capabilities"].([]string), "proxy-lines")
 		}
 		if testproxy.Enabled {
 			v["capabilities"] = append(v["capabilities"].([]string), "test-proxy")
@@ -242,6 +248,24 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 			return nil, testproxy.ErrDisabled
 		})
 	}
+	if r.Method == "testProxyLine" {
+		s.mu.Unlock()
+		if r.ProxyTest == nil {
+			return nil, errors.New("proxyTest required")
+		}
+		tester, ok := s.runtime.(interface {
+			TestProxyLine(context.Context, platform.ProxyLine, proxy.Credentials, string) (platform.ProxyTestResult, error)
+		})
+		if !ok {
+			return nil, platform.ErrNotYet
+		}
+		p, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return tester.TestProxyLine(p, r.ProxyTest.Line, proxy.Credentials{
+			Username: r.ProxyTest.Username,
+			Password: r.ProxyTest.Password,
+		}, r.ProxyTest.Target)
+	}
 	if r.Method == "probe" {
 		s.mu.Unlock()
 		return s.effect(ctx, r, func() (any, error) {
@@ -279,6 +303,21 @@ func (s *Server) execute(ctx context.Context, r Request, c *connection) (any, er
 		return buildinfo.String(), nil
 	case "status":
 		return s.status(), nil
+	case "setProxyCredentials":
+		setter, ok := s.runtime.(interface {
+			SetProxyCredentials(map[string]proxy.Credentials)
+		})
+		if !ok {
+			return nil, platform.ErrNotYet
+		}
+		creds := make(map[string]proxy.Credentials, len(r.Credentials))
+		for k, v := range r.Credentials {
+			creds[k] = proxy.Credentials{Username: v.Username, Password: v.Password}
+		}
+		s.mu.Unlock()
+		defer s.mu.Lock()
+		setter.SetProxyCredentials(creds)
+		return true, nil
 	case "start", "apply":
 		if r.Revision == nil {
 			return nil, errors.New("revision required")

@@ -4,6 +4,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
 )
 
@@ -13,12 +14,13 @@ func AwakeNow() time.Time { return leaseNow() }
 // Status separates loaded forwarding from durable history and diagnostics.
 // It never contains policy/flow arrays, so its wire size is fixed.
 type Status struct {
-	Instance  string          `json:"engineInstanceId"`
-	PID       int             `json:"pid"`
-	State     string          `json:"status"`
-	Started   time.Time       `json:"startedAt"`
-	Applied   *policy.Applied `json:"appliedRevision"`
-	LastError string          `json:"lastError,omitempty"`
+	Instance    string                `json:"engineInstanceId"`
+	PID         int                   `json:"pid"`
+	State       string                `json:"status"`
+	Started     time.Time             `json:"startedAt"`
+	Applied     *policy.Applied       `json:"appliedRevision"`
+	LastError   string                `json:"lastError,omitempty"`
+	VPNFirewall *platform.VPNFirewall `json:"vpnFirewall,omitempty"`
 }
 
 func (s *Server) status() Status {
@@ -27,6 +29,18 @@ func (s *Server) status() Status {
 		out.LastError = runtime.LastError()
 		if len(out.LastError) > 4096 {
 			out.LastError = out.LastError[:4096]
+		}
+	}
+	if runtime, ok := s.runtime.(interface{ VPNFirewall() *platform.VPNFirewall }); ok {
+		if fw := runtime.VPNFirewall(); fw != nil {
+			cp := *fw
+			if len(cp.Blocker) > 128 {
+				cp.Blocker = cp.Blocker[:128]
+			}
+			if len(cp.Reason) > 256 {
+				cp.Reason = cp.Reason[:256]
+			}
+			out.VPNFirewall = &cp
 		}
 	}
 	if runtime, ok := s.runtime.(interface{ LiveState() (string, time.Time) }); ok {

@@ -93,3 +93,62 @@ func TestShareOverflow(t *testing.T) {
 		t.Fatal("overflow accepted")
 	}
 }
+
+func TestVPNAndProxyMainLineBlockWhenDown(t *testing.T) {
+	// Physical Lines[0] cannot be blocked (safety guard against blackholing a physical-only policy).
+	phys := Config{
+		Lines:   []platform.Line{{ID: "cable"}, {ID: "wifi"}},
+		Blocked: []string{"cable"},
+	}
+	if _, err := Compile(Revision{N: 1, Hash: Hash(phys), Config: phys}); err == nil {
+		t.Fatal("expected physical main line in Blocked to be rejected")
+	}
+
+	// VPN exclude mode ("everything follows the VPN") with block-when-down:
+	// Lines[0] is the VPN line and is in Blocked while down; unpinned apps are
+	// blocked so nothing leaks, while apps explicitly pinned to Cable keep working.
+	vpnExclude := Config{
+		Lines: []platform.Line{
+			{ID: "proton", Interface: "ProtonVPN", VPN: true},
+			{ID: "cable", Interface: "Ethernet"},
+		},
+		AppLines: map[string]string{"game": "cable"},
+		Blocked:  []string{"proton"},
+	}
+	p := compile(t, vpnExclude)
+
+	if _, err := p.Decide(platform.Owner{AppID: "browser"}, 5000, false, 1); err != ErrBlocked {
+		t.Fatalf("unpinned app while exclude-mode VPN is blocked: got %v, want ErrBlocked", err)
+	}
+	if _, err := p.Decide(platform.Owner{}, 80, false, 1); err != ErrBlocked {
+		t.Fatalf("low-port unpinned flow while exclude-mode VPN is blocked: got %v, want ErrBlocked", err)
+	}
+	if pred := p.Predict("browser"); pred.Line != "proton" || !pred.Blocked {
+		t.Fatalf("Predict(browser) = %+v, want {Line: proton, Blocked: true}", pred)
+	}
+
+	d, err := p.Decide(platform.Owner{AppID: "game"}, 5000, false, 1)
+	if err != nil || d.Line != "cable" {
+		t.Fatalf("Cable-pinned app while VPN is blocked: got (%+v, %v), want cable", d, err)
+	}
+	if pred := p.Predict("game"); pred.Line != "cable" || pred.Blocked {
+		t.Fatalf("Predict(game) = %+v, want {Line: cable, Blocked: false}", pred)
+	}
+
+	// Proxy at Lines[0] also supports block-when-down.
+	proxyMain := Config{
+		Lines: []platform.Line{
+			{ID: "px", Proxy: &platform.ProxyLine{Protocol: "socks5", Server: "127.0.0.1:1080", Carrier: "local"}},
+			{ID: "cable", Interface: "Ethernet"},
+		},
+		AppLines: map[string]string{"updater": "cable"},
+		Blocked:  []string{"px"},
+	}
+	pp := compile(t, proxyMain)
+	if _, err := pp.Decide(platform.Owner{AppID: "browser"}, 5000, false, 1); err != ErrBlocked {
+		t.Fatalf("unpinned app on blocked proxy main: got %v, want ErrBlocked", err)
+	}
+	if d, err := pp.Decide(platform.Owner{AppID: "updater"}, 5000, false, 1); err != nil || d.Line != "cable" {
+		t.Fatalf("pinned app on cable with blocked proxy main: got (%+v, %v)", d, err)
+	}
+}

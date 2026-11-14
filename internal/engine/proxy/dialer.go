@@ -38,6 +38,12 @@ type lineRuntime struct {
 	associations atomic.Int32
 }
 
+// LineStats reports bounded live concurrency gauges for a configured proxy line.
+type LineStats struct {
+	Handshakes      int32 `json:"handshakes"`
+	UDPAssociations int32 `json:"udpAssociations"`
+}
+
 // Dialer wraps a platform.LineDialer, routing physical and VPN lines directly
 // to Base while executing SOCKS5 and HTTP/HTTPS CONNECT over the configured
 // carrier line (or loopback "local") for proxy lines.
@@ -113,6 +119,34 @@ func (d *Dialer) SetCredentials(creds map[string]Credentials) {
 	d.mu.Lock()
 	d.creds = cp
 	d.mu.Unlock()
+}
+
+// LineConfig returns the active ProxyLine metadata for lineID if it is a proxy line.
+func (d *Dialer) LineConfig(lineID string) (platform.ProxyLine, bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	rt, ok := d.lines[lineID]
+	if !ok {
+		return platform.ProxyLine{}, false
+	}
+	return rt.cfg, true
+}
+
+// Stats returns bounded per-proxy concurrency counters with zero credential or endpoint secrets.
+func (d *Dialer) Stats() map[string]LineStats {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	if len(d.lines) == 0 {
+		return nil
+	}
+	out := make(map[string]LineStats, len(d.lines))
+	for id, rt := range d.lines {
+		out[id] = LineStats{
+			Handshakes:      rt.handshakes.Load(),
+			UDPAssociations: rt.associations.Load(),
+		}
+	}
+	return out
 }
 
 func (d *Dialer) lookup(lineID string) (*lineRuntime, Credentials, bool) {

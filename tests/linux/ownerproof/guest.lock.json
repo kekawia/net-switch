@@ -280,11 +280,11 @@
     "reproducibilityStage": "double-build-verified",
     "amd64": {
       "kernelImageSha256": "3eb59a8a763a874dd4b8c012846a2c0a34c70b9821d1a286b8134e5b787dd52e",
-      "initramfsSha256": "af3c6e471c806c1c984803f6193e8ab57e1346bc3917dadc7a22af87a493c8eb"
+      "initramfsSha256": "4505438870f42b3a0f30927b66d39f5b04fbe3249cacb35fabd219875c578c3d"
     },
     "arm64": {
       "kernelImageSha256": "f578daf914edbf3c6b8d20ad4b033f7d4630784c8cbb152f675c529272331a0d",
-      "initramfsSha256": "65ba570bc41a0fe5097fe1910ddd9c78d235f622b47c39b7c470c780539543ff"
+      "initramfsSha256": "636258a13d2a57e13b1e021890603be99cb6435c72f1282be4645a5b4162b5ff"
     }
   }
 }

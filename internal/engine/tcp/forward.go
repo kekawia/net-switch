@@ -13,6 +13,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
 	"github.com/AyoubAchour/net-switch/internal/engine/packet"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -343,7 +344,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	cancelDial()
 	if err != nil {
 		f.DialFailed.Add(1)
-		if observer, ok := f.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil {
+		if observer, ok := f.control.(interface{ LineError(string, error) }); ok && ctx.Err() == nil && proxy.IsLineFault(err) {
 			observer.LineError(decision.Line, err)
 		}
 		return

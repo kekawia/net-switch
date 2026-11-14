@@ -39,6 +39,7 @@ var bypass = []string{"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
 type lineState struct {
 	ID, Name           string
 	Interface          string
+	VPN                bool
 	MatchAddresses     []netip.Addr
 	Index, N, Table    int
 	Mark               uint32
@@ -63,6 +64,7 @@ type Platform struct {
 	objects              *objects
 	journal              *journal.Session
 	base                 int
+	band                 ruleBand
 	allocated, capturing bool
 	tunSpec              tunObject
 	lines                map[string]lineState
@@ -330,29 +332,7 @@ func allRules(ctx context.Context) ([]netlink.Rule, error) {
 	return all, nil
 }
 func layoutAvailable(base, count int, rules []netlink.Rule, routes []netlink.Route) bool {
-	for _, r := range rules {
-		if r.Priority == base+9100 || r.Priority == base+12000 || (r.Priority > base+10000 && r.Priority <= base+10255) || (r.Priority > base+11000 && r.Priority <= base+11255) {
-			return false
-		}
-		for n := 0; n <= count; n++ {
-			if r.Table == 21000+base+n {
-				return false
-			}
-		}
-		if r.Mask != nil && *r.Mask != 0 && !r.Invert {
-			for n := 1; n <= count; n++ {
-				if (uint32(0x4e530000+base+n)^r.Mark)&*r.Mask == 0 {
-					return false
-				}
-			}
-		}
-	}
-	for _, r := range routes {
-		if r.Table >= 21000+base && r.Table <= 21000+base+count {
-			return false
-		}
-	}
-	return true
+	return slotsAvailable(base, count, rules, routes) && bandAvailable(standardBand(base), rules)
 }
 func (p *Platform) allocate(ctx context.Context, count int) error {
 	rules, err := allRules(ctx)
@@ -363,12 +343,18 @@ func (p *Platform) allocate(ctx context.Context, count int) error {
 	if err != nil {
 		return err
 	}
-	for base := 0; base+12000 < 32766; base += 1000 {
-		if layoutAvailable(base, 255, rules, routes) {
-			p.base = base
-			p.allocated = true
-			return nil
+	for base := 0; 21000+base+255 < 32766; base += 1000 {
+		if !slotsAvailable(base, 255, rules, routes) {
+			continue
 		}
+		band, ok := chooseBand(ruleBand{}, rules, foreignDefaultTables(base, routes))
+		if !ok {
+			continue
+		}
+		p.base = base
+		p.band = band
+		p.allocated = true
+		return nil
 	}
 	return errors.New("no collision-free Linux rule/mark/table layout below main; routing remains off")
 }
@@ -397,13 +383,19 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	if len(lines) == 0 || len(lines) > 255 {
 		return errors.New("Linux routing needs 1–255 lines")
 	}
+	var osLines []platform.Line
+	for _, line := range lines {
+		if line.Proxy == nil {
+			osLines = append(osLines, line)
+		}
+	}
 	if !p.allocated {
-		if err := p.allocate(ctx, len(lines)); err != nil {
+		if err := p.allocate(ctx, len(osLines)); err != nil {
 			return err
 		}
 	}
-	wanted := make(map[string]bool, len(lines))
-	for _, line := range lines {
+	wanted := make(map[string]bool, len(osLines))
+	for _, line := range osLines {
 		wanted[line.ID] = true
 	}
 	// Only previously retired/unreferenced lines can be reclaimed before the
@@ -417,7 +409,7 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	}
 	// Resolve requested lines before publishing bindings. Old IDs retain their table
 	// while existing flows use it; policy updates cannot relabel their sockets.
-	next := make(map[string]lineState, len(p.lines)+len(lines))
+	next := make(map[string]lineState, len(p.lines)+len(osLines))
 	for id, l := range p.lines {
 		next[id] = l
 	}
@@ -425,7 +417,7 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 	if err != nil {
 		return err
 	}
-	for _, line := range lines {
+	for _, line := range osLines {
 		previous, existing := next[line.ID]
 		match, err := resolveLine(ctx, links, line.Interface, line.Addresses)
 		ambiguous := errors.Is(err, errAmbiguousLine)
@@ -439,7 +431,7 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 			if match != nil {
 				previous.Index, previous.Name = match.Attrs().Index, match.Attrs().Name
 			}
-			previous.Interface, previous.MatchAddresses = line.Interface, slices.Clone(line.Addresses)
+			previous.Interface, previous.VPN, previous.MatchAddresses = line.Interface, line.VPN, slices.Clone(line.Addresses)
 			next[line.ID] = previous
 			continue
 		}
@@ -452,7 +444,7 @@ func (p *Platform) Prepare(ctx context.Context, lines []platform.Line) error {
 		if match != nil {
 			name, index = match.Attrs().Name, match.Attrs().Index
 		}
-		next[line.ID] = lineState{ID: line.ID, Name: name, Interface: line.Interface, MatchAddresses: slices.Clone(line.Addresses), Index: index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n), lease: &lineLease{}}
+		next[line.ID] = lineState{ID: line.ID, Name: name, Interface: line.Interface, VPN: line.VPN, MatchAddresses: slices.Clone(line.Addresses), Index: index, N: n, Table: 21000 + p.base + n, Mark: uint32(0x4e530000 + p.base + n), lease: &lineLease{}}
 	}
 	old, oldConfigured, oldBindings := p.lines, p.configured, p.bindings.Load()
 	p.lines = next
@@ -613,15 +605,21 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 		}
 	}
 	for _, rule := range foreignRules {
-		if !layoutAvailable(p.base, 255, []netlink.Rule{rule}, nil) {
+		if !slotsAvailable(p.base, 255, []netlink.Rule{rule}, nil) {
 			return fmt.Errorf("foreign rule now conflicts with the engine layout; restoring normal routing: %s", ruleFP(p.objects, rule)["object"])
 		}
 	}
 	for _, route := range foreignRoutes {
-		if !layoutAvailable(p.base, 255, nil, []netlink.Route{route}) {
+		if !slotsAvailable(p.base, 255, nil, []netlink.Route{route}) {
 			return fmt.Errorf("foreign route now conflicts with the engine layout; restoring normal routing: %s", routeFP(p.objects, route)["object"])
 		}
 	}
+	nextBand, ok := chooseBand(p.activeBand(), foreignRules, foreignDefaultTables(p.base, foreignRoutes))
+	if !ok {
+		return errors.New("foreign rules leave no collision-free rule priority band above full-tunnel routing")
+	}
+	bandChanged := nextBand != p.activeBand()
+	p.band = nextBand
 	desired := map[string]ownedObject{}
 	keep := func(kind string, fp journal.Fingerprint) error {
 		desired[kind+fp["object"]] = ownedObject{kind, fp}
@@ -646,6 +644,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			}
 		}
 	}
+	configuredIndices := make(map[int]bool, len(p.lines))
 	for id, l := range p.lines {
 		// Resolve the original selector, including an address-only line whose
 		// replacement adapter has a different name and index.
@@ -659,6 +658,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			l.Index = link.Attrs().Index
 			l.Name = link.Attrs().Name
 			l.Up = link.Attrs().Flags&net.FlagUp != 0
+			configuredIndices[l.Index] = true
 			addrs, err := retryDump(ctx, func() ([]netlink.Addr, error) { return netlink.AddrList(link, netlink.FAMILY_ALL) })
 			if err != nil {
 				return err
@@ -670,6 +670,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 				}
 			}
 		}
+		var split4, split6 uint8
 		for _, r := range routes {
 			if !l.Up || (p.ipv4Only && r.Family == unix.AF_INET6) || r.LinkIndex != l.Index || r.Type != unix.RTN_UNICAST || r.Table == unix.RT_TABLE_LOCAL || (r.Table >= 21000+p.base && r.Table <= 21255+p.base) || r.Flags&unix.RTM_F_CLONED != 0 {
 				continue
@@ -680,12 +681,43 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 				} else {
 					l.Default4 = true
 				}
+			} else if fam, half, _ := prefixHalfMask(r.Dst); half != 0 {
+				if fam == unix.AF_INET6 {
+					split6 |= half
+					if split6 == 3 {
+						l.Default6 = true
+					}
+				} else if fam == unix.AF_INET {
+					split4 |= half
+					if split4 == 3 {
+						l.Default4 = true
+					}
+				}
 			}
 			r.Table = l.Table
 			r.Protocol = routeProtocol
 			r.Flags &^= unix.RTNH_F_LINKDOWN | unix.RTNH_F_DEAD
 			if err := keep("route", routeFP(p.objects, r)); err != nil {
 				return err
+			}
+		}
+		// Table = off WireGuard and point-to-point VPN tunnels install no route
+		// in main or a custom table. Synthesize a per-line on-link default route
+		// inside l.Table so sockets marked for this line egress the tunnel cleanly.
+		if l.Up && link != nil && isTunnelLink(link, l.VPN) {
+			if !l.Default4 && hasAddrFamily(l.Addresses, false) {
+				syn := netlink.Route{Family: unix.AF_INET, Table: l.Table, LinkIndex: l.Index, Dst: prefix("0.0.0.0/0"), Type: unix.RTN_UNICAST, Protocol: routeProtocol, Scope: netlink.SCOPE_LINK}
+				if err := keep("route", routeFP(p.objects, syn)); err != nil {
+					return err
+				}
+				l.Default4 = true
+			}
+			if !p.ipv4Only && !l.Default6 && hasAddrFamily(l.Addresses, true) {
+				syn := netlink.Route{Family: unix.AF_INET6, Table: l.Table, LinkIndex: l.Index, Dst: prefix("::/0"), Type: unix.RTN_UNICAST, Protocol: routeProtocol, Priority: 1024, Scope: netlink.SCOPE_UNIVERSE}
+				if err := keep("route", routeFP(p.objects, syn)); err != nil {
+					return err
+				}
+				l.Default6 = true
 			}
 		}
 		binding := p.objects.fingerprint(struct {
@@ -699,7 +731,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 		for _, fam := range p.families() {
 			r := netlink.NewRule()
 			r.Family = fam
-			r.Priority = p.base + 10000 + l.N
+			r.Priority = p.band.markBase + l.N
 			r.Table = l.Table
 			r.Mark = l.Mark
 			mask := ^uint32(0)
@@ -716,7 +748,7 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			if ip.Is6() {
 				r.Family = unix.AF_INET6
 			}
-			r.Priority = p.base + 11000 + l.N
+			r.Priority = p.band.srcBase + l.N
 			r.Table = l.Table
 			r.Src = prefix(netip.PrefixFrom(ip, ip.BitLen()).String())
 			r.Protocol = routeProtocol
@@ -726,6 +758,16 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			}
 		}
 		p.lines[id] = l
+	}
+	for _, r := range foreignMarkBypassRules(p.band, p.families(), foreignRules) {
+		if err := keep("rule", ruleFP(p.objects, r)); err != nil {
+			return err
+		}
+	}
+	for _, r := range splitTunnelBypassRules(p.band, links, configuredIndices, p.tunSpec.Index, foreignRoutes, p.ipv4Only) {
+		if err := keep("rule", ruleFP(p.objects, r)); err != nil {
+			return err
+		}
 	}
 	// Preserve ordinary link/default-route recovery on every unambiguous
 	// line. A DHCP gap must not become a whole-engine shutdown merely because
@@ -740,6 +782,18 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 	// route while Default4/Default6 is still true and stall on Linux's on-link
 	// ARP fallback in ip_route_output_key_hash_rcu.
 	p.publishBindings()
+	// When stepping the rule priority band above a newly-started full-tunnel VPN
+	// (or restoring headroom after it stops), install the new capture band first
+	// so old capture rules are deleted immediately below without any packet gap.
+	if bandChanged && p.capturing {
+		p.captureOwned = make(map[string]ownedObject)
+		p.captureOrder = nil
+		for _, fam := range p.families() {
+			if err := p.captureFamily(ctx, fam); err != nil {
+				return err
+			}
+		}
+	}
 	// New addresses select their table before old address selectors disappear.
 	for _, kind := range []string{"rule", "route", "binding"} {
 		for key, object := range p.owned {
@@ -784,6 +838,13 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 	return nil
 }
 
+func (p *Platform) activeBand() ruleBand {
+	if p.band.capture != 0 {
+		return p.band
+	}
+	return standardBand(p.base)
+}
+
 func (p *Platform) families() []int {
 	if p.ipv4Only {
 		return []int{unix.AF_INET}
@@ -814,6 +875,7 @@ func (p *Platform) Capture(ctx context.Context) error {
 }
 
 func (p *Platform) captureFamily(ctx context.Context, family int) error {
+	band := p.activeBand()
 	create := func(kind string, fp journal.Fingerprint) error {
 		if err := p.add(ctx, kind, fp); err != nil {
 			return err
@@ -834,7 +896,7 @@ func (p *Platform) captureFamily(ctx context.Context, family int) error {
 		if r.Family != family {
 			continue
 		}
-		r.Priority = p.base + 9100
+		r.Priority = band.localBypass
 		r.Table = unix.RT_TABLE_MAIN
 		r.Dst = prefix(cidr)
 		r.Protocol = routeProtocol
@@ -860,7 +922,7 @@ func (p *Platform) captureFamily(ctx context.Context, family int) error {
 	for _, fam := range []int{family} {
 		r := netlink.NewRule()
 		r.Family = fam
-		r.Priority = p.base + 12000
+		r.Priority = band.capture
 		r.Table = 21000 + p.base
 		r.IifName = "lo"
 		r.Protocol = routeProtocol

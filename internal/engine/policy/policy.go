@@ -83,8 +83,9 @@ func Compile(r Revision) (*Policy, error) {
 		ids[l.ID] = true
 	}
 	p := &Policy{config: c, revision: r.N, blocked: map[string]bool{}}
+	canBlockMain := c.Lines[0].VPN || c.Lines[0].Proxy != nil
 	for _, id := range c.Blocked {
-		if !ids[id] || id == c.Lines[0].ID {
+		if !ids[id] || (id == c.Lines[0].ID && !canBlockMain) {
 			return nil, errors.New("invalid blocked line")
 		}
 		p.blocked[id] = true
@@ -157,16 +158,23 @@ func (p *Policy) Decide(owner platform.Owner, sourcePort uint16, ipv6 bool, k ui
 			}
 		}
 	}
+	if p.blocked[lane] {
+		return flowapi.Decision{}, ErrBlocked
+	}
 	line, ok := p.config.Lanes[lane]
 	if !ok {
 		return flowapi.Decision{}, fmt.Errorf("no target for lane %s", lane)
+	}
+	if p.blocked[line] {
+		return flowapi.Decision{}, ErrBlocked
 	}
 	return flowapi.Decision{Lane: lane, Line: line, Revision: p.revision}, nil
 }
 
 func (p *Policy) Predict(app string) Prediction {
 	if lane := p.config.AppLines[app]; lane != "" {
-		return Prediction{Line: p.config.Lanes[lane], Blocked: p.blocked[lane]}
+		line := p.config.Lanes[lane]
+		return Prediction{Line: line, Blocked: p.blocked[lane] || p.blocked[line]}
 	}
 	if p.config.Combine && p.total != 0 {
 		d := map[string]float64{}
@@ -175,7 +183,9 @@ func (p *Policy) Predict(app string) Prediction {
 		}
 		return Prediction{Distribution: d}
 	}
-	return Prediction{Line: p.config.Lanes[p.config.Lines[0].ID]}
+	main := p.config.Lines[0].ID
+	line := p.config.Lanes[main]
+	return Prediction{Line: line, Blocked: p.blocked[main] || p.blocked[line]}
 }
 func (p *Policy) IPv6() bool { return p.config.IPv6 }
 

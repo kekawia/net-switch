@@ -4,6 +4,7 @@ package engine
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"runtime"
@@ -18,6 +19,7 @@ import (
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
 	"github.com/AyoubAchour/net-switch/internal/engine/platform"
 	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
 	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
 	ntcp "github.com/AyoubAchour/net-switch/internal/engine/tcp"
 	"github.com/AyoubAchour/net-switch/internal/engine/testproxy"
@@ -29,6 +31,7 @@ import (
 
 type Dependencies struct {
 	HealthKey  []byte
+	ProbeTLS   *tls.Config
 	OpenTun    func(context.Context) (platform.TunDevice, error)
 	Routes     platform.RouteManager
 	Dialer     platform.LineDialer
@@ -46,27 +49,30 @@ type Engine struct {
 	// ordinary cleanup and OnFatal path. Install before starting the engine.
 	OnTunError func(error) bool
 
-	OnFatal    func(error)
-	mu         sync.Mutex
-	root       context.Context
-	deps       Dependencies
-	Table      *flows.Table
-	limits     flows.Limits
-	cancel     context.CancelFunc
-	tun        platform.TunDevice
-	stack      *gv.Stack
-	link       *ns.Link
-	tcp        *ntcp.Forwarder
-	udp        *udp.NAT
-	testProxy  *testproxy.Server
-	health     *forwardingCheck
-	healthInfo atomic.Pointer[forwardingInfo]
+	OnFatal      func(error)
+	mu           sync.Mutex
+	root         context.Context
+	deps         Dependencies
+	proxy        *proxy.Dialer
+	dialer       platform.LineDialer
+	Table        *flows.Table
+	limits       flows.Limits
+	cancel       context.CancelFunc
+	tun          platform.TunDevice
+	stack        *gv.Stack
+	link         *ns.Link
+	tcp          *ntcp.Forwarder
+	udp          *udp.NAT
+	testProxy    *testproxy.Server
+	health       *forwardingCheck
+	healthInfo   atomic.Pointer[forwardingInfo]
 	pumps        sync.WaitGroup
 	provAttached bool
 	provActive   bool
 	lastError    error
-	lines      []platform.Line
-	live       atomic.Pointer[liveState]
+	lines        []platform.Line
+	live         atomic.Pointer[liveState]
+	vpnFirewall  atomic.Pointer[platform.VPNFirewall]
 }
 
 type liveState struct {
@@ -93,6 +99,10 @@ func (e *Engine) LiveState() (string, time.Time) {
 
 func New(ctx context.Context, d Dependencies, l flows.Limits, state flows.StateStore) *Engine {
 	e := &Engine{root: ctx, deps: d, limits: l, Table: flows.New(l, state)}
+	if d.Dialer != nil {
+		e.proxy = proxy.NewDialer(d.Dialer, proxy.Options{TLSConfig: d.ProbeTLS})
+		e.dialer = e.proxy.LineDialer()
+	}
 	if r, ok := d.Routes.(interface{ SetLineUse(func(string) bool) }); ok {
 		r.SetLineUse(e.Table.ReferencesLine)
 	}
@@ -112,6 +122,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		return policy.Applied{}, err
 	}
 	e.live.Store(&liveState{status: "starting"})
+	e.vpnFirewall.Store(nil)
 	e.lastError = nil
 	debug.SetMemoryLimit(512 << 20)
 	tun, err := e.deps.OpenTun(ctx)
@@ -129,8 +140,11 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	if tun.MTU() != ns.MTU {
 		return rollback(fmt.Errorf("TUN MTU must be %d", ns.MTU))
 	}
-	if err := e.deps.Routes.Prepare(ctx, r.Config.Lines); err != nil {
+	if err := e.deps.Routes.Prepare(ctx, osLines(r.Config.Lines)); err != nil {
 		return rollback(err)
+	}
+	if e.proxy != nil {
+		e.proxy.SetLines(r.Config.Lines)
 	}
 	a, err := e.Table.Apply(r)
 	if err != nil {
@@ -172,11 +186,11 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 	if device, ok := tun.(platform.TunIOContext); ok {
 		device.BindIOContext(run)
 	}
-	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.deps.Dialer, link)
+	e.tcp = ntcp.New(run, s, e.limits.Handshakes, e.Table, e.deps.Owners, e.dialer, link)
 	if e.deps.SilentSYNDiagnostics {
 		e.tcp.RecordSilentSYNs() // before the pumps below deliver any packet
 	}
-	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.deps.Dialer, link, tun.MTU())
+	e.udp = udp.New(run, s, e.Table, e.deps.Owners, e.deps.Identities, e.dialer, link, tun.MTU())
 	echo := newEcho(run, e.deps.Dialer, e.Table, link)
 	nat := e.udp
 	if events, ok := e.deps.Identities.(platform.UDPNotifications); ok {
@@ -300,6 +314,30 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 		}
 		close(pumpEnabled)
 	}
+	if checker, ok := e.deps.Routes.(interface {
+		CheckVPNFirewall(ctx context.Context, tunIndex int, tunPort uint16, healthKey []byte) (*platform.VPNFirewall, error)
+	}); ok {
+		idx, port := e.ForwardingCheck()
+		fw, err := checker.CheckVPNFirewall(ctx, idx, port, e.deps.HealthKey)
+		if err != nil {
+			return rollback(err)
+		}
+		if fw != nil && fw.Blocked {
+			fw.SteppedOut = true
+			msg := fw.Reason
+			if msg == "" {
+				msg = "VPN firewall blocks Net Switch TUN egress; routing stepped aside"
+			}
+			stepErr := errors.New(msg)
+			e.lastError = stepErr
+			cleanup := e.stopLocked(context.WithoutCancel(ctx))
+			cp := *fw
+			e.vpnFirewall.Store(&cp)
+			e.live.Store(&liveState{status: "error", lastError: Clip(msg, 4096)})
+			e.Table.Emit(flowapi.Event{Type: "vpn-firewall", Message: Clip(msg, 4096)})
+			return policy.Applied{}, errors.Join(stepErr, cleanup)
+		}
+	}
 	if err := e.deps.Routes.Capture(ctx); err != nil {
 		return rollback(err)
 	}
@@ -344,12 +382,18 @@ func (e *Engine) applyLocked(ctx context.Context, r policy.Revision) (policy.App
 	}
 	// The platform contract makes Prepare transactional and keeps old flow
 	// routes usable. Only explicit selectors close existing connections.
-	if err := e.deps.Routes.Prepare(ctx, r.Config.Lines); err != nil {
+	if err := e.deps.Routes.Prepare(ctx, osLines(r.Config.Lines)); err != nil {
 		return policy.Applied{}, err
+	}
+	if e.proxy != nil {
+		e.proxy.SetLines(r.Config.Lines)
 	}
 	a, err := e.Table.Apply(r)
 	if err != nil {
-		rollback := e.deps.Routes.Prepare(context.WithoutCancel(ctx), e.lines)
+		if e.proxy != nil {
+			e.proxy.SetLines(e.lines)
+		}
+		rollback := e.deps.Routes.Prepare(context.WithoutCancel(ctx), osLines(e.lines))
 		if rollback != nil {
 			e.stopLocked(context.WithoutCancel(ctx))
 		}
@@ -469,6 +513,9 @@ func (e *Engine) stopLocked(ctx context.Context) error {
 	e.tun = nil
 	e.cancel = nil
 	e.lines = nil
+	if e.proxy != nil {
+		e.proxy.SetLines(nil)
+	}
 	var cleanup error
 	if e.deps.Routes != nil {
 		cleanup = e.deps.Routes.Cleanup(ctx)
@@ -499,6 +546,10 @@ func cloneLines(lines []platform.Line) []platform.Line {
 	out := append([]platform.Line(nil), lines...)
 	for i := range out {
 		out[i].Addresses = append(out[i].Addresses[:0:0], out[i].Addresses...)
+		if out[i].Proxy != nil {
+			cp := *out[i].Proxy
+			out[i].Proxy = &cp
+		}
 	}
 	return out
 }
@@ -507,7 +558,15 @@ func (e *Engine) Stats() any {
 	defer e.mu.Unlock()
 	// Aggregates only: every entry has a fixed bound (see stats_bound_test.go).
 	// Per-flow detail is in the paged flows listing.
-	s := map[string]any{"flows": e.Table.Stats()}
+	s := map[string]any{"flows": e.Table.Stats(), "unsupportedUDP": e.Table.UnsupportedUDPStats()}
+	if e.proxy != nil {
+		if ps := e.proxy.Stats(); len(ps) > 0 {
+			s["proxyLines"] = ps
+		}
+	}
+	if fw := e.VPNFirewall(); fw != nil {
+		s["vpnFirewall"] = fw
+	}
 	if tun, ok := e.tun.(interface{ Stats() any }); ok {
 		s["tunKernel"] = tun.Stats()
 	}
