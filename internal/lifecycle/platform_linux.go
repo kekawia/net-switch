@@ -110,12 +110,16 @@ func linuxCall(op string, args map[string]any) (any, error) {
 			}
 			ips := []any{}
 			ipv6 := false
+			ownCapture := false
 			for _, address := range addresses {
 				ip, _, err := net.ParseCIDR(address.String())
 				if err != nil {
 					continue
 				}
 				if ip.To4() != nil {
+					if ip.String() == "198.18.0.1" {
+						ownCapture = true
+					}
 					ips = append(ips, ip.String())
 					if defaults[nic.Name] != "" {
 						routes = append(routes, map[string]any{"interfaceAddress": ip.String(), "alias": nic.Name, "index": nic.Index})
@@ -123,6 +127,9 @@ func linuxCall(op string, args map[string]any) (any, error) {
 				} else if !ip.IsLinkLocalUnicast() {
 					ipv6 = true
 				}
+			}
+			if ownCapture {
+				continue
 			}
 			status := "Down"
 			if nic.Flags&net.FlagUp != 0 {
@@ -229,9 +236,30 @@ func DesktopCall(_ context.Context, op string, args map[string]any) (any, error)
 	return nil, fmt.Errorf("desktop operation %q refused", op)
 }
 
+func isOwnEngineTunName(lower string) bool {
+	if len(lower) != 12 || !strings.HasPrefix(lower, "ns") {
+		return false
+	}
+	for i := 2; i < len(lower); i++ {
+		c := lower[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func isOwnCaptureInterface(name string) bool {
 	lower := strings.ToLower(name)
-	return lower == "netswitch" || lower == "netswitch0"
+	if lower == "netswitch" || lower == "netswitch0" || isOwnEngineTunName(lower) {
+		return true
+	}
+	if alias, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias")); err == nil {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(string(alias))), "netswitch:") {
+			return true
+		}
+	}
+	return false
 }
 
 var linuxExcludedPrefixes = []string{
@@ -296,8 +324,9 @@ func linuxVPNDefaultRouteIfs() map[int]bool {
 		}
 		dstLen := msg.Data[1]
 		table := uint32(msg.Data[4])
+		rtmProto := msg.Data[6]
 		rtmType := msg.Data[7]
-		if rtmType != syscall.RTN_UNICAST || dstLen > 1 {
+		if rtmType != syscall.RTN_UNICAST || dstLen > 1 || rtmProto == 186 {
 			continue
 		}
 		attrs, err := syscall.ParseNetlinkRouteAttr(&msg)
@@ -327,7 +356,7 @@ func linuxVPNDefaultRouteIfs() map[int]bool {
 				}
 			}
 		}
-		if oif <= 0 || table == syscall.RT_TABLE_LOCAL || (table >= 20100 && table <= 20355) {
+		if oif <= 0 || table == syscall.RT_TABLE_LOCAL || (table >= 20100 && table <= 20355) || (table >= 21000 && table <= 21255) {
 			continue
 		}
 		if dstLen == 0 {

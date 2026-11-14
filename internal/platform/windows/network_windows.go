@@ -282,6 +282,9 @@ func assembleNetwork(line networkLine, rows []windows.MibIfRow2, addresses map[u
 			continue
 		}
 		own := addresses[row.InterfaceIndex]
+		if slices.Contains(own, "198.18.0.1") || strings.EqualFold(row.InterfaceGuid.String(), "{D9B44E84-B5C7-4DC4-97A4-4E7CA6722686}") {
+			continue
+		}
 		if own == nil {
 			own = []string{}
 		}
@@ -468,6 +471,9 @@ func collectVPNAdapters(rows []windows.MibIfRow2, addresses map[uint32][]string,
 			continue
 		}
 		own := addresses[row.InterfaceIndex]
+		if slices.Contains(own, "198.18.0.1") || strings.EqualFold(row.InterfaceGuid.String(), "{D9B44E84-B5C7-4DC4-97A4-4E7CA6722686}") {
+			continue
+		}
 		if own == nil {
 			own = []string{}
 		}

@@ -54,11 +54,11 @@ func (line Line) IsVirtual() bool {
 }
 
 func (line Line) IsOnlyChosen() bool {
-	if line.Proxy != nil {
-		return true
-	}
 	if line.OnlyChosen != nil {
 		return *line.OnlyChosen
+	}
+	if line.Proxy != nil {
+		return true
 	}
 	return false
 }
@@ -261,8 +261,12 @@ func NormalizeLines(v any) []Line {
 		if vpn {
 			onlyChosen = boolPointer(m["onlyChosen"])
 		} else if proxySpec != nil {
-			t := true
-			onlyChosen = &t
+			if oc := boolPointer(m["onlyChosen"]); oc != nil {
+				onlyChosen = oc
+			} else {
+				t := true
+				onlyChosen = &t
+			}
 		}
 		result = append(result, Line{
 			ID:         id,

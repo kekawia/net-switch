@@ -458,10 +458,17 @@ func (c *Core) changeLines(ctx context.Context, action string, b map[string]any)
 			if !ok {
 				return bad("Choose which apps may use this line, then try again.")
 			}
-			if next.Proxy != nil && !val {
-				return bad("Proxy lines only carry apps you move to them.")
+			if !next.IsVirtual() {
+				return bad("Only VPN and proxy lines use Only apps I choose.")
 			}
 			next.OnlyChosen = &val
+			if !val {
+				for j := range items {
+					if j != index && items[j].IsVirtual() {
+						items[j].OnlyChosen = ptr(true)
+					}
+				}
+			}
 		}
 		if v, exists := b["fallback"]; exists {
 			val, ok := v.(bool)

@@ -224,7 +224,7 @@ func (c *Core) State() map[string]any {
 			entry["onlyChosen"] = line.IsOnlyChosen()
 			entry["fallback"] = line.AllowsFallback()
 		} else if line.Proxy != nil {
-			entry["onlyChosen"] = true
+			entry["onlyChosen"] = line.IsOnlyChosen()
 			entry["fallback"] = line.AllowsFallback()
 			entry["proxy"] = c.proxyStateJSONLocked(line.Proxy)
 		} else if line.Fallback != nil {

@@ -68,7 +68,7 @@ func (c *Core) policyLinesLocked(items []lines.Line) []lines.Line {
 		return items
 	}
 	for i, l := range items {
-		if l.VPN && !l.IsOnlyChosen() {
+		if l.IsVirtual() && !l.IsOnlyChosen() {
 			if i == 0 {
 				return items
 			}
@@ -93,7 +93,7 @@ func (c *Core) policyLinesLocked(items []lines.Line) []lines.Line {
 
 func primaryDisplayID(items []lines.Line) string {
 	for _, l := range items {
-		if l.VPN && !l.IsOnlyChosen() {
+		if l.IsVirtual() && !l.IsOnlyChosen() {
 			return l.ID
 		}
 	}

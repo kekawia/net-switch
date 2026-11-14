@@ -698,10 +698,10 @@ func (c *Core) policyLocked() engine.Policy {
 			up[l.ID] = true
 		}
 	}
-	excludeVPN := len(ordered) > 0 && ordered[0].VPN && !ordered[0].IsOnlyChosen()
-	combine := js.Truth(c.values["combine"]) && !excludeVPN
+	excludeVirtual := len(ordered) > 0 && ordered[0].IsVirtual() && !ordered[0].IsOnlyChosen()
+	combine := js.Truth(c.values["combine"]) && !excludeVirtual
 	shares := lines.Shares{}
-	if !excludeVPN {
+	if !excludeVirtual {
 		shares = c.sharesLocked(ordered)
 	}
 	p := engine.Policy{Lines: ordered, AppLines: append(apps.Pins{}, c.pinsLocked()...), Combine: combine, Shares: shares, Blocked: []string{}, Lanes: map[string]string{}, IPv6: c.effectiveIPv6Locked()}

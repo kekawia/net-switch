@@ -171,7 +171,7 @@ func TestProxyLineCRUDSealedSecretsAndNoPasswordLeak(t *testing.T) {
 		t.Fatalf("Routing(true): %v", err)
 	}
 
-	const secretPass = "s3cr3t-Hunt3r-99!"
+	const secretPass = "placeholder-alpha-bravo" // ggignore
 	stateRaw, err := c.Action(ctx, "POST", "/api/lines/add", map[string]any{
 		"label": "Local Clash",
 		"proxy": map[string]any{
@@ -247,17 +247,23 @@ func TestProxyLineCRUDSealedSecretsAndNoPasswordLeak(t *testing.T) {
 
 	// Rotating password increments CredentialsRev and changes compiled policy.Hash!
 	if _, err := c.Action(ctx, "POST", "/api/lines/update", map[string]any{
-		"id": proxyLine.ID,
+		"id":         proxyLine.ID,
+		"onlyChosen": false,
 		"proxy": map[string]any{
 			"protocol": "socks5",
 			"server":   "127.0.0.1:7890",
 			"carrier":  "main",
 			"udp":      true,
 			"username": "alice",
-			"password": "new-rotated-password-42",
+			"password": "placeholder-charlie-delta", // ggignore
 		},
 	}); err != nil {
 		t.Fatalf("rotate proxy password: %v", err)
+	}
+	updatedState := c.State()
+	updatedProxyEntry := updatedState["lines"].([]any)[2].(map[string]any)
+	if updatedProxyEntry["onlyChosen"] != false || updatedProxyEntry["main"] != true {
+		t.Fatalf("expected proxy onlyChosen=false to mark proxy as main, got %+v", updatedProxyEntry)
 	}
 	compiled2, err := engine.NativeRevision(engine.Revision{Number: 2, Policy: eng.Snapshot().Policy}, apppath.Windows)
 	if err != nil {
@@ -267,7 +273,7 @@ func TestProxyLineCRUDSealedSecretsAndNoPasswordLeak(t *testing.T) {
 		t.Fatalf("expected policy.Hash to change on password rotation")
 	}
 	creds, err := c.ProxyCredentials()
-	if err != nil || creds[proxyLine.Proxy.CredentialsRef].Password != "new-rotated-password-42" {
+	if err != nil || creds[proxyLine.Proxy.CredentialsRef].Password != "placeholder-charlie-delta" {
 		t.Fatalf("unexpected resolved credentials after rotation: %+v, err=%v", creds, err)
 	}
 
