@@ -204,7 +204,7 @@ func TestWintunEntryShiftProbe(t *testing.T) {
 	if ipv6 == "ok" {
 		ipv6 = "unavailable: the plain IPv6 exchange never succeeded"
 		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
-			c, err := net.DialUDP("udp6", &net.UDPAddr{IP: net.ParseIP(probeHost6)}, &net.UDPAddr{IP: probePeer6.AsSlice(), Port: 9001})
+			c, err := dialHostUDP(t, "udp6", &net.UDPAddr{IP: net.ParseIP(probeHost6)}, &net.UDPAddr{IP: probePeer6.AsSlice(), Port: 9001})
 			if err != nil {
 				ipv6 = "unavailable: " + err.Error()
 				continue
@@ -584,7 +584,8 @@ type staleHeadRounds struct {
 // stall between bursts. Windows keeps a packet in the ring until its reader
 // takes the data, so the late start fills the ring whatever the runner's speed
 // (an ARM64 runner reading at once never filled a 1 MiB ring).
-func stalledRound(round, size int) (completed, incomplete int, differences []staleHeadDifference, err error) {
+func stalledRound(t *testing.T, round, size int) (completed, incomplete int, differences []staleHeadDifference, err error) {
+	t.Helper()
 	const streams = 8
 	transfer := integrityTransferID.Add(1)
 	if err = validPayloadIdentity(transfer, streams); err != nil {
@@ -598,8 +599,7 @@ func stalledRound(round, size int) (completed, incomplete int, differences []sta
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("198.19.240.1")}, Timeout: 5 * time.Second}
-			c, dialErr := d.Dial("tcp4", "198.19.240.2:9002")
+			c, dialErr := dialHostTCP4(t)
 			if dialErr != nil {
 				mu.Lock()
 				incomplete++
@@ -701,7 +701,7 @@ func TestWintunStaleReceiveHead(t *testing.T) {
 					totals = &replayed
 				}
 				replay.armed.Store(armed)
-				completed, incomplete, d, err := stalledRound(round, streamBytes)
+				completed, incomplete, d, err := stalledRound(t, round, streamBytes)
 				replay.armed.Store(false)
 				after := replay.snapshot()
 				totals.Rounds, totals.Completed, totals.Incomplete, totals.Mismatched = totals.Rounds+1, totals.Completed+completed, totals.Incomplete+incomplete, totals.Mismatched+len(d)

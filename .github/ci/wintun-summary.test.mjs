@@ -50,9 +50,11 @@ test('exact 20% bound stays valid and an incomplete calibration cannot be averag
  assert.equal(s.result(0).verdict,'diagnostic_incomplete');assert.equal(s.result(0).exit,1);
  assert.equal(s.result(0).overhead,null,'no aggregate from an incomplete job');
 });
-test('unrelated failures are summarized without failing or crediting the job',()=>{
+test('unrelated failures are summarized without failing or crediting the job, and nightRecord keeps their lines',()=>{
  const s=fixture({scenario:'full'});s.line('--- FAIL: TestWintunRecoveryAndCancellation (2s)');
- assert.equal(s.result(1).verdict,'test_failed');assert.equal(s.result(1).exit,0);assert.equal(s.result(1).clean_exposure_connections,0);
+ const failed=s.result(1);
+ assert.equal(failed.verdict,'test_failed');assert.equal(failed.exit,0);assert.equal(failed.clean_exposure_connections,0);
+ assert.deepEqual(nightRecord(failed,{arch:'X64',scenario:'full',shard:'5'}).detail,['--- FAIL: TestWintunRecoveryAndCancellation (2s)']);
  const missing=fixture({scenario:'full',omitPhase:true});missing.line('--- FAIL: TestWintunPerformance');
  assert.equal(missing.result(1).verdict,'diagnostic_incomplete');assert.equal(missing.result(1).exit,1);
 });
@@ -194,8 +196,11 @@ test('a warning and repeated counter snapshots for one incident count once',()=>
  assert.equal(r.ring_rejection_incidents,1);
  assert.equal(r.integrity_evidence_records,1);
 });
-test('a clean run names no evidence kind and keeps its clean exposure',()=>{
- const r=fixture({scenario:'full'}).result(0);
+test('a clean run names no evidence kind, ignores logged host port retries, and keeps its clean exposure',()=>{
+ const s=fixture({scenario:'full'});
+ emit(s,{test:'host_port_retry',network:'tcp4',local:'198.19.240.1:0',remote:'198.19.240.2:9002',attempts:2,recovered:true,
+  first_error:'dial tcp4 198.19.240.1:0->198.19.240.2:9002: bind: An operation on a socket could not be performed because the system lacked sufficient buffer space or because a queue was full.'});
+ const r=s.result(0);
  assert.equal(r.verdict,'no_corruption_observed');assert.equal(r.exit,0);
  assert.deepEqual(r.integrity_evidence_kinds,[]);
  assert.equal(r.payload_mismatch_incidents,0);assert.equal(r.ring_rejection_incidents,0);

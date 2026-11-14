@@ -245,7 +245,7 @@ func fixtureOnAdapter(t *testing.T, mode string, adapter *Adapter) *fixture {
 
 func udpSocket(t *testing.T) *net.UDPConn {
 	t.Helper()
-	c, err := net.DialUDP("udp4", &net.UDPAddr{IP: net.ParseIP("198.19.240.1")}, &net.UDPAddr{IP: net.ParseIP("198.19.240.2"), Port: 9001})
+	c, err := dialHostUDP(t, "udp4", &net.UDPAddr{IP: net.ParseIP("198.19.240.1")}, &net.UDPAddr{IP: net.ParseIP("198.19.240.2"), Port: 9001})
 	must(t, err)
 	c.SetReadBuffer(4 << 20)
 	return c
@@ -945,8 +945,13 @@ func TestWintunAdapterRemoval(t *testing.T) {
 	go func() {
 		packets := [][]byte{testPacket()}
 		for ctx.Err() == nil {
+			// WriteBatch returns (0, nil) on full rings, lock contention, or
+			// active recovery, and returns ErrAdapterRemoved on loss. Once
+			// maintain retires the session, s.err joins ErrAdapterRemoved with
+			// cause (which wraps ErrDisconnected), so any non-nil error ends
+			// the writer loop and is checked below.
 			_, err := s.WriteBatch(packets)
-			if err != nil && !errors.Is(err, ErrDisconnected) {
+			if err != nil {
 				writerDone <- err
 				return
 			}

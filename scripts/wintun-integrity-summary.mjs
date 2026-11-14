@@ -276,9 +276,11 @@ export class IntegritySummary {
 // nightRecord is what one job contributes to the night's verdict
 // (scripts/wintun-night.mjs).
 export function nightRecord(result, job) {
+  const detail=[...result.notes,...result.failed_tests_and_phases].slice(0,10);
   return {...job, verdict:result.verdict, passed:result.gate.passed, own_rejections:result.gate.own_rejections, recovery_failures:result.gate.recovery_failures,
     own_payload_mismatches:result.payload_mismatch_incidents-result.reference_evidence.payload_mismatch_incidents,
-    guard:result.guard, reference_evidence:result.reference_evidence, clean_exposure_connections:result.clean_exposure_connections};
+    guard:result.guard, reference_evidence:result.reference_evidence, clean_exposure_connections:result.clean_exposure_connections,
+    ...(detail.length?{detail}:{})};
 }
 
 export function diagnosticBudget(deadline, now=Date.now()) {
