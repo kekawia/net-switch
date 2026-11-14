@@ -180,6 +180,11 @@ var ErrPortExhausted = errors.New("native port exhaustion")
 // unreachable for the datagram currently being sent.
 var ErrDatagramDropped = errors.New("datagram dropped")
 
+// ErrUnsupportedUDP reports that a line (such as an HTTP CONNECT proxy or a
+// SOCKS5 proxy without UDP ASSOCIATE) cannot carry UDP datagrams. Callers
+// reject the datagram with ICMP unreachable without penalizing line health.
+var ErrUnsupportedUDP = errors.New("line does not support UDP")
+
 type ReadyTCP interface {
 	TCPConn
 	TryRead([]byte) (int, error)
@@ -294,10 +299,21 @@ type RouteManager interface {
 	Cleanup(context.Context) error
 }
 
+type ProxyLine struct {
+	Protocol       string `json:"protocol"`                 // "socks5", "http", "https"
+	Server         string `json:"server"`                   // host:port or ip:port
+	ServerName     string `json:"serverName,omitempty"`     // optional TLS SNI override for "https"
+	Carrier        string `json:"carrier"`                  // "local" (127.0.0.1/::1) or another line ID
+	UDP            bool   `json:"udp,omitempty"`            // true when SOCKS5 UDP ASSOCIATE is enabled
+	CredentialsRef string `json:"credentialsRef,omitempty"` // opaque key in secret store; never raw credentials
+	CredentialsRev uint64 `json:"credentialsRev,omitempty"` // increments on secret rotation so policy.Hash updates
+}
+
 type Line struct {
 	ID        string       `json:"id"`
 	Interface string       `json:"interface,omitempty"`
 	Addresses []netip.Addr `json:"addresses"`
+	Proxy     *ProxyLine   `json:"proxy,omitempty"`
 }
 
 // UDPNotifications is optional. Cancellation must stop the listener before
