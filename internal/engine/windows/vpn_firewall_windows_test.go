@@ -3,6 +3,7 @@
 package winengine
 
 import (
+	"context"
 	"net/netip"
 	"testing"
 
@@ -13,14 +14,15 @@ import (
 
 func TestClassifyKillSwitchFilter(t *testing.T) {
 	foreignSub := mustGUID("{11111111-2222-3333-4444-555555555555}")
+	ifCond := mustGUID("{22222222-3333-4444-5555-666666666666}")
 
 	// 1. WireGuard catch-all hard block -> matched, "WireGuard".
 	name, ok := classifyKillSwitchFilter(wfpFilterSummary{
 		Layer:          wfpLayerALEConnectV4,
 		SubLayer:       foreignSub,
 		SubLayerWeight: 0xFFFF,
-		SubLayerName:   "WireGuard",
-		FilterName:     "Block untunneled traffic",
+		SubLayerName:   "WireGuard filters",
+		FilterName:     "Block all outbound (IPv4)",
 		ActionType:     fwpActionBlock,
 	})
 	if !ok || name != "WireGuard" {
@@ -33,6 +35,7 @@ func TestClassifyKillSwitchFilter(t *testing.T) {
 		SubLayer:     foreignSub,
 		SubLayerName: "ProtonVPN Permanent Sublayer",
 		ActionType:   fwpActionBlock,
+		Conditions:   []windows.GUID{ifCond},
 	})
 	if !ok || name != "Proton VPN" {
 		t.Fatalf("expected Proton VPN match, got ok=%v name=%q", ok, name)
@@ -49,7 +52,36 @@ func TestClassifyKillSwitchFilter(t *testing.T) {
 		t.Fatal("per-app block rule misclassified as system VPN kill switch")
 	}
 
-	// 4. Disabled filter -> ignored.
+	// 4. Built-in OS / AppContainer / unnamed conditional hard-block rules -> ignored.
+	for _, tc := range []wfpFilterSummary{
+		{
+			Layer:        wfpLayerALEConnectV4,
+			SubLayer:     foreignSub,
+			SubLayerName: "@FirewallAPI.dll,-28752",
+			FilterName:   "Microsoft Network Isolation",
+			ActionType:   fwpActionBlock,
+		},
+		{
+			Layer:        wfpLayerALEConnectV4,
+			SubLayer:     foreignSub,
+			SubLayerName: "AppContainer Loopback",
+			ActionType:   fwpActionBlock,
+			Conditions:   []windows.GUID{wfpCondALEPackageID},
+		},
+		{
+			Layer:        wfpLayerALEConnectV4,
+			SubLayer:     foreignSub,
+			SubLayerName: "Some OS Sublayer",
+			ActionType:   fwpActionBlock,
+			Conditions:   []windows.GUID{ifCond},
+		},
+	} {
+		if got, ok := classifyKillSwitchFilter(tc); ok {
+			t.Fatalf("built-in/conditional non-VPN filter misclassified as %q", got)
+		}
+	}
+
+	// 5. Disabled filter -> ignored.
 	if _, ok := classifyKillSwitchFilter(wfpFilterSummary{
 		Layer:        wfpLayerALEConnectV4,
 		SubLayer:     foreignSub,
@@ -60,7 +92,7 @@ func TestClassifyKillSwitchFilter(t *testing.T) {
 		t.Fatal("disabled WFP filter matched")
 	}
 
-	// 5. Soft CLEAR_ACTION_RIGHT generic Windows Firewall base block -> ignored.
+	// 6. Soft CLEAR_ACTION_RIGHT generic Windows Firewall base block -> ignored.
 	if _, ok := classifyKillSwitchFilter(wfpFilterSummary{
 		Layer:          wfpLayerALEConnectV4,
 		SubLayer:       foreignSub,
@@ -72,13 +104,33 @@ func TestClassifyKillSwitchFilter(t *testing.T) {
 		t.Fatal("soft CLEAR_ACTION_RIGHT base firewall rule misclassified as kill switch")
 	}
 
-	// 6. Net Switch's own sublayer -> ignored.
+	// 7. Net Switch's own sublayer -> ignored.
 	if _, ok := classifyKillSwitchFilter(wfpFilterSummary{
 		Layer:      wfpLayerALEConnectV4,
 		SubLayer:   wfpOwnedSubLayerGUID,
 		ActionType: fwpActionBlock,
 	}); ok {
 		t.Fatal("owned Net Switch sublayer misclassified as foreign kill switch")
+	}
+}
+
+func TestLoopbackTimeoutDoesNotTriggerVPNFirewallStepAside(t *testing.T) {
+	// Loopback interface index 1 permits UDP connect/write without WSAEACCES and
+	// has no echo responder on port 9, simulating a stalled Wintun read pump.
+	var key [32]byte
+	key[0] = 0x42
+	r := &Routes{}
+	fw, err := r.CheckVPNFirewall(context.Background(), 1, 9, key[:])
+	if err != nil {
+		t.Fatalf("CheckVPNFirewall returned error: %v", err)
+	}
+	if fw != nil {
+		t.Fatalf("read timeout without WSAEACCES falsely triggered VPNFirewall: %+v", fw)
+	}
+	for range 3 {
+		if live := r.checkLiveVPNFirewall(context.Background()); live != nil {
+			t.Fatalf("live read timeout falsely triggered VPNFirewall: %+v", live)
+		}
 	}
 }
 

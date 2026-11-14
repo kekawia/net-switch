@@ -29,6 +29,7 @@ var (
 
 	wfpCondALEAppID      = mustGUID("{D78E1E87-8644-4EA5-9437-D809ECEFC971}")
 	wfpCondALEUserID     = mustGUID("{AF043A0A-B34D-4F86-979C-C90371AF6E66}")
+	wfpCondALEPackageID  = mustGUID("{71BC78FA-F17C-4997-A602-6ABB261F351C}")
 	wfpCondRemoteAddr    = mustGUID("{B235AE9A-1D64-49B8-A44C-5FF3D9095045}")
 	wfpCondRemotePort    = mustGUID("{C35A604D-D22B-4E1A-91B4-68F674EE674B}")
 	wfpOwnedSubLayerGUID = mustGUID(wfpSubLayerKey)
@@ -38,7 +39,7 @@ const (
 	fwpActionBlock           = 0x1001
 	fwpmFilterFlagClearRight = 0x0008
 	fwpmFilterFlagDisabled   = 0x0020
-	vpnProbeChallengeTimeout = 45 * time.Millisecond
+	vpnProbeChallengeTimeout = 25 * time.Millisecond
 )
 
 var vpnProbeSerial atomic.Uint64
@@ -66,9 +67,9 @@ func isOutboundKillSwitchLayer(layer windows.GUID) bool {
 }
 
 // classifyKillSwitchFilter determines whether an outbound WFP filter is a
-// system/interface-wide hard block (such as WireGuard's "Block untunneled
-// traffic", Mullvad, or Proton VPN kill switch) rather than a per-app, per-port,
-// per-destination, disabled, or soft-veto Windows Firewall rule.
+// foreign VPN kill switch (such as WireGuard's zero-condition "Block all
+// outbound", Mullvad, or Proton VPN) rather than a built-in Windows OS rule,
+// per-app/AppContainer rule, per-port/destination rule, or soft veto.
 func classifyKillSwitchFilter(f wfpFilterSummary) (blocker string, matched bool) {
 	if !isOutboundKillSwitchLayer(f.Layer) {
 		return "", false
@@ -82,20 +83,31 @@ func classifyKillSwitchFilter(f wfpFilterSummary) (blocker string, matched bool)
 	if f.Flags&fwpmFilterFlagDisabled != 0 {
 		return "", false
 	}
-	// Soft block filters (CLEAR_ACTION_RIGHT) yield to permit rules in lower
-	// sublayers (e.g. default Windows Defender Firewall base rules) unless the
-	// sublayer itself sits at maximum priority weight (0xFFFF) with a VPN name.
-	if f.Flags&fwpmFilterFlagClearRight != 0 && f.SubLayerWeight < 0xFFFF {
-		return "", false
-	}
 	for _, c := range f.Conditions {
 		switch c {
-		case wfpCondALEAppID, wfpCondALEUserID, wfpCondRemoteAddr, wfpCondRemotePort:
+		case wfpCondALEAppID, wfpCondALEUserID, wfpCondALEPackageID, wfpCondRemoteAddr, wfpCondRemotePort:
 			return "", false
 		}
 	}
+	if vpn := matchKnownVPNName(f.SubLayerName, f.FilterName, f.FilterDesc); vpn != "" {
+		if f.Flags&fwpmFilterFlagClearRight != 0 && f.SubLayerWeight < 0xFFFF {
+			return "", false
+		}
+		return vpn, true
+	}
+	if isSystemWFPDisplay(f.SubLayerName, f.FilterName, f.FilterDesc) {
+		return "", false
+	}
+	if f.Flags&fwpmFilterFlagClearRight != 0 {
+		return "", false
+	}
+	// Unknown third-party sublayers qualify only when they install an
+	// unconditional catch-all block (numFilterConditions == 0) with a real name.
+	if len(f.Conditions) != 0 {
+		return "", false
+	}
 	name := cleanVPNBlockerName(f.SubLayerName, f.FilterName, f.FilterDesc)
-	if f.Flags&fwpmFilterFlagClearRight != 0 && name == "VPN firewall" {
+	if name == "VPN firewall" {
 		return "", false
 	}
 	return name, true
@@ -120,20 +132,41 @@ var knownVPNNames = [...]struct {
 	{"warp", "Cloudflare WARP"},
 }
 
-func cleanVPNBlockerName(parts ...string) string {
+func matchKnownVPNName(parts ...string) string {
 	joined := strings.ToLower(strings.Join(parts, " "))
 	for _, k := range knownVPNNames {
 		if strings.Contains(joined, k.needle) {
 			return k.display
 		}
 	}
+	return ""
+}
+
+func isSystemWFPDisplay(parts ...string) bool {
 	for _, p := range parts {
-		s := strings.TrimSpace(p)
-		if s == "" {
+		lower := strings.ToLower(strings.TrimSpace(p))
+		if lower == "" {
 			continue
 		}
-		lower := strings.ToLower(s)
-		if strings.HasPrefix(lower, "@") || strings.Contains(lower, "firewallapi.dll") || strings.Contains(lower, "microsoft") {
+		if strings.HasPrefix(lower, "@") ||
+			strings.Contains(lower, "firewallapi.dll") ||
+			strings.Contains(lower, "microsoft") ||
+			strings.Contains(lower, "windows defender") ||
+			strings.Contains(lower, "appcontainer") ||
+			strings.Contains(lower, "network isolation") {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanVPNBlockerName(parts ...string) string {
+	if vpn := matchKnownVPNName(parts...); vpn != "" {
+		return vpn
+	}
+	for _, p := range parts {
+		s := strings.TrimSpace(p)
+		if s == "" || isSystemWFPDisplay(s) {
 			continue
 		}
 		if len(s) > 64 {
@@ -244,17 +277,19 @@ func inspectForeignVPNKillSwitch() (blocker string, found bool, err error) {
 
 // probeLocalTUN sends one authenticated 40-byte UDP challenge bound to tunIndex
 // toward the child netstack's private 198.18.0.2:tunPort responder. No WAN
-// traffic is emitted. Returns blockedByWFP=true immediately on WSAEACCES.
-func probeLocalTUN(ctx context.Context, tunIndex int, tunPort uint16, healthKey []byte, timeout time.Duration) (blockedByWFP bool, timedOut bool, err error) {
+// traffic is emitted. Returns blockedByWFP=true only on WSAEACCES (WFP hard
+// block on ALE_AUTH_CONNECT_V4); a read deadline without WSAEACCES means WFP
+// permitted the flow and any forwarding stall belongs to the host watchdog.
+func probeLocalTUN(ctx context.Context, tunIndex int, tunPort uint16, healthKey []byte, timeout time.Duration) (blockedByWFP bool, err error) {
 	sock, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return false, false, err
+		return false, err
 	}
 	defer sock.Close()
 
 	raw, err := sock.SyscallConn()
 	if err != nil {
-		return false, false, err
+		return false, err
 	}
 	var bindErr error
 	if err := raw.Control(func(fd uintptr) {
@@ -265,13 +300,13 @@ func probeLocalTUN(ctx context.Context, tunIndex int, tunPort uint16, healthKey 
 			bindErr = windows.Connect(windows.Handle(fd), &windows.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: int(tunPort)})
 		}
 	}); err != nil {
-		return false, false, err
+		return false, err
 	}
 	if bindErr != nil {
 		if errors.Is(bindErr, windows.WSAEACCES) {
-			return true, false, nil
+			return true, nil
 		}
-		return false, false, bindErr
+		return false, bindErr
 	}
 
 	deadline := time.Now().Add(timeout)
@@ -287,31 +322,33 @@ func probeLocalTUN(ctx context.Context, tunIndex int, tunPort uint16, healthKey 
 
 	if _, err := sock.Write(req[:]); err != nil {
 		if errors.Is(err, windows.WSAEACCES) {
-			return true, false, nil
+			return true, nil
 		}
 		if errors.Is(err, os.ErrDeadlineExceeded) {
-			return false, true, nil
+			return false, nil
 		}
-		return false, false, err
+		return false, err
 	}
 
+	// Drain the echo briefly so 198.18.0.1 does not emit ICMP port-unreachable
+	// when the socket closes; a timeout here is NOT a WFP block.
 	var resp [41]byte
-	for range 8 {
+	for range 4 {
 		n, _, err := sock.ReadFrom(resp[:])
 		if err != nil {
 			if errors.Is(err, windows.WSAEACCES) {
-				return true, false, nil
+				return true, nil
 			}
 			if errors.Is(err, os.ErrDeadlineExceeded) {
-				return false, true, nil
+				return false, nil
 			}
-			return false, false, err
+			return false, err
 		}
 		if n == 40 && bytes.Equal(resp[:40], req[:]) {
-			return false, false, nil
+			return false, nil
 		}
 	}
-	return false, true, nil
+	return false, nil
 }
 
 // CheckVPNFirewall runs before Capture installs 0.0.0.0/1 and 128.0.0.0/1 so a
@@ -325,39 +362,20 @@ func (r *Routes) CheckVPNFirewall(ctx context.Context, tunIndex int, tunPort uin
 	r.fwIndex = tunIndex
 	r.fwPort = tunPort
 	copy(r.fwKey[:], healthKey[:32])
-	r.fwTimeouts = 0
 	r.fwStepped = false
 	r.fwMu.Unlock()
 
-	var blocked, timedOut bool
-	for attempt := range 2 {
-		b, to, err := probeLocalTUN(ctx, tunIndex, tunPort, healthKey, vpnProbeChallengeTimeout)
-		if err != nil {
-			// Non-WFP transient error (e.g. context cancelled during shutdown).
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
-			return nil, nil
+	blocked, err := probeLocalTUN(ctx, tunIndex, tunPort, healthKey, vpnProbeChallengeTimeout)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		if b {
-			blocked = true
-			break
-		}
-		if !to {
-			return nil, nil
-		}
-		timedOut = true
-		if attempt == 0 {
-			continue
-		}
-	}
-	if !blocked && !timedOut {
 		return nil, nil
 	}
-	blocker, found, _ := inspectForeignVPNKillSwitch()
-	if !blocked && !found {
+	if !blocked {
 		return nil, nil
 	}
+	blocker, _, _ := inspectForeignVPNKillSwitch()
 	if blocker == "" {
 		blocker = "VPN firewall"
 	}
@@ -377,29 +395,11 @@ func (r *Routes) checkLiveVPNFirewall(ctx context.Context) *platform.VPNFirewall
 	if stepped || idx <= 0 || port == 0 {
 		return nil
 	}
-	blocked, timedOut, err := probeLocalTUN(ctx, idx, port, key[:], vpnProbeChallengeTimeout)
-	if err != nil {
+	blocked, err := probeLocalTUN(ctx, idx, port, key[:], vpnProbeChallengeTimeout)
+	if err != nil || !blocked {
 		return nil
 	}
-	if !blocked && !timedOut {
-		r.fwMu.Lock()
-		r.fwTimeouts = 0
-		r.fwMu.Unlock()
-		return nil
-	}
-	if timedOut && !blocked {
-		r.fwMu.Lock()
-		r.fwTimeouts++
-		streak := r.fwTimeouts
-		r.fwMu.Unlock()
-		if streak < 2 {
-			return nil
-		}
-	}
-	blocker, found, _ := inspectForeignVPNKillSwitch()
-	if !blocked && !found {
-		return nil
-	}
+	blocker, _, _ := inspectForeignVPNKillSwitch()
 	if blocker == "" {
 		blocker = "VPN firewall"
 	}

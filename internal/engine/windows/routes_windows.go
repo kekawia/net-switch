@@ -74,7 +74,6 @@ type Routes struct {
 	fwIndex         int
 	fwPort          uint16
 	fwKey           [32]byte
-	fwTimeouts      int
 	fwStepped       bool
 	timings         *phaseTimings
 	trace           *packetTrace
@@ -571,7 +570,7 @@ func (r *Routes) Cleanup(ctx context.Context) (err error) {
 		r.tun = nil
 		r.statsTun.Store(nil)
 		r.fwMu.Lock()
-		r.fwIndex, r.fwPort, r.fwTimeouts = 0, 0, 0
+		r.fwIndex, r.fwPort = 0, 0
 		r.fwMu.Unlock()
 	}
 	return err
