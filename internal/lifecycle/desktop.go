@@ -5,8 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
 	"time"
 
+	"github.com/AyoubAchour/net-switch/internal/desktop"
 	"github.com/AyoubAchour/net-switch/internal/localipc"
 	"github.com/AyoubAchour/net-switch/internal/service"
 )
@@ -88,13 +93,193 @@ func ConfigureAutostart(ctx context.Context, mode string) (any, error) {
 	}
 	return DesktopCall(ctx, "autostart-set", map[string]any{"on": mode == "on"})
 }
+
+var (
+	testDesktopSeq       atomic.Uint64
+	desktopStateInterval = desktop.PollInterval
+	desktopScope         = func() string {
+		if testing.Testing() {
+			return fmt.Sprintf("test-%d", testDesktopSeq.Add(1))
+		}
+		return ""
+	}
+	startDesktopUI = func(cb desktop.UICallbacks) desktop.UI {
+		return desktop.NoopUI{}
+	}
+)
+
+// SetDesktopUIFactory installs the platform UI constructor used by Desktop.
+func SetDesktopUIFactory(fn func(desktop.UICallbacks) desktop.UI) {
+	if fn != nil {
+		startDesktopUI = fn
+	}
+}
+
+type desktopRuntime struct {
+	mu        sync.Mutex
+	ui        desktop.UI
+	rpc       *RPC
+	client    *desktop.Client
+	refreshCh chan struct{}
+	quitting  atomic.Bool
+	quitOnce  sync.Once
+	quitDone  chan struct{}
+	cancelRun context.CancelFunc
+}
+
+func (r *desktopRuntime) triggerPoll() {
+	select {
+	case r.refreshCh <- struct{}{}:
+	default:
+	}
+}
+
+func (r *desktopRuntime) openPair(ctx context.Context) (string, string, string, error) {
+	r.mu.Lock()
+	rpc := r.rpc
+	r.mu.Unlock()
+	if rpc == nil {
+		return "", "", "", errors.New("Control is not connected")
+	}
+	var session struct {
+		URL   string `json:"url"`
+		Owner string `json:"ownerName"`
+	}
+	if err := rpc.Call(ctx, map[string]any{"method": "session"}, &session); err != nil {
+		return "", "", "", err
+	}
+	var code string
+	if err := rpc.Call(ctx, map[string]any{"method": "pair"}, &code); err != nil {
+		return "", "", "", err
+	}
+	return strings.TrimRight(session.URL, "/") + "/pair", code, session.Owner, nil
+}
+
+func (r *desktopRuntime) refreshToken(ctx context.Context) (string, bool) {
+	r.mu.Lock()
+	rpc := r.rpc
+	client := r.client
+	ui := r.ui
+	r.mu.Unlock()
+	if rpc == nil {
+		return "", false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var session struct {
+		Token string `json:"token"`
+		URL   string `json:"url"`
+		Owner string `json:"ownerName"`
+	}
+	if err := rpc.Call(cctx, map[string]any{"method": "session"}, &session); err != nil || session.Token == "" {
+		return "", false
+	}
+	if client != nil {
+		_ = client.SetEndpoint(session.URL, session.Token)
+	}
+	if ui != nil {
+		ui.SetSession(session.URL, session.Token, session.Owner)
+	}
+	return session.Token, true
+}
+
+func (r *desktopRuntime) runAction(key string, fn func(context.Context, *desktop.Client) error) {
+	r.mu.Lock()
+	client := r.client
+	ui := r.ui
+	r.mu.Unlock()
+	if client == nil {
+		if ui != nil {
+			ui.SetActionFeedback("", "Net Switch isn\u2019t responding.")
+		}
+		return
+	}
+	if ui != nil {
+		ui.SetActionFeedback(key, "")
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		err := fn(ctx, client)
+		if ui != nil {
+			if err != nil {
+				ui.SetActionFeedback("", err.Error())
+			} else {
+				ui.SetActionFeedback("", "")
+			}
+		}
+		r.triggerPoll()
+	}()
+}
+
+func (r *desktopRuntime) requestQuit() {
+	r.quitting.Store(true)
+	r.quitOnce.Do(func() {
+		r.mu.Lock()
+		ui := r.ui
+		client := r.client
+		r.mu.Unlock()
+		if ui != nil {
+			ui.SetQuitting()
+		}
+		go func() {
+			defer close(r.quitDone)
+			if client != nil {
+				qctx, qcancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_ = client.Quit(qctx)
+				qcancel()
+			}
+			if r.cancelRun != nil {
+				r.cancelRun()
+			}
+		}()
+	})
+}
+
 func Desktop(ctx context.Context, show bool) error {
+	showReq := make(chan struct{}, 1)
+	lock, err := desktop.AcquireSingleInstance(ctx, desktopScope(), show, func() {
+		select {
+		case showReq <- struct{}{}:
+		default:
+		}
+	})
+	if err == nil && lock != nil && lock.AlreadyRunning {
+		return nil
+	}
+	if lock != nil {
+		defer lock.Close()
+	}
+
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
+
+	rt := &desktopRuntime{
+		refreshCh: make(chan struct{}, 1),
+		quitDone:  make(chan struct{}),
+		cancelRun: cancelRun,
+	}
+	defer func() {
+		rt.mu.Lock()
+		ui := rt.ui
+		rt.mu.Unlock()
+		if ui != nil {
+			ui.Close()
+		}
+	}()
+	defer func() {
+		if rt.quitting.Load() {
+			<-rt.quitDone
+		}
+	}()
+
 	// Only the sign-in entry point requests automatic routing. Reopening a
 	// window must preserve an explicit Turn off or a latched recovery error.
 	first := !show
+	wantInitialShow := show
 	backoff := time.Second
-	for ctx.Err() == nil {
-		connectCtx, stop := context.WithTimeout(ctx, 40*time.Second)
+	for runCtx.Err() == nil {
+		connectCtx, stop := context.WithTimeout(runCtx, 40*time.Second)
 		// The owner uses the protected endpoint first. Public status load
 		// cannot prevent a desktop from obtaining its own reserved slot.
 		status, err := ConnectDesktop(connectCtx, false)
@@ -108,8 +293,11 @@ func Desktop(ctx context.Context, show bool) error {
 		}
 		if err != nil {
 			stop()
+			if rt.quitting.Load() || runCtx.Err() != nil {
+				return nil
+			}
 			fmt.Println("Net Switch is not ready; retrying:", err)
-			if localipc.Pause(ctx, backoff) != nil {
+			if localipc.Pause(runCtx, backoff) != nil {
 				return nil
 			}
 			backoff = min(backoff*2, 30*time.Second)
@@ -123,7 +311,10 @@ func Desktop(ctx context.Context, show bool) error {
 		status.Close()
 		if err != nil {
 			stop()
-			if localipc.Pause(ctx, backoff) != nil {
+			if rt.quitting.Load() || runCtx.Err() != nil {
+				return nil
+			}
+			if localipc.Pause(runCtx, backoff) != nil {
 				return nil
 			}
 			backoff = min(backoff*2, 30*time.Second)
@@ -141,10 +332,46 @@ func Desktop(ctx context.Context, show bool) error {
 			fmt.Println(message)
 			return nil
 		}
+
+		// Owner verified: initialize UI shell once across Control reconnects.
+		rt.mu.Lock()
+		if rt.ui == nil {
+			rt.ui = startDesktopUI(desktop.UICallbacks{
+				OpenPair:     rt.openPair,
+				RefreshToken: rt.refreshToken,
+				ToggleRouting: func(wantOn bool) {
+					rt.runAction("routing", func(cctx context.Context, c *desktop.Client) error {
+						return c.SetRouting(cctx, wantOn)
+					})
+				},
+				ToggleCombine: func(wantOn bool) {
+					rt.runAction("combine", func(cctx context.Context, c *desktop.Client) error {
+						return c.SetCombine(cctx, wantOn)
+					})
+				},
+				SetAppLine: func(appPath string, line *string) {
+					rt.runAction("app:"+appPath, func(cctx context.Context, c *desktop.Client) error {
+						return c.SetAppLine(cctx, appPath, line)
+					})
+				},
+				DismissUpdate: func(version string) {
+					rt.runAction("update", func(cctx context.Context, c *desktop.Client) error {
+						return c.DismissUpdate(cctx, version)
+					})
+				},
+				Quit:           rt.requestQuit,
+				FallbackStatus: ShowStatus,
+			})
+		}
+		rt.mu.Unlock()
+
 		rpc, err := ConnectDesktop(connectCtx, false)
 		stop()
 		if err != nil {
-			if localipc.Pause(ctx, backoff) != nil {
+			if rt.quitting.Load() || runCtx.Err() != nil {
+				return nil
+			}
+			if localipc.Pause(runCtx, backoff) != nil {
 				return nil
 			}
 			continue
@@ -153,7 +380,7 @@ func Desktop(ctx context.Context, show bool) error {
 		registered := false
 		// Keep the sign-in intent until the server has acknowledged it.
 		if first {
-			signCtx, stop := context.WithTimeout(ctx, 40*time.Second)
+			signCtx, stop := context.WithTimeout(runCtx, 40*time.Second)
 			err = rpc.Call(signCtx, map[string]any{"method": "signin"}, nil)
 			stop()
 			var rejected rpcError
@@ -166,7 +393,10 @@ func Desktop(ctx context.Context, show bool) error {
 				first = false
 			case err != nil:
 				rpc.Close()
-				if localipc.Pause(ctx, backoff) != nil {
+				if rt.quitting.Load() || runCtx.Err() != nil {
+					return nil
+				}
+				if localipc.Pause(runCtx, backoff) != nil {
 					return nil
 				}
 				continue
@@ -175,14 +405,15 @@ func Desktop(ctx context.Context, show bool) error {
 				registered = true
 			}
 		}
-		err = desktopSession(ctx, rpc, show, registered)
+		err = desktopSession(runCtx, rt, rpc, wantInitialShow, registered, showReq)
+		wantInitialShow = false
 		rpc.Close()
-		if ctx.Err() != nil {
+		if rt.quitting.Load() || runCtx.Err() != nil {
 			return nil
 		}
 		fmt.Println("Net Switch connection lost; reconnecting:", err)
 		first = false
-		if err := localipc.Pause(ctx, time.Second); err != nil {
+		if err := localipc.Pause(runCtx, time.Second); err != nil {
 			return nil
 		}
 	}
@@ -195,7 +426,7 @@ var showRejectedSignIn = func(message string) {
 	go func() { _ = ShowStatus(message) }()
 }
 
-func desktopSession(ctx context.Context, rpc *RPC, show, registered bool) error {
+func desktopSession(ctx context.Context, rt *desktopRuntime, rpc *RPC, show, registered bool, showReq <-chan struct{}) error {
 	var session struct {
 		Token string `json:"token"`
 		URL   string `json:"url"`
@@ -211,15 +442,81 @@ func desktopSession(ctx context.Context, rpc *RPC, show, registered bool) error 
 			return err
 		}
 	}
-	if show {
+
+	client, err := desktop.NewClient(session.URL, session.Token)
+	if err == nil {
+		client.SetUnauthorizedHook(rt.refreshToken)
+	}
+	rt.mu.Lock()
+	rt.rpc = rpc
+	rt.client = client
+	ui := rt.ui
+	rt.mu.Unlock()
+	defer func() {
+		rt.mu.Lock()
+		if rt.rpc == rpc {
+			rt.rpc = nil
+			rt.client = nil
+		}
+		rt.mu.Unlock()
+	}()
+
+	if ui != nil {
+		ui.SetSession(session.URL, session.Token, session.Owner)
+		if show {
+			ui.ShowWindow("")
+		}
+	} else if show {
 		var code string
 		if err := rpc.Call(ctx, map[string]any{"method": "pair"}, &code); err != nil {
 			return err
 		}
-		if err := ShowPairing(session.URL+"pair", code, session.Owner); err != nil {
+		if err := ShowPairing(strings.TrimRight(session.URL, "/")+"/pair", code, session.Owner); err != nil {
 			return err
 		}
 	}
+
+	sessCtx, cancelSess := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	defer func() {
+		cancelSess()
+		wg.Wait()
+	}()
+
+	if ui != nil && client != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pollOnce := func() {
+				if rt.quitting.Load() || sessCtx.Err() != nil {
+					return
+				}
+				state, fetchErr := client.FetchState(sessCtx)
+				if rt.quitting.Load() || sessCtx.Err() != nil {
+					return
+				}
+				ui.UpdateState(state, fetchErr == nil && state != nil)
+			}
+			pollOnce()
+			interval := desktopStateInterval
+			if interval <= 0 {
+				interval = desktop.PollInterval
+			}
+			stateTick := time.NewTicker(interval)
+			defer stateTick.Stop()
+			for {
+				select {
+				case <-sessCtx.Done():
+					return
+				case <-rt.refreshCh:
+					pollOnce()
+				case <-stateTick.C:
+					pollOnce()
+				}
+			}
+		}()
+	}
+
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
 	for {
@@ -227,10 +524,24 @@ func desktopSession(ctx context.Context, rpc *RPC, show, registered bool) error 
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-rpc.Done():
+			cancelSess()
+			wg.Wait()
+			if ui != nil && !rt.quitting.Load() {
+				ui.UpdateState(nil, false)
+			}
 			return fmt.Errorf("Control restarted")
+		case <-showReq:
+			if ui != nil {
+				ui.ShowWindow("")
+			}
 		case <-tick.C:
 			var tasks []DesktopWork
 			if err := rpc.Call(ctx, map[string]any{"method": "desktop-poll"}, &tasks); err != nil {
+				cancelSess()
+				wg.Wait()
+				if ui != nil && !rt.quitting.Load() {
+					ui.UpdateState(nil, false)
+				}
 				return err
 			}
 			for _, task := range tasks {
@@ -240,6 +551,11 @@ func desktopSession(ctx context.Context, rpc *RPC, show, registered bool) error 
 					message = err.Error()
 				}
 				if err := rpc.Call(ctx, map[string]any{"method": "desktop-result", "key": task.ID, "value": value, "error": message}, nil); err != nil {
+					cancelSess()
+					wg.Wait()
+					if ui != nil && !rt.quitting.Load() {
+						ui.UpdateState(nil, false)
+					}
 					return err
 				}
 			}

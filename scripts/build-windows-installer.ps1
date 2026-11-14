@@ -75,6 +75,8 @@ if ($goPin.archiveRoot -ne [IO.Path]::GetFileName($goPin.archiveRoot)) { throw "
 $goZip = Get-Artifact $goPin $cache
 $wintunPin = $pins.nativeSources.wintun
 $wintunZip = Get-Artifact $wintunPin $cache
+$wv2Pin = $pins.nativeSources.webview2
+$wv2Nupkg = Get-Artifact $wv2Pin $cache
 
 $toolchain = Join-Path $cache "go-$($goPin.version)"
 if (-not (Test-Path -LiteralPath $toolchain)) {
@@ -159,6 +161,9 @@ try {
 $expectedWintunSha = if ($Arch -eq 'arm64') { $wintunPin.embeddedArm64Sha256 } else { $wintunPin.embeddedAmd64Sha256 }
 Copy-ArchiveFile $wintunZip "wintun/bin/$goArch/wintun.dll" (Join-Path $stage 'wintun.dll')
 Assert-Hash (Join-Path $stage 'wintun.dll') $expectedWintunSha
+$wv2FilePin = $wv2Pin.files.$Arch
+Copy-ArchiveFile $wv2Nupkg $wv2FilePin.entry (Join-Path $stage 'WebView2Loader.dll')
+Assert-Hash (Join-Path $stage 'WebView2Loader.dll') $wv2FilePin.sha256
 
 New-Item -ItemType Directory -Path (Join-Path $stage 'assets') -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $stage 'licenses') -Force | Out-Null
@@ -180,6 +185,8 @@ foreach ($docFile in $docFiles) {
 
 Copy-ArchiveFile $wintunZip $pins.licenses.wintun.archiveEntry (Join-Path $stage 'licenses/wintun-LICENSE.txt')
 Assert-Hash (Join-Path $stage 'licenses/wintun-LICENSE.txt') $pins.licenses.wintun.sha256
+Copy-ArchiveFile $wv2Nupkg $pins.licenses.webview2.archiveEntry (Join-Path $stage 'licenses/webview2-LICENSE.txt')
+Assert-Hash (Join-Path $stage 'licenses/webview2-LICENSE.txt') $pins.licenses.webview2.sha256
 
 Copy-ArchiveFile $goZip $pins.licenses.go.archiveEntry (Join-Path $stage 'licenses/go-LICENSE.txt')
 Assert-Hash (Join-Path $stage 'licenses/go-LICENSE.txt') $pins.licenses.go.sha256

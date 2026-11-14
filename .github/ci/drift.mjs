@@ -87,6 +87,14 @@ export const declared = [{
   from: 'internal/engine/linux/hooks_acceptance_linux.go', call: 'os.OpenFile(filepath.Join(filepath.Dir(path), "block-"+p.Instance+".pprof"))',
   outside: 'the block profile that the engine writes beside the CPU profile above',
   why: 'it only writes a new file next to the CPU profile; it reads nothing from the repository',
+}, {
+  from: 'internal/desktop/singleinstance_linux.go', call: 'os.Lstat(xdg)',
+  outside: 'the signed-in user XDG_RUNTIME_DIR runtime directory where the single-instance lock and socket directory live',
+  why: 'checks that XDG_RUNTIME_DIR is an owned directory rather than a symlink; it never reads repository files',
+}, {
+  from: 'internal/desktop/singleinstance_linux.go', call: 'os.Lstat(base)',
+  outside: 'the per-user net-switch subdirectory under XDG_RUNTIME_DIR or os.TempDir for the desktop single-instance lock and socket',
+  why: 'verifies ownership and permissions of the runtime socket directory before locking or listening; it reads nothing from the repository',
 }];
 
 // What a declaration may say: a reason, one call, and either repository

@@ -258,13 +258,22 @@ func (c *ptoClock) record(d time.Duration) {
 }
 
 func (c *ptoClock) AfterFunc(d time.Duration, f func()) tcpip.Timer {
+	tm := c.ManualClock.AfterFunc(d, f)
 	c.record(d)
-	return &ptoTimer{Timer: c.ManualClock.AfterFunc(d, f), clock: c}
+	return &ptoTimer{Timer: tm, clock: c}
 }
 
 func (t *ptoTimer) Reset(d time.Duration) {
-	t.clock.record(d)
 	t.Timer.Reset(d)
+	t.clock.record(d)
+}
+
+func syncEndpoint(t *testing.T, ep *tcp.Endpoint) {
+	t.Helper()
+	var info tcpip.TCPInfoOption
+	if err := ep.GetSockOpt(&info); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
@@ -292,10 +301,12 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 			t.Fatal(err)
 		}
 		readDataSegments(t, p, 1, mss)
+		syncEndpoint(t, ep)
 		clock.Advance(500 * time.Microsecond)
 		p.ack += uint32(mss)
 		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 		awaitSendBuffer(t, ep, 0)
+		syncEndpoint(t, ep)
 
 		// Fill a multi-segment flight and verify the armed PTO includes the
 		// minimum timer margin (>= 4 ms at 1 ms SRTT, not bare 2*SRTT = 2 ms)
@@ -307,6 +318,7 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 			t.Fatal(err)
 		}
 		readDataSegments(t, p, flightSegs, mss)
+		syncEndpoint(t, ep)
 		var pto time.Duration
 		select {
 		case pto = <-clock.armed:
@@ -320,7 +332,7 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 
 	for _, mode := range []string{"dsack", "pure_dupack"} {
 		t.Run("spurious_probe_"+mode, func(t *testing.T) {
-			clock := faketime.NewManualClock()
+			clock := &ptoClock{ManualClock: faketime.NewManualClock(), armed: make(chan time.Duration, 1)}
 			options := ns.DefaultOptions()
 			options.Clock = clock
 			options.ClockResolution = 0
@@ -342,17 +354,24 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 				t.Fatal(err)
 			}
 			readDataSegments(t, p, 1, mss)
+			syncEndpoint(t, ep)
 			clock.Advance(time.Millisecond)
 			p.ts++
 			p.ack += uint32(mss)
 			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 			awaitSendBuffer(t, ep, 0)
+			syncEndpoint(t, ep)
 
 			var beforeInfo tcpip.TCPInfoOption
 			if err := ep.GetSockOpt(&beforeInfo); err != nil {
 				t.Fatal(err)
 			}
 			flightSegs := int(beforeInfo.SndCwnd)
+			select {
+			case <-clock.armed:
+			default:
+			}
+			clock.watch.Store(true)
 			written := make(chan error, 1)
 			go func() {
 				_, err := p.current.conn.Write(make([]byte, mss*(flightSegs+2)))
@@ -363,6 +382,12 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 				t.Fatal(err)
 			}
 			readDataSegments(t, p, flightSegs, mss)
+			syncEndpoint(t, ep)
+			select {
+			case <-clock.armed:
+			case <-time.After(time.Second):
+				t.Fatal("multi-segment flight did not arm PTO timer")
+			}
 			flightEnd := p.ack + uint32(flightSegs*mss)
 			tailStart := flightEnd - uint32(mss)
 
@@ -382,6 +407,7 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 			awaitSendBuffer(t, ep, 2*mss)
 			// Drain the two newly unsent segments unlocked by the cumulative ACK.
 			readDataSegments(t, p, 2, mss)
+			syncEndpoint(t, ep)
 
 			// 2. Second read from TUN: peer receives the duplicate TLP probe and replies
 			// with either a DSACK [tailStart, flightEnd) or a pure duplicate ACK.
@@ -401,6 +427,7 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 			p.ack = flightEnd + uint32(2*mss)
 			p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 			awaitSendBuffer(t, ep, 0)
+			syncEndpoint(t, ep)
 
 			var afterInfo tcpip.TCPInfoOption
 			if err := ep.GetSockOpt(&afterInfo); err != nil {
@@ -444,11 +471,13 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 			t.Fatal(err)
 		}
 		readDataSegments(t, p, 1, mss)
+		syncEndpoint(t, ep)
 		clock.Advance(time.Millisecond)
 		p.ts++
 		p.ack += uint32(mss)
 		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 		awaitSendBuffer(t, ep, 0)
+		syncEndpoint(t, ep)
 
 		var beforeInfo tcpip.TCPInfoOption
 		if err := ep.GetSockOpt(&beforeInfo); err != nil {
@@ -460,6 +489,7 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 			t.Fatal(err)
 		}
 		readDataSegments(t, p, 4, mss)
+		syncEndpoint(t, ep)
 		tailStart := p.ack + uint32(3*mss)
 		flightEnd := p.ack + uint32(4*mss)
 
@@ -503,6 +533,7 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 		p.ack = flightEnd
 		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 		awaitSendBuffer(t, ep, 0)
+		syncEndpoint(t, ep)
 
 		// Now write 2 more segments; peer receives the 1st (confirming the earlier single loss
 		// via ACK > flightEnd without DSACK/DupAck) and drops the 2nd!
@@ -510,11 +541,13 @@ func TestTLPSpuriousProbeAndConfirmedSingleLoss(t *testing.T) {
 			t.Fatal(err)
 		}
 		readDataSegments(t, p, 2, mss)
+		syncEndpoint(t, ep)
 		clock.Advance(time.Millisecond)
 		p.ts++
 		p.ack = flightEnd + uint32(mss)
 		p.inject(p.packet(p.seq, p.ack, header.TCPFlagAck, nil))
 		awaitSendBuffer(t, ep, mss)
+		syncEndpoint(t, ep)
 
 		var afterConfirm tcpip.TCPInfoOption
 		if err := ep.GetSockOpt(&afterConfirm); err != nil {

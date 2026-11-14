@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/AyoubAchour/net-switch/internal/buildinfo"
+	"github.com/AyoubAchour/net-switch/internal/desktop/host"
 	"github.com/AyoubAchour/net-switch/internal/lifecycle"
 )
 
@@ -38,6 +39,7 @@ func main() {
 		fmt.Println(value)
 		return
 	}
+	lifecycle.SetDesktopUIFactory(host.New)
 	if err := lifecycle.Desktop(ctx, !*background); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

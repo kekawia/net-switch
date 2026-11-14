@@ -1,3 +1,8 @@
+# fyne.io/systray v1.12.2
+## explicit; go 1.19
+fyne.io/systray
+fyne.io/systray/internal/generated/menu
+fyne.io/systray/internal/generated/notifier
 # github.com/cilium/ebpf v0.22.0
 ## explicit; go 1.25.0
 github.com/cilium/ebpf
@@ -23,6 +28,8 @@ github.com/cilium/ebpf/link
 # github.com/godbus/dbus/v5 v5.2.4
 ## explicit; go 1.20
 github.com/godbus/dbus/v5
+github.com/godbus/dbus/v5/introspect
+github.com/godbus/dbus/v5/prop
 # github.com/google/btree v1.1.2
 ## explicit; go 1.18
 github.com/google/btree

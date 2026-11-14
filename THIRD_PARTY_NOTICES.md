@@ -36,6 +36,10 @@ The unshipped Net Switch 1.0 Linux desktop also uses
 to show pairing codes through the owner's session bus. Its license is retained
 in `vendor/github.com/godbus/dbus/v5/LICENSE`.
 
+It also uses [fyne.io/systray v1.12.2](https://github.com/fyne-io/systray/tree/v1.12.2),
+under the Apache License 2.0, for the Linux system tray menu. Its license is
+retained in `vendor/fyne.io/systray/LICENSE`.
+
 - What it does here: `helper\netswitch-helper.exe` is Net Switch's own small
   program (its source is in the repository's `helper` folder) that reads the
   line meters and the connections that go around routing. It is written in Go, so the Go runtime
@@ -46,6 +50,13 @@ in `vendor/github.com/godbus/dbus/v5/LICENSE`.
   (3-clause) license. License text in the installed copy:
   `licenses\go-LICENSE.txt`, taken unchanged from the official Go release.
   golang.org/x/sys ships the same text.
+
+## Microsoft Edge WebView2 Loader
+
+The unshipped Net Switch 1.0 Windows desktop app embeds
+[Microsoft.Web.WebView2](https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.4314.35)
+`WebView2Loader.dll` v1.0.4314.35 to host the Edge WebView2 control.
+License text in the installed copy: `licenses\webview2-LICENSE.txt`.
 
 ## Net Switch 1.0 engine core (not yet shipped)
 

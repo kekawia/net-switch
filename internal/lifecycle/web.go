@@ -55,9 +55,37 @@ func ServiceAsset(name string, b []byte) []byte {
 	if start < 0 || end < 0 {
 		panic("embedded UI readToken contract changed")
 	}
-	source = source[:start] + `function readToken() {
+	source = source[:start] + `let webViewFallback = null;
+let webViewRefreshSent = false;
+function initWebViewSession() {
+  const wv = window.chrome && window.chrome.webview;
+  if (!wv || window.__netswitchWebViewBound) return Boolean(wv);
+  window.__netswitchWebViewBound = true;
+  wv.addEventListener('message', (event) => {
+    let msg = event && event.data;
+    if (typeof msg === 'string') {
+      try { msg = JSON.parse(msg); } catch { return; }
+    }
+    if (!msg || msg.type !== 'netswitch-session' || typeof msg.token !== 'string' || !msg.token) return;
+    if (webViewFallback) { clearTimeout(webViewFallback); webViewFallback = null; }
+    webViewRefreshSent = false;
+    sessionStorage.setItem('token', msg.token);
+    if (msg.token === token) return;
+    token = msg.token;
+    outdated = false;
+    unreachable = false;
+    clearTimeout(pollTimer);
+    poll();
+  });
+  return true;
+}
+function readToken() {
   const current = sessionStorage.getItem('token');
-  if (!current) location.replace('/pair');
+  const hasWebView = Boolean(window.chrome && window.chrome.webview);
+  if (!current) {
+    if (!hasWebView) location.replace('/pair');
+    return null;
+  }
   return current;
 }` + source[start+end+3:]
 	replaceOnce := func(old, next, contract string) {
@@ -104,6 +132,36 @@ func ServiceAsset(name string, b []byte) []byte {
 		"state.apps.filter((app) => app.line).map((app) => [app.path, app.line]),",
 		"state.apps.filter((app) => app.line).map((app) => [app.key, app.line]),",
 		"apps panel signature",
+	)
+	replaceOnce(
+		"    if (changed.length) {\n      list.push(\n        notice('status', `Net Switch changed Windows settings: ${changed.join(', and ')}.`, [\n          actionButton('Undo', 'Undoing…', 'undo', () => api('/api/setup/undo', {})),\n        ]),\n      );\n    }",
+		"    if (changed.length) {\n      list.push(\n        notice('status', `Net Switch changed Windows settings: ${changed.join(', and ')}.`, [\n          actionButton('Undo', 'Undoing…', 'undo', () => api('/api/setup/undo', {})),\n        ]),\n      );\n    }\n    if (state.usageError) {\n      const usageNoticeText = String(state.usageError).startsWith('Corrupt usage history')\n        ? 'Saved data use was damaged and reset.'\n        : 'Can\u2019t save data use right now.';\n      list.push(notice('status', usageNoticeText));\n    }",
+		"usage error status notice",
+	)
+	replaceOnce(
+		"  closed = true;\n  clearTimeout(pollTimer);",
+		"  closed = true;\n  clearTimeout(pollTimer);\n  if (window.chrome && window.chrome.webview) window.chrome.webview.postMessage(JSON.stringify({ type: 'netswitch-quit' }));",
+		"WebView2 quit notification",
+	)
+	replaceOnce(
+		"    if (error.outdated) outdated = true;\n    else unreachable = true;",
+		"    if (error.outdated) {\n      outdated = true;\n      if (window.chrome && window.chrome.webview && !webViewRefreshSent) {\n        webViewRefreshSent = true;\n        window.chrome.webview.postMessage(JSON.stringify({ type: 'netswitch-refresh-token' }));\n      }\n    } else {\n      unreachable = true;\n    }",
+		"WebView2 token refresh",
+	)
+	replaceOnce(
+		"if (token) {\n  poll();\n} else {\n  render();\n}",
+		`if (initWebViewSession()) {
+  if (!token) {
+    webViewFallback = setTimeout(() => { if (!token) location.replace('/pair'); }, 3000);
+  }
+  window.chrome.webview.postMessage(JSON.stringify({ type: 'netswitch-ready' }));
+}
+if (token) {
+  poll();
+} else if (!webViewFallback) {
+  render();
+}`,
+		"WebView2 session startup",
 	)
 	return []byte(source)
 }

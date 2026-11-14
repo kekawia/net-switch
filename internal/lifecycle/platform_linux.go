@@ -1,7 +1,6 @@
 package lifecycle
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,8 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/AyoubAchour/net-switch/internal/desktop/xdg"
 	"github.com/AyoubAchour/net-switch/internal/platform"
 	linuxplatform "github.com/AyoubAchour/net-switch/internal/platform/linux"
 	"github.com/AyoubAchour/net-switch/internal/platform/worker"
@@ -185,38 +183,9 @@ func Worker(args []string) int {
 func DesktopCall(_ context.Context, op string, args map[string]any) (any, error) {
 	switch op {
 	case "app-info":
-		return []any{}, nil
+		return xdg.AppInfo(xdg.ExtractStrings(args["paths"]), xdg.DefaultOptions()), nil
 	case "installed-apps":
-		list := []any{}
-		home, _ := os.UserHomeDir()
-		for _, dir := range []string{"/usr/share/applications", filepath.Join(home, ".local/share/applications")} {
-			files, _ := filepath.Glob(filepath.Join(dir, "*.desktop"))
-			for _, path := range files {
-				f, err := os.Open(path)
-				if err != nil {
-					continue
-				}
-				scan := bufio.NewScanner(f)
-				name, command, hidden := "", "", false
-				for scan.Scan() {
-					line := scan.Text()
-					if strings.HasPrefix(line, "Name=") {
-						name = strings.TrimPrefix(line, "Name=")
-					}
-					if strings.HasPrefix(line, "Exec=") {
-						command = strings.TrimPrefix(line, "Exec=")
-					}
-					hidden = hidden || line == "Hidden=true" || line == "NoDisplay=true"
-				}
-				f.Close()
-				fields := strings.Fields(command)
-				if !hidden && name != "" && len(fields) > 0 {
-					execPath := fields[0]
-					list = append(list, map[string]any{"name": name, "path": execPath, "key": apps.AppKeyWith(execPath, apppath.Linux)})
-				}
-			}
-		}
-		return list, nil
+		return xdg.InstalledApps(xdg.DefaultOptions()), nil
 	case "autostart":
 		return desktopAutostart(nil)
 	case "autostart-set":

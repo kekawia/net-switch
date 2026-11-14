@@ -2,7 +2,7 @@ name: Cache a verified build archive
 description: Restore only an archive, verify its pinned hash, and save it before the build starts.
 inputs:
   artifact:
-    description: Pin to cache (go, wintun, or inno)
+    description: Pin to cache (go, wintun, webview2, or inno)
     required: true
 runs:
   using: composite
@@ -17,6 +17,7 @@ runs:
         $pin = switch ($env:ARTIFACT) {
           'go' { $pins.go }
           'wintun' { $pins.nativeSources.wintun }
+          'webview2' { $pins.nativeSources.webview2 }
           'inno' { $pins.innoSetup }
           default { throw "Unknown archive: $env:ARTIFACT" }
         }
@@ -39,6 +40,7 @@ runs:
         $pin = switch ($env:ARTIFACT) {
           'go' { $pins.go }
           'wintun' { $pins.nativeSources.wintun }
+          'webview2' { $pins.nativeSources.webview2 }
           'inno' { $pins.innoSetup }
           default { throw "Unknown archive: $env:ARTIFACT" }
         }
