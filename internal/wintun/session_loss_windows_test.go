@@ -280,3 +280,81 @@ func TestSessionLossSentinels(t *testing.T) {
 		})
 	}
 }
+
+// A continuous writer loop stops with ErrAdapterRemoved whether the writer
+// observes the release markers first or maintenance retires the session first
+// after a parked reader wakes (where s.err joins ErrAdapterRemoved with cause,
+// so errors.Is(err, ErrDisconnected) is also true).
+func TestSessionLossConcurrentWriterExits(t *testing.T) {
+	for _, readerFirst := range []bool{false, true} {
+		name := "writer-first"
+		if readerFirst {
+			name = "reader-first-retirement"
+		}
+		t.Run(name, func(t *testing.T) {
+			s, opened := newLossSession(t, &lossOwner{publish: true})
+			r := s.rings
+			readEvent := r.readHandle()
+			waits := s.Stats().ReadWaits
+			readerDone := make(chan error, 1)
+			go func() {
+				_, err := lossRead(s)
+				readerDone <- err
+			}()
+			for deadline := time.Now().Add(5 * time.Second); s.Stats().ReadWaits == waits; {
+				if time.Now().After(deadline) {
+					t.Fatal("the reader never parked")
+				}
+				time.Sleep(time.Millisecond)
+			}
+
+			startWriter := make(chan struct{})
+			writerDone := make(chan error, 1)
+			go func() {
+				<-startWriter
+				packets := [][]byte{testPacket()}
+				for {
+					_, err := s.WriteBatch(packets)
+					if err != nil {
+						writerDone <- err
+						return
+					}
+					time.Sleep(100 * time.Microsecond)
+				}
+			}()
+
+			if readerFirst {
+				publishRelease(r, true)
+				must(t, windows.SetEvent(readEvent))
+				if e := waitOutcome(t, s); e.Kind != "removed" {
+					t.Fatalf("the loss gave %q (%v)", e.Kind, e.Err)
+				}
+				close(startWriter)
+			} else {
+				close(startWriter)
+				publishRelease(r, true)
+				must(t, windows.SetEvent(readEvent))
+			}
+
+			select {
+			case err := <-readerDone:
+				assertLoss(t, "reader", err, false)
+			case <-time.After(5 * time.Second):
+				t.Fatal("reader did not stop on removal")
+			}
+			select {
+			case err := <-writerDone:
+				assertLoss(t, "writer", err, false)
+				if readerFirst && !errors.Is(err, ErrDisconnected) {
+					t.Fatalf("retired session s.err %v no longer wraps ErrDisconnected", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("writer did not stop on removal")
+			}
+			if opened.Load() != 0 {
+				t.Fatalf("removal called opener %d times", opened.Load())
+			}
+			must(t, s.Close())
+		})
+	}
+}

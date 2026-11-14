@@ -38,15 +38,27 @@ test('what the signed DLL did never changes the night', () => {
   assert.deepEqual([r.totals.reference_payload_mismatches, r.totals.reference_ring_rejections, r.totals.reference_missing_transfers], [72, 216, 864]);
 });
 
-test('one failed, missing or repeated job fails the night and says why', () => {
-  const wrong = night(jobs(index => index === 5 ? {verdict: 'integrity_failure', passed: false, own_payload_mismatches: 1} : {}));
+test('one failed, missing or repeated job fails the night and names the failing shards', () => {
+  const wrong = night(jobs(index => index === 5 ? {verdict: 'integrity_failure', passed: false, own_payload_mismatches: 1, detail: ['--- FAIL: TestWintunPerformance']} : {}));
   assert.equal(wrong.passed, false);
-  assert.deepEqual(wrong.reasons, ['1 job: integrity_failure']);
+  assert.deepEqual(wrong.reasons, ['1 job: integrity_failure (ARM64/isolated/2)']);
+  assert.deepEqual(wrong.failed_jobs, [{job: 'ARM64/isolated/2', verdict: 'integrity_failure', detail: ['--- FAIL: TestWintunPerformance']}]);
   assert.equal(wrong.consecutive_passing_nights, 0);
-  const several = night(jobs(index => index < 3 ? {verdict: 'diagnostic_incomplete', passed: false} : index === 9 ? {verdict: 'recovery_failure', passed: false} : {}));
-  assert.deepEqual(several.reasons, ['3 jobs: diagnostic_incomplete', '1 job: recovery_failure']);
+  // Reverse input order still yields deterministic shard ordering by arch, scenario and numeric shard.
+  const several = night(jobs(index => index < 3 ? {verdict: 'diagnostic_incomplete', passed: false} : index === 9 ? {verdict: 'recovery_failure', passed: false} : {}).reverse());
+  assert.deepEqual(several.reasons, [
+    '3 jobs: diagnostic_incomplete (ARM64/isolated/1, X64/full/1, X64/isolated/1)',
+    '1 job: recovery_failure (ARM64/isolated/3)',
+  ]);
+  assert.deepEqual(several.failed_jobs.map(j => `${j.job}:${j.verdict}`), [
+    'ARM64/isolated/1:diagnostic_incomplete',
+    'ARM64/isolated/3:recovery_failure',
+    'X64/full/1:diagnostic_incomplete',
+    'X64/isolated/1:diagnostic_incomplete',
+  ]);
   const missing = night(jobs().slice(1));
   assert.deepEqual(missing.reasons, ['71 of 72 jobs reported a verdict']);
+  assert.deepEqual(missing.failed_jobs, []);
   const repeated = night([...jobs().slice(1), job(1)]);
   assert.deepEqual(repeated.reasons, ['two records name the same job']);
   assert.equal(night([]).passed, false);

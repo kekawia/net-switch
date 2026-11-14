@@ -246,8 +246,7 @@ func tcpLegacyTransfer(t *testing.T, f *fixture, streams int, phase ...string) (
 			if f.integrity != nil {
 				content, want = contents[i], wants[i]
 			}
-			d := net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("198.19.240.1")}, Timeout: 5 * time.Second}
-			c, err := d.Dial("tcp4", "198.19.240.2:9002")
+			c, err := dialHostTCP4(t)
 			if err != nil {
 				diagnose("connect", "", 0, err)
 				failures <- err

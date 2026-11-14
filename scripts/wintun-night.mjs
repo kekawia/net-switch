@@ -21,17 +21,27 @@ const median = values => {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 };
 
+const jobName = r => `${r.arch}/${r.scenario}/${r.shard}`;
+const jobOrder = (a, b) => String(a.arch).localeCompare(String(b.arch)) || String(a.scenario).localeCompare(String(b.scenario))
+  || (Number(a.shard) - Number(b.shard)) || String(a.shard).localeCompare(String(b.shard));
+
 // night judges tonight's job records (nightRecord in
 // wintun-integrity-summary.mjs) against earlier nights, newest first. An
 // earlier night without a record is {passed:false, missing:true}: it ends the
 // run of passing nights and stays out of the median.
 export function night(records, history = [], expected = expectedJobs) {
   const reasons = [];
-  if (new Set(records.map(r => `${r.arch}/${r.scenario}/${r.shard}`)).size !== records.length) reasons.push('two records name the same job');
+  if (new Set(records.map(jobName)).size !== records.length) reasons.push('two records name the same job');
   if (records.length !== expected) reasons.push(`${records.length} of ${expected} jobs reported a verdict`);
   const failed = new Map();
-  for (const r of records) if (!r.passed) failed.set(r.verdict, (failed.get(r.verdict) ?? 0) + 1);
-  for (const [verdict, count] of failed) reasons.push(`${count} ${count === 1 ? 'job' : 'jobs'}: ${verdict}`);
+  const failedRecords = [...records.filter(r => !r.passed)].sort(jobOrder);
+  for (const r of failedRecords) {
+    const names = failed.get(r.verdict) ?? [];
+    names.push(jobName(r));
+    failed.set(r.verdict, names);
+  }
+  for (const [verdict, names] of failed) reasons.push(`${names.length} ${names.length === 1 ? 'job' : 'jobs'}: ${verdict} (${names.join(', ')})`);
+  const failedJobs = failedRecords.map(r => ({job: jobName(r), verdict: r.verdict, ...(r.detail?.length ? {detail: r.detail} : {})}));
   const sum = pick => records.reduce((n, r) => n + (Number(pick(r)) || 0), 0);
   const totals = {
     own_rejections: sum(r => r.own_rejections), recovery_failures: sum(r => r.recovery_failures), own_payload_mismatches: sum(r => r.own_payload_mismatches),
@@ -49,7 +59,7 @@ export function night(records, history = [], expected = expectedJobs) {
   const passed = reasons.length === 0;
   let streak = 0;
   if (passed) for (streak = 1; streak <= history.length && history[streak - 1].passed; streak++);
-  return {passed, reasons, jobs: records.length, expected_jobs: expected, totals, regression, consecutive_passing_nights: streak, required_nights: requiredNights};
+  return {passed, reasons, failed_jobs: failedJobs, jobs: records.length, expected_jobs: expected, totals, regression, consecutive_passing_nights: streak, required_nights: requiredNights};
 }
 
 // Earlier scheduled nights, newest first, read from their own night records.
@@ -76,10 +86,12 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   writeFileSync(output, JSON.stringify(result));
   console.log(`NIGHT_SUMMARY ${JSON.stringify(result)}`);
   const t = result.totals;
+  const details = result.failed_jobs.filter(j => j.detail?.length).map(j =>
+    `\nFailed job \`${j.job}\` (${j.verdict}):\n${j.detail.map(line => `- ${String(line).replaceAll('<', '&lt;')}`).join('\n')}`).join('\n');
   const lines = [
     `### Wintun night: ${result.passed ? 'passed' : 'not passed'}`,
     '',
-    result.passed ? `Passing nights in a row: **${result.consecutive_passing_nights}** of ${result.required_nights}.` : `Reasons:\n${result.reasons.map(reason => `- ${reason}`).join('\n')}`,
+    result.passed ? `Passing nights in a row: **${result.consecutive_passing_nights}** of ${result.required_nights}.` : `Reasons:\n${result.reasons.map(reason => `- ${reason}`).join('\n')}${details}`,
     scheduled ? '' : '\nThis run was started by hand. Only scheduled nights count towards the 14.',
     '',
     `Our own session, ${result.jobs} of ${result.expected_jobs} jobs: ${t.own_payload_mismatches} delivered mismatches, ${t.own_rejections} ring rejections, ${t.recovery_failures} recovery failures, ${t.clean_exposure_connections} clean transfers.`,
