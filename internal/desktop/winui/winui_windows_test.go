@@ -6,11 +6,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"image/png"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,13 +55,16 @@ func TestFlyoutSnapshotsMultiDPI(t *testing.T) {
 	healthy := desktop.FlyoutFromState(sampleFlyoutState(""))
 	resetErr := desktop.FlyoutFromState(sampleFlyoutState("Corrupt usage history preserved as usage.json.corrupt-1; accounting continues: unexpected EOF"))
 	saveErr := desktop.FlyoutFromState(sampleFlyoutState("Usage history unavailable; routing continues: permission denied"))
+	vpnProxy := desktop.FlyoutFromState(sampleVPNProxyFlyoutState())
 	unavail := desktop.UnavailableFlyout("Net Switch isn\u2019t responding.")
+	outDir := os.Getenv("NETSWITCH_FLYOUT_SNAPSHOT_DIR")
 
 	for _, scale := range []float64{1.0, 1.5, 2.0} {
 		for name, view := range map[string]desktop.FlyoutView{
 			"healthy":     healthy,
 			"resetErr":    resetErr,
 			"saveErr":     saveErr,
+			"vpnProxy":    vpnProxy,
 			"unavailable": unavail,
 		} {
 			raw, err := SnapshotPNG(view, scale)
@@ -76,6 +81,12 @@ func TestFlyoutSnapshotsMultiDPI(t *testing.T) {
 			}
 			if img.Bounds().Dy() < int(math.Round(180*scale)) {
 				t.Fatalf("%s@%.1fx height %d unexpectedly small", name, scale, img.Bounds().Dy())
+			}
+			if outDir != "" {
+				p := filepath.Join(outDir, fmt.Sprintf("flyout-%s-%.1fx.png", name, scale))
+				if err := os.WriteFile(p, raw, 0o600); err != nil {
+					t.Fatalf("write snapshot %s: %v", p, err)
+				}
 			}
 		}
 	}
@@ -376,4 +387,50 @@ func sampleFlyoutState(usageErr string) map[string]any {
 		state["usageError"] = usageErr
 	}
 	return state
+}
+
+func sampleVPNProxyFlyoutState() map[string]any {
+	return map[string]any{
+		"routing": map[string]any{"status": "on", "wanted": true},
+		"combine": map[string]any{"on": true, "active": true},
+		"lines": []any{
+			map[string]any{
+				"id": "cable", "label": "Cable", "alias": "Ethernet", "main": true,
+				"connected": true, "ping": 18.0,
+				"rate": map[string]any{"down": 840.0 * 1024, "up": 30.0 * 1024},
+			},
+			map[string]any{
+				"id": "wifi", "label": "Wi-Fi stick", "alias": "Wi-Fi", "main": false,
+				"connected": true, "metered": true, "ping": 24.0,
+				"usage": map[string]any{"bytes": 1.2 * 1024 * 1024 * 1024},
+				"cap":   map[string]any{"bytes": 10.0 * 1024 * 1024 * 1024, "period": "month"},
+				"rate":  map[string]any{"down": 120.0 * 1024, "up": 12.0 * 1024},
+			},
+			map[string]any{
+				"id": "vpn1", "label": "Proton VPN", "alias": "ProtonVPN", "main": false,
+				"vpn": true, "onlyChosen": true, "connected": true, "ping": 31.0,
+				"rate": map[string]any{"down": 410.0 * 1024, "up": 18.0 * 1024},
+			},
+			map[string]any{
+				"id": "px1", "label": "NL proxy", "alias": "proxy:px1", "main": false,
+				"onlyChosen": true, "connected": true, "ping": 19.0,
+				"proxy": map[string]any{"protocol": "socks5", "server": "127.0.0.1:1080", "carrier": "local", "udp": true},
+				"rate":  map[string]any{"down": 95.0 * 1024, "up": 8.0 * 1024},
+			},
+		},
+		"apps": []any{
+			map[string]any{
+				"name": "Claude", "path": `C:\Users\User\AppData\Local\Claude\Claude.exe`,
+				"sortScore": 612.0, "rate": map[string]any{"down": 612.0 * 1024, "up": 24.0 * 1024},
+			},
+			map[string]any{
+				"name": "qBittorrent", "path": `C:\Program Files\qBittorrent\qbittorrent.exe`,
+				"line": "vpn1", "sortScore": 410.0, "rate": map[string]any{"down": 410.0 * 1024, "up": 18.0 * 1024},
+			},
+			map[string]any{
+				"name": "Floorp", "path": `C:\Program Files\Floorp\floorp.exe`,
+				"line": "px1", "sortScore": 95.0, "rate": map[string]any{"down": 95.0 * 1024, "up": 8.0 * 1024},
+			},
+		},
+	}
 }

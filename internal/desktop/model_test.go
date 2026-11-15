@@ -101,10 +101,19 @@ func testState(status, mode string, lines, apps []map[string]any, combine map[st
 	for k, v := range combine {
 		c[k] = v
 	}
+	hasExplicitMain := false
+	for _, l := range lines {
+		if flagVal(l, "main") {
+			hasExplicitMain = true
+			break
+		}
+	}
 	outLines := make([]map[string]any, len(lines))
 	for i, l := range lines {
 		cl := cloneMap(l)
-		cl["main"] = i == 0
+		if !hasExplicitMain {
+			cl["main"] = i == 0
+		}
 		outLines[i] = cl
 	}
 	var ipv6 any
@@ -375,6 +384,93 @@ func TestFlyoutStatesAndUsageError(t *testing.T) {
 	bothView := FlyoutFromState(bothState)
 	if bothView.Tone != "warning" || bothView.HealthTone != "warning" || !strings.Contains(bothView.Health, "no internet") {
 		t.Fatalf("line warning should outrank usageError: %+v", bothView)
+	}
+}
+
+func TestFlyoutVPNAndProxyLinesAndFirewall(t *testing.T) {
+	cable := map[string]any{
+		"id": "k3f9", "alias": "Ethernet", "label": "Cable", "kind": "wired",
+		"main": true, "connected": true, "problem": nil, "ping": float64(18),
+		"connections": float64(24), "carrying": float64(24), "target": "k3f9",
+		"rate": map[string]any{"down": float64(840 * 1024), "up": float64(30 * 1024)},
+		"metered": false, "strict": false, "cap": nil,
+		"usage": map[string]any{"bytes": float64(0)}, "exhausted": false, "blocked": false,
+		"weight": float64(1), "share": float64(0.85),
+	}
+	wifi := map[string]any{
+		"id": "p2x1", "alias": "Wi-Fi", "label": "Wi-Fi stick", "kind": "wifi",
+		"main": false, "connected": true, "problem": nil, "ping": float64(24),
+		"connections": float64(4), "carrying": float64(4), "target": "p2x1",
+		"rate": map[string]any{"down": float64(120 * 1024), "up": float64(12 * 1024)},
+		"metered": true, "strict": false, "cap": nil,
+		"usage": map[string]any{"bytes": float64(0)}, "exhausted": false, "blocked": false,
+		"weight": float64(1), "share": float64(0.15),
+	}
+	vpn := map[string]any{
+		"id": "v1", "alias": "ProtonVPN", "label": "Proton VPN", "kind": nil,
+		"vpn": true, "onlyChosen": true, "fallback": false,
+		"main": false, "connected": true, "problem": nil, "ping": float64(31),
+		"connections": float64(6), "carrying": float64(6), "target": "v1",
+		"rate": map[string]any{"down": float64(410 * 1024), "up": float64(18 * 1024)},
+		"metered": false, "strict": false, "cap": nil,
+		"usage": map[string]any{"bytes": float64(0)}, "exhausted": false, "blocked": false,
+		"weight": float64(1), "share": float64(0),
+	}
+	proxyLine := map[string]any{
+		"id": "px1", "alias": "proxy:px1", "label": "NL proxy", "kind": nil,
+		"onlyChosen": true, "fallback": false,
+		"proxy": map[string]any{"protocol": "socks5", "server": "127.0.0.1:1080", "carrier": "local", "udp": true},
+		"main": false, "connected": true, "problem": nil, "ping": float64(19),
+		"connections": float64(3), "carrying": float64(3), "target": "px1",
+		"rate": map[string]any{"down": float64(95 * 1024), "up": float64(8 * 1024)},
+		"metered": false, "strict": false, "cap": nil,
+		"usage": map[string]any{"bytes": float64(0)}, "exhausted": false, "blocked": false,
+		"weight": float64(1), "share": float64(0),
+	}
+
+	// 1. 4 lines (2 physical + VPN + Proxy): shows all 4 lines, Both lines combining,
+	// SharingColors only includes the 2 physical lines, and badges match.
+	fourView := FlyoutFromState(testState("on", "", []map[string]any{cable, wifi, vpn, proxyLine}, nil, map[string]any{"on": true, "active": true}))
+	if len(fourView.Lines) != 4 || fourView.MoreLines != 0 {
+		t.Fatalf("expected 4 visible lines with 0 overflow, got len=%d more=%d", len(fourView.Lines), fourView.MoreLines)
+	}
+	if fourView.CombineName != "Both lines" || !reflect.DeepEqual(fourView.SharingColors, []int{0, 1}) {
+		t.Fatalf("combine mismatch: name=%q colors=%v", fourView.CombineName, fourView.SharingColors)
+	}
+	if !fourView.Lines[2].VPN || fourView.Lines[2].Main || fourView.Lines[3].ProxyProtocol != "SOCKS5" {
+		t.Fatalf("virtual badges mismatch: vpn=%+v proxy=%+v", fourView.Lines[2], fourView.Lines[3])
+	}
+	if fourView.Health != "4 lines healthy" || fourView.HealthTone != "ok" {
+		t.Fatalf("unexpected health: %q (%s)", fourView.Health, fourView.HealthTone)
+	}
+
+	// 2. Exclude-mode VPN (main=true, onlyChosen=false): Proton VPN gets Main=true instead of Cable.
+	cableSub := cloneMap(cable)
+	cableSub["main"] = false
+	vpnMain := cloneMap(vpn)
+	vpnMain["main"] = true
+	vpnMain["onlyChosen"] = false
+	exclView := FlyoutFromState(testState("on", "", []map[string]any{cableSub, wifi, vpnMain}, nil, map[string]any{"on": false, "active": false}))
+	if exclView.Lines[0].Main || !exclView.Lines[2].Main || !exclView.Lines[2].VPN {
+		t.Fatalf("exclude VPN main mismatch: lines=%+v", exclView.Lines)
+	}
+
+	// 3. Disconnected blocked VPN: Health="Disconnected", Note="Apps on it are blocked", footer="Proton VPN: disconnected · apps blocked".
+	vpnDown := cloneMap(vpn)
+	vpnDown["connected"] = false
+	vpnDown["problem"] = "no address"
+	vpnDown["blocked"] = true
+	downView := FlyoutFromState(testState("on", "", []map[string]any{cable, vpnDown}, nil, nil))
+	if downView.Lines[1].Health != "Disconnected" || downView.Lines[1].Tone != "down" || downView.Lines[1].Note != "Apps on it are blocked" || downView.Health != "Proton VPN: disconnected \u00b7 apps blocked" {
+		t.Fatalf("disconnected blocked VPN mismatch: line=%+v health=%q", downView.Lines[1], downView.Health)
+	}
+
+	// 4. VPN kill switch stepped out: warning footer + warning header tone.
+	fwState := testState("on", "", []map[string]any{cable, vpn}, nil, nil)
+	fwState["routing"].(map[string]any)["vpnFirewall"] = map[string]any{"steppedOut": true, "blocker": "Proton VPN"}
+	fwView := FlyoutFromState(fwState)
+	if fwView.Tone != "warning" || fwView.HealthTone != "warning" || fwView.Health != "Proton VPN kill switch paused routing" {
+		t.Fatalf("vpnFirewall flyout mismatch: tone=%q healthTone=%q health=%q", fwView.Tone, fwView.HealthTone, fwView.Health)
 	}
 }
 

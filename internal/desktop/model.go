@@ -172,6 +172,10 @@ func trayLineView(line map[string]any, index int, routingOn bool) LineView {
 // ("ok", "warn", or "down").
 func LineHealth(line map[string]any, routingOn bool) (string, string) {
 	problem := textVal(line, "problem")
+	isVirtual := flagVal(line, "vpn") || childMap(line, "proxy") != nil
+	if isVirtual && (!flagVal(line, "connected") || problem == "no address") {
+		return "Disconnected", "down"
+	}
 	if problem == "checking" {
 		return "Checking\u2026", "warn"
 	}

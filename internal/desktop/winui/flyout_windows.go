@@ -1188,6 +1188,11 @@ func (r *flyoutRenderer) lineRow(line desktop.FlyoutLine, y float32) {
 	if line.Main {
 		marks = append(marks, "MAIN")
 	}
+	if line.VPN && !line.Main {
+		marks = append(marks, "VPN")
+	} else if line.ProxyProtocol != "" {
+		marks = append(marks, line.ProxyProtocol)
+	}
 	if line.Metered {
 		marks = append(marks, "METERED")
 	}
@@ -1215,8 +1220,20 @@ func (r *flyoutRenderer) lineRow(line desktop.FlyoutLine, y float32) {
 	}
 	detailLeft := x + 8
 	detailRoom := nameLeft + room - detailLeft
-	if line.Detail != "" && detailRoom > 24 {
-		r.caption(line.Detail, r.fonts.small, r.fonts.smallPx, colDim, detailLeft, middle, detailRoom, gpAlignNear)
+	detailText := line.Detail
+	if detailText != "" && detailRoom > 24 && r.measure(detailText, r.fonts.small, r.fonts.smallPx)+6 > detailRoom {
+		if leftPart, rightPart, ok := strings.Cut(detailText, " \u00b7 "); ok {
+			preferred := rightPart
+			if line.Metered {
+				preferred = leftPart
+			}
+			if r.measure(preferred, r.fonts.small, r.fonts.smallPx)+4 <= detailRoom {
+				detailText = preferred
+			}
+		}
+	}
+	if detailText != "" && detailRoom > 24 {
+		r.caption(detailText, r.fonts.small, r.fonts.smallPx, colDim, detailLeft, middle, detailRoom, gpAlignNear)
 	}
 
 	if line.Note != "" {

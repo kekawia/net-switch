@@ -29,6 +29,7 @@ const els = {
   legends: document.querySelector('.legends'),
   channels: document.querySelector('.channels'),
   footerNote: document.getElementById('footer-note'),
+  addProxy: document.getElementById('add-proxy'),
   openSettings: document.getElementById('open-settings'),
   addApp: document.getElementById('add-app'),
   quit: document.getElementById('quit'),
@@ -60,7 +61,7 @@ let confirmingReconnect = null;
 // After Quit only the closed screen is left: nothing polls or redraws any more.
 let closed = false;
 
-// The side panel: { kind: 'line', id }, { kind: 'settings' } or { kind: 'apps' }, or null.
+// The side panel: { kind: 'line', id }, { kind: 'proxy-form', id }, { kind: 'settings' } or { kind: 'apps' }, or null.
 let panel = null;
 // The apps in the Start menu, for choosing a line before an app has run:
 // null until asked for, then [{ name, path, key?, hasIcon? }].
@@ -73,6 +74,8 @@ let pickedApp = null;
 let confirmingRemove = false;
 // What's typed in the panel and not saved yet; null while nothing is.
 const drafts = { label: null, cap: null, probeTargets: null };
+let proxyDraft = null;
+let proxyTest = null;
 let advancedOpen = false;
 // What the last Check now found: { result, version }, or null before one.
 let lastUpdateCheck = null;
@@ -195,8 +198,18 @@ function allLines() {
   return state?.lines ?? [];
 }
 
+function isVirtualLine(line) {
+  return Boolean(line?.vpn || line?.proxy);
+}
+
 function mainLine() {
-  return allLines()[0] ?? null;
+  const list = allLines();
+  return list.find((line) => line.main) ?? list[0] ?? null;
+}
+
+function primaryPhysLine() {
+  const list = allLines();
+  return list.find((line) => !isVirtualLine(line)) ?? list[0] ?? null;
 }
 
 function lineById(id) {
@@ -209,7 +222,9 @@ function colorOf(id) {
   return index < 0 ? 0 : index % PALETTE_SIZE;
 }
 
-function lineIcon(kind) {
+function lineIcon(kind, line = null) {
+  if (line?.vpn) return 'vpn';
+  if (line?.proxy) return 'proxy';
   return ['wired', 'wifi', 'phone'].includes(kind) ? kind : 'other';
 }
 
@@ -224,9 +239,14 @@ function standIn(line) {
   return target && target.id !== line.id ? target : null;
 }
 
-// Lines that take part in sharing: not kept for chosen apps, not over their cap.
+// Lines that take part in sharing: physical lines not kept for chosen apps, not over their cap.
 function sharingLines() {
-  return allLines().filter((line) => !line.strict && !line.exhausted);
+  return allLines().filter((line) => !isVirtualLine(line) && !line.strict && !line.exhausted);
+}
+
+function blockedAppsCount(line) {
+  if (!line || !routingOn()) return 0;
+  return (state?.apps ?? []).filter((app) => !sharesLines(app) && homeLine(app)?.id === line.id).length;
 }
 
 function periodWord(cap) {
@@ -254,6 +274,9 @@ function usageText(line) {
 // A line's health in its card: [text, tone]. The ping is the last internet
 // test's round trip, which only runs while routing is on.
 function lineHealth(line) {
+  if (isVirtualLine(line) && (!line.connected || line.problem === 'no address' || line.problem === 'no route')) {
+    return ['Disconnected', 'down'];
+  }
   // Connected again, and trusted once an internet test passes.
   if (line.problem === 'checking') return ['Checking…', 'warn'];
   if (line.problem === 'no internet') return ['No internet', 'warn'];
@@ -275,6 +298,20 @@ function lineFoot(line, compact = false) {
   if (line.exhausted && line.blocked) return 'Its apps are paused until the cap resets';
   if (line.exhausted && line.main) return 'Still in use: no other line can take over';
   if (other) return `Its apps use the ${other.label} until it’s back`;
+  if (isVirtualLine(line)) {
+    if (line.blocked && !line.exhausted) {
+      const count = blockedAppsCount(line);
+      return count > 0 ? (count === 1 ? '1 app blocked' : `${count} apps blocked`) : 'Apps blocked';
+    }
+    if (line.vpn) {
+      const scope = line.onlyChosen === false ? 'All apps unless pinned' : 'Only chosen apps';
+      return line.connections > 0 ? `${scope} · ${connectionCount(line.connections)}` : scope;
+    }
+    if (line.proxy) {
+      const srv = line.proxy.server;
+      return line.connections > 0 ? `${srv} · ${connectionCount(line.connections)}` : srv;
+    }
+  }
   if (Number.isFinite(line.connections)) return `Carrying ${connectionCount(line.connections)}`;
   return '';
 }
@@ -289,11 +326,18 @@ function routingSummary() {
   const list = allLines();
   const main = mainLine();
   if (!main || list.length === 1) return ['Routing on', 'ok'];
+  if (state.routing?.vpnFirewall?.steppedOut) {
+    const blocker = state.routing.vpnFirewall.blocker || 'VPN';
+    return [`Paused · ${blocker} kill switch`, 'warn'];
+  }
   const other = standIn(main);
   if (other) return [`Routing on · running on the ${other.label}`, 'warn'];
   const online = list.filter(lineUp).length;
-  if (online === list.length) return [list.length === 2 ? 'Routing on · both lines online' : `Routing on · all ${list.length} lines online`, 'ok'];
-  if (list.length === 2) return [`Routing on · ${main.label} only`, 'warn'];
+  if (online === list.length) {
+    if (list.length === 2) return ['Routing on · both lines online', 'ok'];
+    return [list.some(isVirtualLine) ? `Routing on · ${list.length} lines online` : `Routing on · all ${list.length} lines online`, 'ok'];
+  }
+  if (list.length === 2 && lineUp(main)) return [`Routing on · ${main.label} only`, 'warn'];
   return [`Routing on · ${online} of ${list.length} lines online`, 'warn'];
 }
 
@@ -545,6 +589,7 @@ function renderTopbar() {
   els.openSettings.hidden = stale || !state;
   // Only a server that can list the Start menu's apps offers this.
   els.addApp.hidden = stale || !state?.features?.installedApps;
+  if (els.addProxy) els.addProxy.hidden = stale || !state || state.mode === 'proxy' || allLines().length >= 8;
   renderFooter();
 
   const toggle = els.toggle;
@@ -575,16 +620,24 @@ function openLinePanel(id) {
   confirmingRemove = false;
   drafts.label = null;
   drafts.cap = null;
+  proxyTest = null;
   actionError = null;
   failedAction = null;
   render();
+}
+
+function lineWhereText(line) {
+  if (line.proxy) return `${String(line.proxy.protocol || 'proxy').toUpperCase()} · ${line.proxy.server}`;
+  return [line.alias, line.ssid].filter(Boolean).join(' · ');
 }
 
 // A card's parts. A compact card (three lines and more) puts the speed beside
 // the name and the health in the foot, and leaves the adapter to the tooltip
 // and the settings, so two rows of cards still leave the app list its room.
 function buildCard(line, index, compact) {
-  const where = [line.alias, line.ssid].filter(Boolean).join(' · ');
+  const isMain = Boolean(line.main ?? index === 0);
+  const where = lineWhereText(line);
+  const protoBadge = line.proxy ? String(line.proxy.protocol || 'proxy').toUpperCase() : null;
   const name = h(
     'div',
     { class: 'bus-name' },
@@ -593,12 +646,14 @@ function buildCard(line, index, compact) {
       {},
       h('span', { class: 'bus-label', text: line.label, title: compact && where ? `${line.label} (${where})` : line.label }),
       // "Main" only means something next to other lines.
-      index === 0 && allLines().length > 1 ? h('span', { class: 'badge', text: 'Main' }) : null,
+      isMain && allLines().length > 1 ? h('span', { class: 'badge', text: 'Main' }) : null,
+      line.vpn && !isMain ? h('span', { class: 'badge', text: 'VPN' }) : null,
+      protoBadge ? h('span', { class: 'badge', text: protoBadge }) : null,
       line.metered ? h('span', { class: 'badge', text: 'Metered' }) : null,
     ),
     where && !compact ? h('span', { text: where, title: where }) : null,
   );
-  const icon = h('span', { class: 'line-icon', 'data-icon': lineIcon(line.kind), 'aria-hidden': 'true' });
+  const icon = h('span', { class: 'line-icon', 'data-icon': lineIcon(line.kind, line), 'aria-hidden': 'true' });
   const health = h('div', { class: 'health' }, h('i', { class: 'dot' }), h('span'));
   const down = h('div', { class: 'reading-down' }, h('span', { class: 'reading-value' }), h('span', { class: 'reading-unit' }));
   const up = h('span', { class: 'reading-up' });
@@ -637,7 +692,22 @@ function buildCard(line, index, compact) {
 function updateCard(card, line, index, compact) {
   const node = card.node;
   const showUsage = Boolean(line.cap || line.metered);
-  const signature = JSON.stringify([index, allLines().length > 1, line.label, line.alias, line.ssid, line.kind, line.metered, showUsage, compact]);
+  const isMain = Boolean(line.main ?? index === 0);
+  const signature = JSON.stringify([
+    index,
+    isMain,
+    allLines().length > 1,
+    line.label,
+    line.alias,
+    line.ssid,
+    line.kind,
+    Boolean(line.vpn),
+    line.proxy?.protocol ?? null,
+    line.proxy?.server ?? null,
+    line.metered,
+    showUsage,
+    compact,
+  ]);
   if (card.signature !== signature) {
     node.dataset.color = String(index % PALETTE_SIZE);
     rebuildKeepingFocus(node, () => buildCard(line, index, compact), `card:${line.id}`);
@@ -742,12 +812,14 @@ function renderAddCard(lineCount) {
   if (!addCard) addCard = h('div', { class: 'bus bus-add' });
   if (addCard.parentNode !== els.lines || addCard.nextSibling) els.lines.append(addCard);
   const wide = lineCount % 2 === 0;
-  const signature = JSON.stringify([candidates, busyAction, routingOn(), wide]);
+  const canAddProxy = state.mode !== 'proxy' && lineCount < 8;
+  const signature = JSON.stringify([candidates, busyAction, routingOn(), wide, canAddProxy]);
   if (addCard.dataset.signature === signature) return;
   addCard.dataset.signature = signature;
   addCard.dataset.wide = String(wide);
+  addCard.classList.toggle('bus-add-empty', candidates.length === 0 && canAddProxy);
 
-  let detail = 'None found yet';
+  let detail = canAddProxy ? 'Second adapter or proxy' : 'None found yet';
   if (candidates.length) detail = routingOn() ? 'Routing restarts for a moment' : 'Found on this PC';
   // The detail sits beside the title, so the card is no taller than a slim line card.
   const head = h(
@@ -757,6 +829,20 @@ function renderAddCard(lineCount) {
     h('div', { class: 'bus-name add-name' }, h('strong', { text: 'Add a line' }), h('span', { text: detail })),
   );
   if (candidates.length === 0) {
+    if (canAddProxy) {
+      addCard.replaceChildren(
+        head,
+        h('button', {
+          class: 'button',
+          type: 'button',
+          text: 'Add proxy…',
+          'aria-haspopup': 'dialog',
+          disabled: Boolean(busyAction),
+          onclick: () => openProxyForm(null),
+        }),
+      );
+      return;
+    }
     addCard.replaceChildren(
       head,
       h('p', {
@@ -903,10 +989,15 @@ function ensureCombine() {
 function combineMessage(on, sharers) {
   const names = sharers.map((line) => `the ${line.label}`);
   if (sharers.length < 2) {
+    const main = mainLine();
+    if (main && isVirtualLine(main) && main.onlyChosen === false) {
+      return `Paused while ${main.label} carries all apps unless pinned.`;
+    }
     const kept = allLines()
-      .filter((line) => line.strict || line.exhausted)
+      .filter((line) => !isVirtualLine(line) && (line.strict || line.exhausted))
       .map((line) => `the ${line.label} ${line.exhausted ? 'has used its data cap' : 'only carries apps you choose'}`);
-    return `Combining needs two lines that can be shared, and ${listText(kept)}.`;
+    if (kept.length) return `Combining needs two lines that can be shared, and ${listText(kept)}.`;
+    return 'Combining needs two physical connections. VPN and proxy lines stay separate.';
   }
   if (!on) {
     return `Share new connections between ${listText(names)}, so speed tests and downloads in several parts get ${sharers.length === 2 ? 'both speeds' : 'all their speeds'}.`;
@@ -914,8 +1005,14 @@ function combineMessage(on, sharers) {
   if (!routingOn()) return 'Combining starts when routing is on.';
   if (!state.combine.active) {
     const main = mainLine();
+    if (main && isVirtualLine(main) && main.onlyChosen === false) {
+      return `Paused while ${main.label} carries all apps unless pinned.`;
+    }
     const carrier = standIn(main) ?? main;
     return `Paused while only one line works. New connections use the ${carrier.label} until another is back.`;
+  }
+  if (allLines().some(isVirtualLine) && state.combine.mode !== 'manual') {
+    return 'Apps set to Shared spread new connections. Auto follows each line’s measured speed.';
   }
   return state.combine.mode === 'manual'
     ? 'Apps set to Shared spread new connections in the shares you set below. If a website keeps signing you out, put that app on one line.'
@@ -925,7 +1022,8 @@ function combineMessage(on, sharers) {
 // The row under the line cards: the switch, Auto or Manual, and each line's share.
 function renderCombine() {
   const list = allLines();
-  els.combine.hidden = list.length < 2 || state.features?.combine === false;
+  const physicalCount = list.filter((line) => !isVirtualLine(line)).length;
+  els.combine.hidden = physicalCount < 2 || state.features?.combine === false;
   if (els.combine.hidden) return;
   const parts = ensureCombine();
   const on = combining();
@@ -934,7 +1032,7 @@ function renderCombine() {
   const waiting = on && routingOn() && !active;
   const sharers = sharingLines();
 
-  const title = list.length === 2 ? 'Combine both lines' : 'Combine lines';
+  const title = list.length === 2 || physicalCount === 2 ? 'Combine both lines' : 'Combine lines';
   if (parts.name.textContent !== title) parts.name.textContent = title;
   const message = combineMessage(on, sharers);
   if (parts.text.textContent !== message) parts.text.textContent = message;
@@ -980,17 +1078,20 @@ function renderCombine() {
 
   parts.shares.hidden = !on;
   if (!on) return;
-  const left = list.filter((line) => line.strict || line.exhausted);
+  const left = list.filter((line) => !isVirtualLine(line) && (line.strict || line.exhausted));
+  const virtualLeft = list.filter(isVirtualLine);
   const signature = JSON.stringify([
     manual,
     sharers.map((line) => [line.id, line.label, colorOf(line.id)]),
     left.map((line) => [line.id, line.label, colorOf(line.id), line.strict]),
+    virtualLeft.map((line) => [line.id, line.label, colorOf(line.id)]),
   ]);
   if (parts.shares.dataset.signature !== signature) {
     parts.shares.dataset.signature = signature;
     rebuildKeepingFocus(parts.shares, () => [
       ...sharers.map((line) => shareItem(line, manual, sharers)),
       ...left.map((line) => leftOutItem(line)),
+      virtualLeft.length ? virtualLeftOutItem(virtualLeft) : null,
     ]);
   }
   renderShareValues();
@@ -1038,6 +1139,16 @@ function leftOutItem(line) {
   );
 }
 
+function virtualLeftOutItem(virtualLines) {
+  const parts = [];
+  virtualLines.forEach((line, index) => {
+    if (index > 0) parts.push(h('span', { 'aria-hidden': 'true', text: '·' }));
+    parts.push(h('span', { class: 'virtual-chip', 'data-color': String(colorOf(line.id)), text: line.label }));
+  });
+  parts.push(h('span', { text: 'left out of combining' }));
+  return h('div', { class: 'shares-virtual' }, parts);
+}
+
 // Each share's number and cells: measured ones in Auto, the set ones in Manual.
 function renderShareValues() {
   if (!combineParts || !state) return;
@@ -1065,7 +1176,7 @@ function renderShareValues() {
 
 // ------------------------------------------------------------ notices
 
-function notice(kind, text, actions = [], details = null) {
+function notice(kind, text, actions = [], details = null, subtext = null) {
   return h(
     'div',
     { class: 'notice', 'data-kind': kind, role: kind === 'error' ? 'alert' : null },
@@ -1073,7 +1184,8 @@ function notice(kind, text, actions = [], details = null) {
     h(
       'div',
       { class: 'notice-body' },
-      h('p', { text }),
+      subtext ? h('p', {}, h('strong', { text })) : h('p', { text }),
+      subtext ? h('p', { class: 'notice-sub', text: subtext }) : null,
       details ? h('details', {}, h('summary', { text: 'Details' }), h('pre', { text: details })) : null,
     ),
     actions.length ? h('div', { class: 'notice-actions' }, actions) : null,
@@ -1154,7 +1266,39 @@ function renderNotices() {
       );
     }
     // A line that used up its data cap: its apps moved, and the person may want to raise it.
+    if (routing.vpnFirewall?.steppedOut) {
+      const blocker = routing.vpnFirewall.blocker || 'Your VPN';
+      list.push(
+        notice(
+          'setup',
+          `${blocker}’s kill switch blocks Net Switch. Routing paused so your VPN still works.`,
+          [],
+          null,
+          `Turn off Kill Switch in ${blocker}, or use WireGuard with Table = off.`,
+        ),
+      );
+    }
     if (routing.status === 'on') {
+      for (const line of allLines()) {
+        if (!isVirtualLine(line) || !line.blocked || line.exhausted) continue;
+        if (!line.main && blockedAppsCount(line) === 0) continue;
+        const fallbackTarget =
+          allLines().find((item) => !isVirtualLine(item) && lineUp(item) && !item.strict && !item.exhausted) ??
+          primaryPhysLine();
+        list.push(
+          notice(
+            'error',
+            `${line.label} is off. Apps on it are blocked so nothing leaks.`,
+            fallbackTarget && fallbackTarget.id !== line.id
+              ? [
+                  actionButton(`Use ${fallbackTarget.label}`, 'Switching…', `fallback:${line.id}`, () =>
+                    api('/api/lines/update', { id: line.id, fallback: true }),
+                  ),
+                ]
+              : [],
+          ),
+        );
+      }
       for (const line of allLines()) {
         if (!line.exhausted || !line.cap) continue;
         const other = standIn(line);
@@ -1242,16 +1386,19 @@ function createRow(app) {
   const parts = {
     icon: h('span', { class: 'icon-slot' }),
     name: h('span', { class: 'app-name' }),
+    badge: h('span', { class: 'badge badge-warn', text: 'Skips VPN', hidden: true }),
+    sub: h('span', { class: 'app-sub', hidden: true }),
     meter: createMeter(ROW_CELLS, 'row'),
     down: h('span', { class: 'rate rate-down' }),
     up: h('span', { class: 'rate rate-up' }),
     route: h('div', { class: 'route' }),
     note: h('p', { class: 'strip-note', hidden: true }),
   };
+  const meta = h('div', { class: 'app-meta' }, h('div', { class: 'app-title' }, parts.name, parts.badge), parts.sub);
   const node = h(
     'li',
     { class: 'strip' },
-    h('div', { class: 'strip-main' }, parts.icon, parts.name, parts.meter, parts.down, parts.up, parts.route),
+    h('div', { class: 'strip-main' }, parts.icon, meta, parts.meter, parts.down, parts.up, parts.route),
     parts.note,
   );
   const row = { node, parts, signature: {} };
@@ -1266,31 +1413,34 @@ function maxKeys() {
 // One key of the segmented control. Pressing the shown choice changes nothing.
 // While a move is on its way the keys are marked unavailable rather than
 // disabled, so the keyboard focus stays on the key that was pressed.
-function lineKey(app, option) {
+function lineKey(app, option, routeBlocked = false) {
   const pending = pendingLine.has(app.key);
   const value = option.value ?? '';
   const pressed = !pending && (choiceOf(app) ?? '') === value;
+  const blockedHere = pressed && routeBlocked;
+  const labelText = blockedHere ? `${option.label} · Blocked` : option.label;
   // No line changes for this app while its reconnect is running.
   const locked = pending || busyAction === `reconnect:${app.key}`;
   const key = h('button', {
     class: 'key',
     type: 'button',
     'data-focus': `key:${app.key}:${value}`,
+    'data-blocked': blockedHere ? 'true' : null,
     'aria-pressed': String(pressed),
     'aria-busy': pending && pendingLine.get(app.key) === value ? 'true' : null,
     'aria-disabled': locked ? 'true' : null,
-    title: option.label.length > 12 ? option.label : null,
+    title: labelText.length > 12 ? labelText : null,
     onclick: () => {
       if (!pressed && !locked) chooseLine(app, option.value);
     },
-  }, h('span', { class: 'key-label', text: option.label }));
+  }, h('span', { class: 'key-label', text: labelText }));
   if (option.shared) sharedLook(key);
   else key.dataset.color = String(option.color);
   return key;
 }
 
 // More choices than keys fit: one list, its mark in the chosen line's color.
-function linePicker(app, options) {
+function linePicker(app, options, routeBlocked = false) {
   const pending = pendingLine.has(app.key);
   const shown = pending ? pendingLine.get(app.key) : (choiceOf(app) ?? '');
   const chosen = options.find((option) => (option.value ?? '') === shown) ?? options[0];
@@ -1307,11 +1457,13 @@ function linePicker(app, options) {
         chooseLine(app, event.target.value || null);
       },
     },
-    options.map((option) =>
-      h('option', { value: option.value ?? '', text: option.label, selected: (option.value ?? '') === shown }),
-    ),
+    options.map((option) => {
+      const selected = (option.value ?? '') === shown;
+      const text = selected && routeBlocked ? `${option.label} · Blocked` : option.label;
+      return h('option', { value: option.value ?? '', text, selected });
+    }),
   );
-  const pick = h('div', { class: 'pick' }, select);
+  const pick = h('div', { class: 'pick', 'data-blocked': routeBlocked ? 'true' : null }, select);
   if (chosen?.shared) sharedLook(pick);
   else pick.dataset.color = String(chosen?.color ?? 0);
   return pick;
@@ -1467,6 +1619,18 @@ function updateRow(row, app, options, useList) {
   if (parts.name.textContent !== app.name) parts.name.textContent = app.name;
   parts.name.title = app.path || 'This app could not be identified';
 
+  const main = mainLine();
+  const pinned = pinnedLine(app);
+  const skipsVpn = Boolean(main?.vpn && main.onlyChosen === false && pinned && !pinned.vpn);
+  parts.badge.hidden = !skipsVpn;
+
+  const udpDrop = Number(app.unsupportedUdp) || 0;
+  parts.sub.hidden = udpDrop <= 0;
+  if (udpDrop > 0) {
+    const subText = `${udpDrop} UDP refused · TCP-only proxy`;
+    if (parts.sub.textContent !== subText) parts.sub.textContent = subText;
+  }
+
   // Without current measurements show nothing rather than a false zero.
   const current = measuring();
   const lit = current ? litCells(app.rate.down, ROW_CELLS) : 0;
@@ -1479,9 +1643,13 @@ function updateRow(row, app, options, useList) {
   if (app.rate.up < 1) parts.up.dataset.idle = '';
   else delete parts.up.dataset.idle;
 
+  const home = !sharesLines(app) ? homeLine(app) : null;
+  const routeBlocked = Boolean(routingOn() && home && isVirtualLine(home) && home.blocked && !home.exhausted);
+
   const keysSignature = JSON.stringify([
     app.switchable,
     choiceOf(app),
+    routeBlocked,
     pendingLine.get(app.key) ?? null,
     busyAction === `reconnect:${app.key}`,
     options,
@@ -1493,13 +1661,13 @@ function updateRow(row, app, options, useList) {
     let control;
     if (!app.switchable) {
       control = h('div', { class: 'keys' }, h('span', { class: 'key-placeholder', text: 'Can’t be moved' }));
-    } else if (useList) {
-      control = linePicker(app, options);
+    } else if (useList || routeBlocked) {
+      control = linePicker(app, options, routeBlocked);
     } else {
       control = h(
         'div',
         { class: 'keys', role: 'group', 'aria-label': `Line for ${app.name}` },
-        options.map((option) => lineKey(app, option)),
+        options.map((option) => lineKey(app, option, routeBlocked)),
       );
     }
     rebuildKeepingFocus(parts.route, () => [control], `route:${app.key}`);
@@ -1830,7 +1998,15 @@ function switchRow({ id, name, help, checked, busy, disabled, onToggle }) {
 }
 
 // The field each saving action belongs to: its error shows under that field.
-const FIELD_OF = { 'line-label': 'name', 'line-cap': 'cap', 'probe-targets': 'targets' };
+const FIELD_OF = {
+  'line-label': 'name',
+  'line-cap': 'cap',
+  'probe-targets': 'targets',
+  'proxy-host': 'proxy-host',
+  'proxy-port': 'proxy-port',
+  'proxy-sni': 'proxy-sni',
+  'proxy-label': 'proxy-label',
+};
 
 function fieldFailed(field) {
   return Boolean(actionError) && FIELD_OF[failedAction] === field;
@@ -1842,7 +2018,15 @@ function fieldError(field) {
 
 // The keyboard goes to a field with an error, so it can be fixed straight away.
 function focusField(field) {
-  const focusKey = { name: 'name', cap: 'cap-amount', targets: 'targets' }[field];
+  const focusKey = {
+    name: 'name',
+    cap: 'cap-amount',
+    targets: 'targets',
+    'proxy-host': 'proxy-host',
+    'proxy-port': 'proxy-port',
+    'proxy-sni': 'proxy-sni',
+    'proxy-label': 'proxy-label',
+  }[field];
   els.panel.querySelector(`[data-focus="${focusKey}"]`)?.focus();
 }
 
@@ -1918,134 +2102,497 @@ function capAmountText(line) {
   return String(Number((line.cap.bytes / GB).toFixed(2)));
 }
 
-function buildLinePanel(line) {
-  const index = allLines().indexOf(line);
-  const count = allLines().length;
-  const main = mainLine();
+function defaultProxyPort(protocol) {
+  if (protocol === 'http') return '8080';
+  if (protocol === 'https') return '443';
+  return '1080';
+}
+
+function splitHostPort(server, protocol) {
+  const fallbackPort = defaultProxyPort(protocol);
+  if (!server) return ['', fallbackPort];
+  const bracket = /^\[([^\]]+)\]:(\d+)$/.exec(server);
+  if (bracket) return [bracket[1], bracket[2]];
+  const idx = server.lastIndexOf(':');
+  if (idx > 0 && server.indexOf(':') === idx) return [server.slice(0, idx), server.slice(idx + 1)];
+  return [server, fallbackPort];
+}
+
+function joinHostPort(host, port) {
+  const cleanHost = host.trim();
+  const cleanPort = port.trim();
+  if (!cleanHost || !cleanPort) return '';
+  if (cleanHost.includes(':') && !cleanHost.startsWith('[')) return `[${cleanHost}]:${cleanPort}`;
+  return `${cleanHost}:${cleanPort}`;
+}
+
+function carrierLabel(carrier) {
+  if (!carrier || carrier === 'main') {
+    const phys = primaryPhysLine();
+    return phys ? phys.label : 'Main line';
+  }
+  if (carrier === 'local') return 'This PC';
+  return lineById(carrier)?.label ?? 'Main line';
+}
+
+function openProxyForm(editId = null) {
+  const editLine = editId ? lineById(editId) : null;
+  const proto = editLine?.proxy?.protocol ?? 'socks5';
+  const [host, port] = editLine?.proxy ? splitHostPort(editLine.proxy.server, proto) : ['127.0.0.1', '1080'];
+  proxyDraft = {
+    protocol: proto,
+    host,
+    port,
+    serverName: editLine?.proxy?.serverName ?? '',
+    label: editLine?.label ?? '',
+    carrier: editLine?.proxy?.carrier ?? 'local',
+    auth: Boolean(editLine?.proxy?.hasAuth),
+    username: editLine?.proxy?.username ?? '',
+    password: '',
+    hadAuth: Boolean(editLine?.proxy?.hasAuth),
+    touchedPort: Boolean(editLine),
+  };
+  proxyTest = null;
+  confirmingRemove = false;
+  actionError = null;
+  failedAction = null;
+  panel = { kind: 'proxy-form', id: editLine?.id ?? null };
+  render();
+}
+
+function validateProxyDraft(draft) {
+  const host = draft.host.trim();
+  const portNum = Number(draft.port.trim());
+  if (!host || /\s/.test(host)) return { action: 'proxy-host', error: 'Enter a server address or hostname, like 127.0.0.1.' };
+  if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+    return { action: 'proxy-port', error: 'Enter a port between 1 and 65535, like 1080.' };
+  }
+  if (draft.protocol === 'https' && /\s/.test(draft.serverName.trim())) {
+    return { action: 'proxy-sni', error: 'Enter a valid TLS server name without spaces.' };
+  }
+  if (draft.label.trim().length > 40) {
+    return { action: 'proxy-label', error: 'Give the proxy a name of up to 40 characters.' };
+  }
+  return { server: joinHostPort(host, String(portNum)) };
+}
+
+function buildProxyPayload(draft, editLine = null) {
+  const server = joinHostPort(draft.host, draft.port);
+  const testedSame =
+    proxyTest &&
+    proxyTest.ok &&
+    proxyTest.server === server &&
+    proxyTest.protocol === draft.protocol;
+  const udp =
+    draft.protocol === 'socks5'
+      ? testedSame && typeof proxyTest.udpOk === 'boolean'
+        ? proxyTest.udpOk
+        : (editLine?.proxy?.udp ?? true)
+      : false;
+  const ipv6 =
+    testedSame && typeof proxyTest.ipv6Ok === 'boolean'
+      ? proxyTest.ipv6Ok
+      : Boolean(editLine?.proxy?.ipv6);
+  const payload = {
+    protocol: draft.protocol,
+    server,
+    carrier: draft.carrier || 'local',
+    udp,
+    ipv6,
+  };
+  if (draft.protocol === 'https' && draft.serverName.trim()) {
+    payload.serverName = draft.serverName.trim();
+  }
+  if (draft.auth) {
+    payload.username = draft.username.trim();
+    payload.password = draft.password;
+    if (!draft.password && draft.hadAuth) payload.keepPassword = true;
+  } else if (draft.hadAuth) {
+    payload.clearAuth = true;
+  }
+  return payload;
+}
+
+function formatProxyTestError(res) {
+  if (res.errorKind === 'auth') return 'Login failed. Check username and password.';
+  if (res.errorKind === 'tls') return 'TLS check failed. Check server name and port.';
+  if (res.errorKind === 'engineOff') return res.error || 'Turn on routing to test through another line.';
+  if (res.error) return res.error;
+  return 'Couldn’t reach this proxy.';
+}
+
+function proxyTestStatusNode(res) {
+  if (!res) return h('div', { class: 'proxy-test-status', 'aria-live': 'polite' });
+  if (!res.ok) {
+    const msg = formatProxyTestError(res);
+    return h(
+      'div',
+      { class: 'proxy-test-status', 'data-tone': 'down', 'aria-live': 'polite', title: msg },
+      h('i', { class: 'dot', 'aria-hidden': 'true' }),
+      h('span', { text: msg }),
+    );
+  }
+  const caps = res.udpOk ? 'TCP + UDP' : 'TCP only';
+  const latency = Number.isFinite(res.latencyMs) ? `${res.latencyMs} ms · ${caps}` : caps;
+  return h(
+    'div',
+    { class: 'proxy-test-status', 'data-tone': 'ok', 'aria-live': 'polite' },
+    h('i', { class: 'dot', 'aria-hidden': 'true' }),
+    h('span', { text: latency }),
+  );
+}
+
+async function runProxyTestFromDraft(editLine) {
+  const check = validateProxyDraft(proxyDraft);
+  if (check.error) {
+    failField(check.action, check.error);
+    return;
+  }
+  const proxy = buildProxyPayload(proxyDraft, editLine);
+  await run('proxy-test', async () => {
+    const res = await api('/api/lines/add', {
+      test: true,
+      ...(editLine ? { id: editLine.id } : {}),
+      proxy,
+    });
+    proxyTest = { ...res, server: proxy.server, protocol: proxy.protocol, id: editLine?.id ?? null };
+    return null;
+  });
+}
+
+async function runProxyTestForLine(line) {
+  await run(`proxy-test:${line.id}`, async () => {
+    const res = await api('/api/lines/add', {
+      test: true,
+      id: line.id,
+      proxy: {
+        protocol: line.proxy.protocol,
+        server: line.proxy.server,
+        ...(line.proxy.serverName ? { serverName: line.proxy.serverName } : {}),
+        carrier: line.proxy.carrier,
+        udp: Boolean(line.proxy.udp),
+        ipv6: Boolean(line.proxy.ipv6),
+        username: line.proxy.username ?? '',
+        keepPassword: Boolean(line.proxy.hasAuth),
+      },
+    });
+    proxyTest = { ...res, id: line.id };
+    return null;
+  });
+}
+
+async function submitProxyForm(editLine) {
+  const check = validateProxyDraft(proxyDraft);
+  if (check.error) {
+    failField(check.action, check.error);
+    return;
+  }
+  const proxy = buildProxyPayload(proxyDraft, editLine);
+  const label = proxyDraft.label.trim();
+  const ok = await run('proxy-save', () =>
+    editLine
+      ? api('/api/lines/update', { id: editLine.id, ...(label ? { label } : {}), proxy })
+      : api('/api/lines/add', { ...(label ? { label } : {}), proxy }),
+  );
+  if (ok) {
+    if (editLine) openLinePanel(editLine.id);
+    else closePanel();
+  }
+}
+
+function buildProxyFormPanel() {
+  const editLine = panel?.id ? lineById(panel.id) : null;
+  if (!proxyDraft) openProxyForm(editLine?.id ?? null);
+  const draft = proxyDraft;
   const busy = Boolean(busyAction);
-  const restartNote = routingOn() ? ' Routing restarts for a moment.' : '';
-  const where = [line.alias, line.ssid].filter(Boolean).join(' · ');
-  const icon = h('span', { class: 'line-icon', 'data-icon': lineIcon(line.kind), 'data-color': String(index % PALETTE_SIZE), 'aria-hidden': 'true' });
-  const sections = [];
+  const colorIndex = editLine ? colorOf(editLine.id) : 3;
+  const icon = h('span', { class: 'line-icon', 'data-icon': 'proxy', 'data-color': String(colorIndex), 'aria-hidden': 'true' });
 
-  const nameField = h('input', {
-    id: 'line-name',
-    class: 'input',
-    type: 'text',
-    name: 'label',
-    maxlength: '40',
-    autocomplete: 'off',
-    spellcheck: 'false',
-    'data-focus': 'name',
-    'aria-invalid': fieldFailed('name') ? 'true' : null,
-    'aria-describedby': fieldFailed('name') ? 'name-error' : null,
-    value: drafts.label ?? line.label,
-    oninput: (event) => {
-      drafts.label = event.target.value;
-      markUnavailable(saveName, busy || drafts.label.trim() === line.label);
+  const carriers = [
+    { value: 'local', label: 'This PC (127.0.0.1)', local: true },
+    ...allLines()
+      .filter((item) => !item.proxy && item.id !== editLine?.id)
+      .map((item) => ({ value: item.id, label: item.label, color: colorOf(item.id) })),
+    { value: 'main', label: 'Main line', color: colorOf(primaryPhysLine()?.id) },
+  ];
+  const chosenCarrier = carriers.find((item) => item.value === draft.carrier) ?? carriers[0];
+  const carrierPick = h(
+    'div',
+    {
+      class: 'pick',
+      'data-look': chosenCarrier.local ? 'local' : null,
+      'data-color': chosenCarrier.local ? null : String(chosenCarrier.color ?? 0),
     },
-  });
-  // Saving an unchanged name does nothing, so the button only looks unavailable then.
-  const saveName = h('button', {
-    class: 'button',
-    type: 'submit',
-    'data-focus': 'name-save',
-    text: busyAction === 'line-label' ? 'Saving…' : 'Save',
-    'aria-disabled': busy || (drafts.label ?? line.label).trim() === line.label ? 'true' : null,
-  });
-  sections.push(
     h(
-      'section',
-      { class: 'panel-section' },
-      h('label', { class: 'field-label', for: 'line-name', text: 'Name' }),
-      h(
-        'form',
-        {
-          class: 'field-row',
-          onsubmit: (event) => {
-            event.preventDefault();
-            saveLabel(line);
-          },
+      'select',
+      {
+        id: 'proxy-carrier',
+        name: 'carrier',
+        'data-focus': 'proxy-carrier',
+        'aria-disabled': busy ? 'true' : null,
+        onchange: (event) => {
+          if (busy) return;
+          draft.carrier = event.target.value;
+          proxyTest = null;
+          render();
         },
-        nameField,
-        saveName,
-      ),
-      fieldError('name'),
+      },
+      carriers.map((item) => h('option', { value: item.value, text: item.label, selected: item.value === chosenCarrier.value })),
     ),
   );
 
-  sections.push(
+  const mainSection = h(
+    'section',
+    { class: 'panel-section' },
     h(
-      'section',
-      { class: 'panel-section' },
-      index === 0
-        ? h(
-            'div',
-            { class: 'setting' },
-            h(
-              'div',
-              { class: 'setting-text' },
-              h('span', { class: 'setting-name', text: 'Main line' }),
-              h('p', { class: 'setting-help', text: 'Apps you haven’t put on a line use this one. If it drops, they move to the next line that works.' }),
-            ),
-          )
-        : h(
-            'div',
-            { class: 'setting' },
-            h(
-              'div',
-              { class: 'setting-text' },
-              h('span', { class: 'setting-name', text: 'Main line' }),
-              h('p', {
-                class: 'setting-help',
-                id: 'make-main-help',
-                text: `Apps you haven’t put on a line use the ${main.label} now.${restartNote}`,
-              }),
-            ),
-            h('button', {
-              class: 'button',
-              type: 'button',
-              'data-focus': 'make-main',
-              'aria-describedby': 'make-main-help',
-              text: busyAction === 'line-main' ? 'Changing…' : 'Make main line',
-              'aria-disabled': busy ? 'true' : null,
-              // By id: the panel was built from an earlier reading of the lines.
-              onclick: () =>
-                run('line-main', () =>
-                  api('/api/lines/order', {
-                    ids: [line.id, ...allLines().filter((item) => item.id !== line.id).map((item) => item.id)],
-                  }),
-                ),
-            }),
-          ),
+      'div',
+      { class: 'proxy-col' },
+      h('span', { class: 'field-label', text: 'Protocol' }),
+      h(
+        'div',
+        { class: 'keys keys-plain', role: 'group', 'aria-label': 'Proxy protocol' },
+        [
+          ['socks5', 'SOCKS5'],
+          ['http', 'HTTP'],
+          ['https', 'HTTPS'],
+        ].map(([value, label]) =>
+          h('button', {
+            class: 'key',
+            type: 'button',
+            'data-focus': `proxy-proto:${value}`,
+            'aria-pressed': String(draft.protocol === value),
+            'aria-disabled': busy ? 'true' : null,
+            text: label,
+            onclick: () => {
+              if (busyAction || draft.protocol === value) return;
+              draft.protocol = value;
+              if (!draft.touchedPort) draft.port = defaultProxyPort(value);
+              proxyTest = null;
+              render();
+            },
+          }),
+        ),
+      ),
+    ),
+    h(
+      'div',
+      { class: 'proxy-host-row' },
+      h(
+        'div',
+        { class: 'proxy-col' },
+        h('label', { class: 'field-label', for: 'proxy-host', text: 'Server' }),
+        h('input', {
+          id: 'proxy-host',
+          class: 'input input-mono',
+          type: 'text',
+          name: 'host',
+          placeholder: '127.0.0.1…',
+          autocomplete: 'off',
+          spellcheck: 'false',
+          'data-focus': 'proxy-host',
+          'aria-invalid': fieldFailed('proxy-host') ? 'true' : null,
+          'aria-describedby': fieldFailed('proxy-host') ? 'proxy-host-error' : null,
+          value: draft.host,
+          oninput: (event) => {
+            draft.host = event.target.value;
+            if (actionError) {
+              actionError = null;
+              failedAction = null;
+            }
+          },
+        }),
+      ),
+      h(
+        'div',
+        { class: 'proxy-col' },
+        h('label', { class: 'field-label', for: 'proxy-port', text: 'Port' }),
+        h('input', {
+          id: 'proxy-port',
+          class: 'input input-mono',
+          type: 'text',
+          inputmode: 'numeric',
+          name: 'port',
+          placeholder: `${defaultProxyPort(draft.protocol)}…`,
+          autocomplete: 'off',
+          spellcheck: 'false',
+          'data-focus': 'proxy-port',
+          'aria-invalid': fieldFailed('proxy-port') ? 'true' : null,
+          'aria-describedby': fieldFailed('proxy-port') ? 'proxy-port-error' : null,
+          value: draft.port,
+          oninput: (event) => {
+            draft.port = event.target.value;
+            draft.touchedPort = true;
+            if (actionError) {
+              actionError = null;
+              failedAction = null;
+            }
+          },
+        }),
+      ),
+    ),
+    fieldError('proxy-host'),
+    fieldError('proxy-port'),
+    draft.protocol === 'https'
+      ? h(
+          'div',
+          { class: 'proxy-col' },
+          h('label', { class: 'field-label', for: 'proxy-sni', text: 'TLS server name' }),
+          h('input', {
+            id: 'proxy-sni',
+            class: 'input input-mono',
+            type: 'text',
+            name: 'serverName',
+            placeholder: 'Optional when Server is a hostname…',
+            autocomplete: 'off',
+            spellcheck: 'false',
+            'data-focus': 'proxy-sni',
+            'aria-invalid': fieldFailed('proxy-sni') ? 'true' : null,
+            'aria-describedby': fieldFailed('proxy-sni') ? 'proxy-sni-error' : null,
+            value: draft.serverName,
+            oninput: (event) => {
+              draft.serverName = event.target.value;
+            },
+          }),
+          fieldError('proxy-sni'),
+        )
+      : null,
+    h(
+      'div',
+      { class: 'proxy-col' },
+      h('label', { class: 'field-label', for: 'proxy-label', text: 'Name' }),
+      h('input', {
+        id: 'proxy-label',
+        class: 'input',
+        type: 'text',
+        name: 'label',
+        maxlength: '40',
+        placeholder: 'NL proxy…',
+        autocomplete: 'off',
+        spellcheck: 'false',
+        'data-focus': 'proxy-label',
+        'aria-invalid': fieldFailed('proxy-label') ? 'true' : null,
+        'aria-describedby': fieldFailed('proxy-label') ? 'proxy-label-error' : null,
+        value: draft.label,
+        oninput: (event) => {
+          draft.label = event.target.value;
+        },
+      }),
+      fieldError('proxy-label'),
+    ),
+    h(
+      'div',
+      { class: 'proxy-col' },
+      h('label', { class: 'field-label', for: 'proxy-carrier', text: 'Send through' }),
+      carrierPick,
     ),
   );
 
+  const authSection = h(
+    'section',
+    { class: 'panel-section' },
+    switchRow({
+      id: 'proxy-auth',
+      name: 'Login',
+      help: null,
+      checked: Boolean(draft.auth),
+      busy: false,
+      disabled: busy,
+      onToggle: () => {
+        draft.auth = !draft.auth;
+        proxyTest = null;
+        render();
+      },
+    }),
+    draft.auth
+      ? h(
+          'div',
+          { class: 'proxy-auth-row' },
+          h('input', {
+            id: 'proxy-username',
+            class: 'input input-mono',
+            type: 'text',
+            name: 'username',
+            placeholder: 'Username…',
+            'aria-label': 'Proxy username',
+            autocomplete: 'off',
+            spellcheck: 'false',
+            'data-focus': 'proxy-username',
+            value: draft.username,
+            oninput: (event) => {
+              draft.username = event.target.value;
+            },
+          }),
+          h('input', {
+            id: 'proxy-password',
+            class: 'input input-mono',
+            type: 'password',
+            name: 'password',
+            placeholder: draft.hadAuth ? 'Saved…' : 'Password…',
+            'aria-label': 'Proxy password',
+            autocomplete: 'new-password',
+            spellcheck: 'false',
+            'data-focus': 'proxy-password',
+            value: draft.password,
+            oninput: (event) => {
+              draft.password = event.target.value;
+            },
+          }),
+        )
+      : null,
+    h(
+      'div',
+      { class: 'proxy-actions' },
+      h('button', {
+        class: 'button',
+        type: 'button',
+        'data-focus': 'proxy-test',
+        text: busyAction === 'proxy-test' ? 'Testing…' : 'Test',
+        'aria-disabled': busy ? 'true' : null,
+        onclick: () => {
+          if (!busyAction) runProxyTestFromDraft(editLine);
+        },
+      }),
+      proxyTestStatusNode(proxyTest),
+      h('button', {
+        class: 'button button-primary',
+        type: 'submit',
+        'data-focus': 'proxy-submit',
+        text: busyAction === 'proxy-save' ? 'Saving…' : editLine ? 'Save' : 'Add proxy',
+        'aria-disabled': busy ? 'true' : null,
+      }),
+    ),
+    h('p', { class: 'proxy-dns-note', text: 'DNS lookups use this PC’s normal connection.' }),
+  );
+
+  const form = h(
+    'form',
+    {
+      class: 'panel-body',
+      onsubmit: (event) => {
+        event.preventDefault();
+        if (!busyAction) submitProxyForm(editLine);
+      },
+    },
+    panelError(),
+    mainSection,
+    authSection,
+  );
+
+  return [panelHead(editLine ? 'Edit proxy' : 'Add proxy', 'SOCKS5 or HTTP proxy', icon), form];
+}
+
+function buildCapControls(line, busy, meteredHelp) {
   const data = [
     switchRow({
       id: 'line-metered',
       name: 'Metered',
-      help: 'It costs data, like a phone plan. Net Switch counts what this line uses.',
+      help: meteredHelp,
       checked: Boolean(line.metered),
       busy: busyAction === 'line-metered',
       disabled: busy,
       onToggle: () => updateLine(line, { metered: !line.metered }, 'line-metered'),
     }),
   ];
-  // Any line but the main one, which carries every app without a line of its own.
-  if (index !== 0) {
-    data.push(
-      switchRow({
-        id: 'line-strict',
-        name: 'Only apps I choose',
-        help: 'Other apps never use it, even when another line drops.',
-        checked: Boolean(line.strict),
-        busy: busyAction === 'line-strict',
-        disabled: busy,
-        onToggle: () => updateLine(line, { strict: !line.strict }, 'line-strict'),
-      }),
-    );
-  }
   if (line.metered || line.cap) {
     const editing = Boolean(line.cap) || drafts.cap !== null;
     data.push(
@@ -2127,7 +2674,6 @@ function buildLinePanel(line) {
             ),
             save,
           ),
-          // Phone plans renew on their own date, not always on the 1st.
           period === 'month'
             ? h(
                 'label',
@@ -2166,75 +2712,362 @@ function buildLinePanel(line) {
       );
     }
   }
-  sections.push(h('section', { class: 'panel-section' }, data));
+  return data;
+}
 
-  let remove;
-  if (confirmingRemove) {
-    const goes =
-      index === 0
-        ? `The ${allLines()[1]?.label} becomes the main line, and this line’s apps go to it.`
-        : `Its apps go to the ${main.label}.`;
-    remove = h(
+function buildRemoveConfirm(line, index, main, restartNote, busy) {
+  const nextDefault = line.id === main?.id ? (primaryPhysLine()?.id !== line.id ? primaryPhysLine() : allLines().find((item) => item.id !== line.id)) : main;
+  const goes = nextDefault
+    ? line.id === main?.id
+      ? `The ${nextDefault.label} becomes the main line, and this line’s apps go to it.`
+      : `Its apps go to the ${nextDefault.label}.`
+    : '';
+  return h(
+    'div',
+    { class: 'confirm' },
+    h('p', { text: `Stop using ${isVirtualLine(line) ? line.label : `the ${line.label}`}? ${goes}${restartNote}`.trim() }),
+    h(
       'div',
-      { class: 'confirm' },
-      h('p', { text: `Stop using the ${line.label}? ${goes}${restartNote}` }),
+      { class: 'confirm-actions' },
+      h('button', {
+        class: 'button button-danger',
+        type: 'button',
+        'data-focus': 'remove-confirm',
+        text: busyAction === 'line-remove' ? 'Removing…' : 'Remove line',
+        'aria-disabled': busy ? 'true' : null,
+        onclick: () => run('line-remove', () => api('/api/lines/remove', { id: line.id })),
+      }),
+      h('button', {
+        class: 'button button-quiet',
+        type: 'button',
+        'data-focus': 'remove-cancel',
+        text: 'Cancel',
+        'aria-disabled': busyAction === 'line-remove' ? 'true' : null,
+        onclick: () => {
+          if (busyAction === 'line-remove') return;
+          confirmingRemove = false;
+          render();
+          els.panel.querySelector('[data-focus="remove"]')?.focus();
+        },
+      }),
+    ),
+  );
+}
+
+function buildLinePanel(line) {
+  const index = allLines().indexOf(line);
+  const count = allLines().length;
+  const main = mainLine();
+  const phys = primaryPhysLine();
+  const busy = Boolean(busyAction);
+  const restartNote = routingOn() ? ' Routing restarts for a moment.' : '';
+  const where = line.vpn
+    ? `${line.alias} · ${lineUp(line) ? 'Connected' : 'Disconnected'}`
+    : lineWhereText(line);
+  const icon = h('span', { class: 'line-icon', 'data-icon': lineIcon(line.kind, line), 'data-color': String(index % PALETTE_SIZE), 'aria-hidden': 'true' });
+  const sections = [];
+
+  const nameField = h('input', {
+    id: 'line-name',
+    class: 'input',
+    type: 'text',
+    name: 'label',
+    maxlength: '40',
+    autocomplete: 'off',
+    spellcheck: 'false',
+    'data-focus': 'name',
+    'aria-invalid': fieldFailed('name') ? 'true' : null,
+    'aria-describedby': fieldFailed('name') ? 'name-error' : null,
+    value: drafts.label ?? line.label,
+    oninput: (event) => {
+      drafts.label = event.target.value;
+      markUnavailable(saveName, busy || drafts.label.trim() === line.label);
+    },
+  });
+  // Saving an unchanged name does nothing, so the button only looks unavailable then.
+  const saveName = h('button', {
+    class: 'button',
+    type: 'submit',
+    'data-focus': 'name-save',
+    text: busyAction === 'line-label' ? 'Saving…' : 'Save',
+    'aria-disabled': busy || (drafts.label ?? line.label).trim() === line.label ? 'true' : null,
+  });
+  sections.push(
+    h(
+      'section',
+      { class: 'panel-section' },
+      h('label', { class: 'field-label', for: 'line-name', text: 'Name' }),
       h(
-        'div',
-        { class: 'confirm-actions' },
-        h('button', {
-          class: 'button button-danger',
-          type: 'button',
-          'data-focus': 'remove-confirm',
-          text: busyAction === 'line-remove' ? 'Removing…' : 'Remove line',
-          'aria-disabled': busy ? 'true' : null,
-          onclick: () => run('line-remove', () => api('/api/lines/remove', { id: line.id })),
-        }),
-        h('button', {
-          class: 'button button-quiet',
-          type: 'button',
-          'data-focus': 'remove-cancel',
-          text: 'Cancel',
-          'aria-disabled': busyAction === 'line-remove' ? 'true' : null,
-          onclick: () => {
-            if (busyAction === 'line-remove') return;
-            confirmingRemove = false;
-            render();
-            els.panel.querySelector('[data-focus="remove"]')?.focus();
+        'form',
+        {
+          class: 'field-row',
+          onsubmit: (event) => {
+            event.preventDefault();
+            saveLabel(line);
           },
+        },
+        nameField,
+        saveName,
+      ),
+      fieldError('name'),
+    ),
+  );
+
+  if (line.vpn || line.proxy) {
+    const onlyChosen = line.onlyChosen !== false;
+    const blockDrops = !line.fallback;
+    const otherName = phys && phys.id !== line.id ? phys.label : 'your main connection';
+
+    if (line.proxy) {
+      const summaryParts = [
+        `via ${carrierLabel(line.proxy.carrier)}`,
+        line.proxy.udp ? 'TCP + UDP' : 'TCP only',
+      ];
+      if (line.proxy.hasAuth) summaryParts.push('Login saved');
+      const liveTest = proxyTest && proxyTest.id === line.id ? proxyTest : null;
+      sections.push(
+        h(
+          'section',
+          { class: 'panel-section' },
+          h(
+            'div',
+            { class: 'setting' },
+            h(
+              'div',
+              { class: 'setting-text' },
+              h('span', { class: 'setting-name', text: 'Server' }),
+              h('p', { class: 'setting-help', text: summaryParts.join(' · ') }),
+            ),
+            h(
+              'div',
+              { class: 'setting-actions' },
+              h('button', {
+                class: 'button',
+                type: 'button',
+                'data-focus': 'proxy-line-test',
+                text: busyAction === `proxy-test:${line.id}` ? 'Testing…' : 'Test',
+                'aria-disabled': busy ? 'true' : null,
+                onclick: () => {
+                  if (!busyAction) runProxyTestForLine(line);
+                },
+              }),
+              h('button', {
+                class: 'button',
+                type: 'button',
+                'data-focus': 'proxy-line-edit',
+                text: 'Edit',
+                'aria-disabled': busy ? 'true' : null,
+                onclick: () => {
+                  if (!busyAction) openProxyForm(line.id);
+                },
+              }),
+            ),
+          ),
+          liveTest ? proxyTestStatusNode(liveTest) : null,
+        ),
+      );
+    }
+
+    sections.push(
+      h(
+        'section',
+        { class: 'panel-section' },
+        switchRow({
+          id: 'line-only-chosen',
+          name: 'Only apps I choose',
+          help: `Other apps stay on ${otherName}.`,
+          checked: onlyChosen,
+          busy: busyAction === 'line-only-chosen',
+          disabled: busy,
+          onToggle: () => updateLine(line, { onlyChosen: !onlyChosen }, 'line-only-chosen'),
+        }),
+        switchRow({
+          id: 'line-block-drops',
+          name: 'Block apps if it drops',
+          help: 'Turn off to use another line instead.',
+          checked: blockDrops,
+          busy: busyAction === 'line-block-drops',
+          disabled: busy,
+          onToggle: () => updateLine(line, { fallback: blockDrops }, 'line-block-drops'),
         }),
       ),
     );
-  } else {
-    remove = h(
-      'div',
-      { class: 'setting' },
-      h(
-        'div',
-        { class: 'setting-text' },
-        h('span', { class: 'setting-name', text: 'Remove line' }),
-        h('p', {
-          class: 'setting-help',
-          id: 'remove-help',
-          text: count === 1 ? 'Net Switch needs at least one line.' : 'Net Switch stops using this adapter. You can add it again later.',
-        }),
-      ),
-      h('button', {
-        class: 'button button-quiet button-danger',
-        type: 'button',
-        'data-focus': 'remove',
-        'aria-describedby': 'remove-help',
-        text: 'Remove…',
-        disabled: count === 1,
-        'aria-disabled': busy ? 'true' : null,
-        onclick: () => {
-          if (busyAction) return;
-          confirmingRemove = true;
-          render();
-          els.panel.querySelector('[data-focus="remove-confirm"]')?.focus();
-        },
+
+    if (line.vpn) {
+      sections.push(h('section', { class: 'panel-section' }, buildCapControls(line, busy, 'Count what this line uses.')));
+      if (!lineUp(line) && count > 1) {
+        sections.push(
+          h(
+            'section',
+            { class: 'panel-section' },
+            confirmingRemove
+              ? buildRemoveConfirm(line, index, main, restartNote, busy)
+              : h(
+                  'div',
+                  { class: 'setting' },
+                  h(
+                    'div',
+                    { class: 'setting-text' },
+                    h('span', { class: 'setting-name', text: 'Remove line' }),
+                    h('p', {
+                      class: 'setting-help',
+                      id: 'remove-help',
+                      text: 'Stop keeping this disconnected VPN in Net Switch.',
+                    }),
+                  ),
+                  h('button', {
+                    class: 'button button-quiet button-danger',
+                    type: 'button',
+                    'data-focus': 'remove',
+                    'aria-describedby': 'remove-help',
+                    text: 'Remove…',
+                    'aria-disabled': busy ? 'true' : null,
+                    onclick: () => {
+                      if (busyAction) return;
+                      confirmingRemove = true;
+                      render();
+                      els.panel.querySelector('[data-focus="remove-confirm"]')?.focus();
+                    },
+                  }),
+                ),
+          ),
+        );
+      }
+    } else {
+      sections.push(
+        h(
+          'section',
+          { class: 'panel-section' },
+          confirmingRemove
+            ? buildRemoveConfirm(line, index, main, restartNote, busy)
+            : h(
+                'div',
+                { class: 'setting' },
+                h('p', { class: 'proxy-dns-note', id: 'remove-help', text: 'DNS lookups use this PC’s normal connection.' }),
+                h('button', {
+                  class: 'button button-danger',
+                  type: 'button',
+                  'data-focus': 'remove',
+                  'aria-describedby': 'remove-help',
+                  text: 'Remove',
+                  disabled: count === 1,
+                  'aria-disabled': busy ? 'true' : null,
+                  onclick: () => {
+                    if (busyAction) return;
+                    confirmingRemove = true;
+                    render();
+                    els.panel.querySelector('[data-focus="remove-confirm"]')?.focus();
+                  },
+                }),
+              ),
+        ),
+      );
+    }
+
+    return [panelHead(line.label, where, icon), h('div', { class: 'panel-body' }, panelError(), sections)];
+  }
+
+  const isPrimaryPhys = phys?.id === line.id;
+  sections.push(
+    h(
+      'section',
+      { class: 'panel-section' },
+      line.id === main?.id
+        ? h(
+            'div',
+            { class: 'setting' },
+            h(
+              'div',
+              { class: 'setting-text' },
+              h('span', { class: 'setting-name', text: 'Main line' }),
+              h('p', { class: 'setting-help', text: 'Apps you haven’t put on a line use this one. If it drops, they move to the next line that works.' }),
+            ),
+          )
+        : h(
+            'div',
+            { class: 'setting' },
+            h(
+              'div',
+              { class: 'setting-text' },
+              h('span', { class: 'setting-name', text: 'Main line' }),
+              h('p', {
+                class: 'setting-help',
+                id: 'make-main-help',
+                text: `Apps you haven’t put on a line use ${isVirtualLine(main) ? main.label : `the ${main.label}`} now.${restartNote}`,
+              }),
+            ),
+            h('button', {
+              class: 'button',
+              type: 'button',
+              'data-focus': 'make-main',
+              'aria-describedby': 'make-main-help',
+              text: busyAction === 'line-main' ? 'Changing…' : 'Make main line',
+              'aria-disabled': busy ? 'true' : null,
+              // By id: the panel was built from an earlier reading of the lines.
+              onclick: () =>
+                run('line-main', async () => {
+                  if (main && isVirtualLine(main) && main.onlyChosen === false) {
+                    await api('/api/lines/update', { id: main.id, onlyChosen: true });
+                  }
+                  return api('/api/lines/order', {
+                    ids: [line.id, ...allLines().filter((item) => item.id !== line.id).map((item) => item.id)],
+                  });
+                }),
+            }),
+          ),
+    ),
+  );
+
+  const data = buildCapControls(line, busy, 'It costs data, like a phone plan. Net Switch counts what this line uses.');
+  // Any physical line but the primary one, which carries every unpinned app when no VPN/proxy overrides it.
+  if (!isPrimaryPhys) {
+    data.splice(
+      1,
+      0,
+      switchRow({
+        id: 'line-strict',
+        name: 'Only apps I choose',
+        help: 'Other apps never use it, even when another line drops.',
+        checked: Boolean(line.strict),
+        busy: busyAction === 'line-strict',
+        disabled: busy,
+        onToggle: () => updateLine(line, { strict: !line.strict }, 'line-strict'),
       }),
     );
   }
+  sections.push(h('section', { class: 'panel-section' }, data));
+
+  const remove = confirmingRemove
+    ? buildRemoveConfirm(line, index, main, restartNote, busy)
+    : h(
+        'div',
+        { class: 'setting' },
+        h(
+          'div',
+          { class: 'setting-text' },
+          h('span', { class: 'setting-name', text: 'Remove line' }),
+          h('p', {
+            class: 'setting-help',
+            id: 'remove-help',
+            text: count === 1 ? 'Net Switch needs at least one line.' : 'Net Switch stops using this adapter. You can add it again later.',
+          }),
+        ),
+        h('button', {
+          class: 'button button-quiet button-danger',
+          type: 'button',
+          'data-focus': 'remove',
+          'aria-describedby': 'remove-help',
+          text: 'Remove…',
+          disabled: count === 1,
+          'aria-disabled': busy ? 'true' : null,
+          onclick: () => {
+            if (busyAction) return;
+            confirmingRemove = true;
+            render();
+            els.panel.querySelector('[data-focus="remove-confirm"]')?.focus();
+          },
+        }),
+      );
   sections.push(h('section', { class: 'panel-section' }, remove));
 
   return [panelHead(line.label, where, icon), h('div', { class: 'panel-body' }, panelError(), sections)];
@@ -2425,7 +3258,8 @@ function buildSettingsPanel() {
 function renderPanel() {
   const dialog = els.panel;
   const line = panel?.kind === 'line' ? lineById(panel.id) : null;
-  if (!panel || !state || (panel.kind === 'line' && !line)) {
+  const editProxyLine = panel?.kind === 'proxy-form' && panel.id ? lineById(panel.id) : null;
+  if (!panel || !state || (panel.kind === 'line' && !line) || (panel.kind === 'proxy-form' && panel.id && !editProxyLine)) {
     // The line was removed, or nothing is open.
     panel = null;
     if (dialog.open) dialog.close();
@@ -2441,10 +3275,19 @@ function renderPanel() {
           line.alias,
           line.ssid,
           line.kind,
+          Boolean(line.main),
+          Boolean(line.vpn),
+          line.onlyChosen,
+          line.fallback,
+          line.proxy,
+          lineUp(line),
           line.metered,
           line.strict,
           line.cap,
+          mainLine()?.id,
           mainLine()?.label,
+          primaryPhysLine()?.label,
+          proxyTest?.id === line.id ? proxyTest : null,
           routingOn(),
           busyAction,
           actionError,
@@ -2453,21 +3296,42 @@ function renderPanel() {
           !line.cap && drafts.cap !== null,
           drafts.cap?.period ?? null,
         ])
-      : panel.kind === 'apps'
+      : panel.kind === 'proxy-form'
         ? JSON.stringify([
-            'apps',
-            installed?.length ?? null,
-            installedError,
-            appQuery,
-            pickedApp,
-            allLines().map((item) => [item.id, item.label]),
-            state.apps.filter((app) => app.line).map((app) => [app.path, app.line]),
+            'proxy-form',
+            panel.id,
+            proxyDraft?.protocol,
+            proxyDraft?.carrier,
+            proxyDraft?.auth,
+            proxyDraft?.hadAuth,
+            proxyTest,
+            allLines().map((item) => [item.id, item.label, Boolean(item.proxy)]),
             busyAction,
             actionError,
+            failedAction,
           ])
-        : JSON.stringify(['settings', state.settings, state.updateChecks, state.mode, state.version, state.update?.version ?? null, lastUpdateCheck, busyAction, actionError, failedAction]);
+        : panel.kind === 'apps'
+          ? JSON.stringify([
+              'apps',
+              installed?.length ?? null,
+              installedError,
+              appQuery,
+              pickedApp,
+              allLines().map((item) => [item.id, item.label]),
+              state.apps.filter((app) => app.line).map((app) => [app.path, app.line]),
+              busyAction,
+              actionError,
+            ])
+          : JSON.stringify(['settings', state.settings, state.updateChecks, state.mode, state.version, state.update?.version ?? null, lastUpdateCheck, busyAction, actionError, failedAction]);
   if (dialog.dataset.signature !== signature) {
-    const build = panel.kind === 'line' ? () => buildLinePanel(line) : panel.kind === 'apps' ? buildAppsPanel : buildSettingsPanel;
+    const build =
+      panel.kind === 'line'
+        ? () => buildLinePanel(line)
+        : panel.kind === 'proxy-form'
+          ? buildProxyFormPanel
+          : panel.kind === 'apps'
+            ? buildAppsPanel
+            : buildSettingsPanel;
     rebuildKeepingFocus(dialog, () => [h('div', { class: 'panel' }, ...build())]);
     dialog.dataset.signature = signature;
   }
@@ -2488,6 +3352,8 @@ els.panel.addEventListener('close', () => {
   drafts.label = null;
   drafts.cap = null;
   drafts.probeTargets = null;
+  proxyDraft = null;
+  proxyTest = null;
   appQuery = '';
   pickedApp = null;
   // An error shown in the panel was seen there.
@@ -2540,6 +3406,7 @@ els.toggle.addEventListener('click', toggleRouting);
 els.quit.addEventListener('click', quit);
 els.openSettings.addEventListener('click', openSettingsPanel);
 els.addApp.addEventListener('click', openAppsPanel);
+els.addProxy?.addEventListener('click', () => openProxyForm(null));
 narrowWindow.addEventListener('change', () => {
   if (state) render();
 });

@@ -20,21 +20,24 @@ const (
 
 // FlyoutLine describes one line row inside the tray flyout.
 type FlyoutLine struct {
-	ID      string
-	Name    string
-	Color   int
-	Main    bool
-	Metered bool
-	Health  string
-	Tone    string
-	Healthy bool
-	Detail  string
-	Note    string
-	StandIn string
-	Speed   string
-	Down    float64
-	Lit     int
-	Tip     string
+	ID            string
+	Name          string
+	Color         int
+	Main          bool
+	VPN           bool
+	ProxyProtocol string
+	Blocked       bool
+	Metered       bool
+	Health        string
+	Tone          string
+	Healthy       bool
+	Detail        string
+	Note          string
+	StandIn       string
+	Speed         string
+	Down          float64
+	Lit           int
+	Tip           string
 }
 
 // FlyoutOption describes one routing option for an app in the flyout.
@@ -123,13 +126,20 @@ func FlyoutFromState(state map[string]any) FlyoutView {
 		}
 	}
 
+	hasVirtual := false
 	all := make([]FlyoutLine, 0, len(lines))
 	for i, line := range lines {
+		if flagVal(line, "vpn") || childMap(line, "proxy") != nil {
+			hasVirtual = true
+		}
 		row := buildFlyoutLine(line, i, len(lines), routingOn, names)
 		view.TotalDown += row.Down
 		all = append(all, row)
 	}
 	limit := FlyoutMaxLines
+	if hasVirtual && limit < 4 {
+		limit = 4
+	}
 	if len(all) < limit {
 		limit = len(all)
 	}
@@ -140,13 +150,13 @@ func FlyoutFromState(state map[string]any) FlyoutView {
 	combining := flagVal(combine, "on") && len(lines) > 1
 	active := combining && flagVal(combine, "active")
 	for i, line := range lines {
-		if !flagVal(line, "strict") && !flagVal(line, "exhausted") {
+		if !flagVal(line, "strict") && !flagVal(line, "exhausted") && !flagVal(line, "vpn") && childMap(line, "proxy") == nil {
 			view.SharingColors = append(view.SharingColors, i%PaletteSize)
 		}
 	}
 	view.CombineOn = combining
 	view.CanCombine = combining || len(view.SharingColors) >= 2
-	if len(lines) == 2 {
+	if len(lines) == 2 || (hasVirtual && len(view.SharingColors) == 2) {
 		view.CombineName = "Both lines"
 	} else {
 		view.CombineName = "Combine lines"
@@ -187,6 +197,15 @@ func FlyoutFromState(state map[string]any) FlyoutView {
 		view.Tone = "dim"
 	}
 	computeFlyoutHealth(&view, status, all)
+	if vpnFw := childMap(routing, "vpnFirewall"); flagVal(vpnFw, "steppedOut") {
+		blocker := textVal(vpnFw, "blocker")
+		if blocker == "" {
+			blocker = "VPN"
+		}
+		view.Tone = "warning"
+		view.HealthTone = "warning"
+		view.Health = blocker + " kill switch paused routing"
+	}
 	// Header dot reflects line problems, matching the window's top bar.
 	if status == "on" && view.HealthTone != "ok" {
 		view.Tone = view.HealthTone
@@ -203,7 +222,15 @@ func FlyoutFromState(state map[string]any) FlyoutView {
 	}
 
 	var mainID *string
-	if len(lines) > 0 {
+	for _, line := range lines {
+		if flagVal(line, "main") {
+			if id, ok := hasStringVal(line, "id"); ok {
+				mainID = strPtr(id)
+				break
+			}
+		}
+	}
+	if mainID == nil && len(lines) > 0 {
 		if id, ok := hasStringVal(lines[0], "id"); ok {
 			mainID = strPtr(id)
 		}
@@ -329,7 +356,15 @@ func buildFlyoutLine(line map[string]any, index, count int, routingOn bool, name
 	}
 	id := textVal(line, "id")
 	name := LineLabel(line, index)
+	isVPN := flagVal(line, "vpn")
+	proxyMap := childMap(line, "proxy")
+	proxyProto := strings.ToUpper(textVal(proxyMap, "protocol"))
 	where := joinMidDot(textVal(line, "alias"), textVal(line, "ssid"))
+	if proxyMap != nil {
+		where = textVal(proxyMap, "server")
+	} else if sameAlnumFold(where, name) {
+		where = ""
+	}
 	capObj := childMap(line, "cap")
 	used := numberVal(childMap(line, "usage"), "bytes")
 	metered := flagVal(line, "metered")
@@ -357,19 +392,26 @@ func buildFlyoutLine(line map[string]any, index, count int, routingOn bool, name
 	}
 	detail := joinMidDot(leftDetail, rightDetail)
 
+	isMain := index == 0 && count > 1
+	if v, ok := line["main"].(bool); ok {
+		isMain = v && count > 1
+	}
 	row := FlyoutLine{
-		ID:      id,
-		Name:    name,
-		Color:   index % PaletteSize,
-		Main:    index == 0 && count > 1,
-		Metered: metered,
-		Health:  health,
-		Tone:    tone,
-		Healthy: healthy,
-		Detail:  detail,
-		Speed:   speed,
-		Down:    down,
-		Lit:     lit,
+		ID:            id,
+		Name:          name,
+		Color:         index % PaletteSize,
+		Main:          isMain,
+		VPN:           isVPN,
+		ProxyProtocol: proxyProto,
+		Blocked:       flagVal(line, "blocked"),
+		Metered:       metered,
+		Health:        health,
+		Tone:          tone,
+		Healthy:       healthy,
+		Detail:        detail,
+		Speed:         speed,
+		Down:          down,
+		Lit:           lit,
 	}
 
 	if target, ok := hasStringVal(line, "target"); ok && routingOn && target != id {
@@ -381,6 +423,8 @@ func buildFlyoutLine(line map[string]any, index, count int, routingOn bool, name
 			}
 			row.Note = "Its apps use the " + standIn + suffix
 		}
+	} else if row.Blocked && routingOn && !healthy {
+		row.Note = "Apps on it are blocked"
 	}
 
 	usageWithPeriod := ""
@@ -475,6 +519,17 @@ func computeFlyoutHealth(view *FlyoutView, status string, lines []FlyoutLine) {
 	working := len(lines) - len(problems)
 	if len(problems) == 0 {
 		view.HealthTone = "ok"
+		hasVirtual := false
+		for _, l := range lines {
+			if l.VPN || l.ProxyProtocol != "" {
+				hasVirtual = true
+				break
+			}
+		}
+		if hasVirtual && len(lines) >= 2 {
+			view.Health = fmt.Sprintf("%d lines healthy", len(lines))
+			return
+		}
 		switch len(lines) {
 		case 1:
 			view.Health = lines[0].Name + " reaches the internet"
@@ -495,11 +550,13 @@ func computeFlyoutHealth(view *FlyoutView, status string, lines []FlyoutLine) {
 		line := lines[idx]
 		moved := ""
 		if line.StandIn != "" {
-			if idx == 0 {
+			if line.Main || idx == 0 {
 				moved = " \u00b7 apps use the " + line.StandIn
 			} else {
 				moved = " \u00b7 its apps use the " + line.StandIn
 			}
+		} else if line.Blocked {
+			moved = " \u00b7 apps blocked"
 		}
 		healthWord := strings.TrimRight(LowerFirst(line.Health), "\u2026")
 		view.Health = line.Name + ": " + healthWord + moved
@@ -516,6 +573,21 @@ func computeFlyoutHealth(view *FlyoutView, status string, lines []FlyoutLine) {
 }
 
 func strPtr(s string) *string { return &s }
+
+func sameAlnumFold(a, b string) bool {
+	ca := compactAlnumLower(a)
+	return ca != "" && ca == compactAlnumLower(b)
+}
+
+func compactAlnumLower(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
 
 func firstGraphemeUpper(s string) string {
 	if s == "" {

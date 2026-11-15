@@ -49,6 +49,8 @@
   --icon-setup: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 7h-9'/%3E%3Cpath d='M14 17H5'/%3E%3Ccircle cx='17' cy='17' r='3'/%3E%3Ccircle cx='7' cy='7' r='3'/%3E%3C/svg%3E");
   --icon-info: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 16v-4'/%3E%3Cpath d='M12 8h.01'/%3E%3C/svg%3E");
   --icon-download: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 15V3'/%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3Cpath d='m7 10 5 5 5-5'/%3E%3C/svg%3E");
+  --icon-vpn: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z'/%3E%3C/svg%3E");
+  --icon-proxy: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 3 4 7l4 4'/%3E%3Cpath d='M4 7h16'/%3E%3Cpath d='m16 21 4-4-4-4'/%3E%3Cpath d='M20 17H4'/%3E%3C/svg%3E");
 
   color-scheme: dark;
 }
@@ -198,6 +200,18 @@ a.button {
 .button-quiet[aria-disabled='true']:hover {
   color: var(--ink-3);
   background: transparent;
+}
+
+.button-primary:enabled:not([aria-disabled='true']) {
+  color: var(--bg);
+  background: var(--ink);
+  border-color: var(--ink);
+  font-weight: 600;
+}
+
+.button-primary:enabled:not([aria-disabled='true']):hover {
+  background: #fff;
+  border-color: #fff;
 }
 
 /* Something that can't be taken back in one click, such as removing a line. */
@@ -540,6 +554,14 @@ h1 {
   --icon: var(--icon-network);
 }
 
+.line-icon[data-icon='vpn']::before {
+  --icon: var(--icon-vpn);
+}
+
+.line-icon[data-icon='proxy']::before {
+  --icon: var(--icon-proxy);
+}
+
 .line-icon[data-icon='add']::before {
   --icon: var(--icon-plus);
 }
@@ -598,6 +620,12 @@ h1 {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--ink-2);
+}
+
+.badge-warn {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--rule-strong));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
 }
 
 .health {
@@ -801,6 +829,37 @@ h1 {
   flex: 1 1 260px;
 }
 
+.bus-add-empty {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+}
+
+.bus-add-empty .add-name {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.bus-add-empty .line-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.bus-add-empty .line-icon::before {
+  width: 13px;
+  height: 13px;
+}
+
+.bus-add-empty .button {
+  padding: 4px 12px;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
 /* ------------------------------------------------------------ combining */
 
 /* The row under the line cards. Its cells are a short meter of which lines
@@ -903,6 +962,32 @@ h1 {
 .share[data-off] .share-value {
   font-family: inherit;
   color: var(--ink-3);
+}
+
+.shares-virtual {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.virtual-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+}
+
+.virtual-chip::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--lane);
+  flex-shrink: 0;
 }
 
 .share-track {
@@ -1107,6 +1192,16 @@ h1 {
   color: var(--ink);
 }
 
+.notice p strong {
+  font-weight: 600;
+}
+
+.notice p + p.notice-sub {
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--ink-2);
+}
+
 .notice-actions {
   display: flex;
   gap: 8px;
@@ -1268,12 +1363,34 @@ h1 {
   background: var(--panel-raised);
 }
 
+.app-meta {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.app-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .app-name {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   font-weight: 500;
+}
+
+.app-sub {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  color: var(--ink-3);
 }
 
 /* Apps with no traffic step back so the busy ones stand out. */
@@ -1457,8 +1574,13 @@ h1 {
   border: 0;
   border-radius: 8px;
   cursor: pointer;
+  -webkit-appearance: none;
   appearance: none;
   text-overflow: ellipsis;
+}
+
+.pick select::picker-icon {
+  display: none;
 }
 
 [data-look='shared'].pick select {
@@ -1474,6 +1596,27 @@ h1 {
   font-weight: 400;
   color: var(--ink);
   background: var(--panel-raised);
+}
+
+.pick[data-blocked='true'] {
+  --lane: var(--alert);
+  border-color: color-mix(in srgb, var(--alert) 45%, var(--rule-strong));
+  background: color-mix(in srgb, var(--alert) 9%, var(--panel-raised));
+}
+
+.pick[data-blocked='true'] select,
+.pick[data-blocked='true']::after {
+  color: var(--alert);
+}
+
+.key[data-blocked='true'][aria-pressed='true'] {
+  --lane: var(--alert);
+  color: var(--alert);
+  background: color-mix(in srgb, var(--alert) 12%, var(--pressed));
+}
+
+.pick[data-look='local'] {
+  --lane: var(--ink-2);
 }
 
 .strip-note {
@@ -1786,6 +1929,69 @@ label.setting-name {
   flex-shrink: 0;
 }
 
+/* Add / edit proxy drawer fields and test status. */
+.proxy-host-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 10px;
+}
+
+.proxy-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.proxy-auth-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.proxy-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.proxy-test-status {
+  --tone: var(--ok);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  font: 12px var(--mono);
+  color: var(--ink-2);
+}
+
+.proxy-test-status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--tone);
+  flex-shrink: 0;
+}
+
+.proxy-test-status span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.proxy-test-status[data-tone='down'] {
+  --tone: var(--alert);
+  font-family: inherit;
+  color: var(--alert);
+}
+
+.proxy-dns-note {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
 /* Add an app: the Start menu's apps, each opening a line choice. */
 .apps-section {
   display: flex;
@@ -2004,6 +2210,31 @@ label.setting-name {
 
   .shares {
     margin-left: 0;
+  }
+
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .footer {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .footer-actions {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 480px) {
+  :root {
+    --gutter: 14px;
+    --row-columns: 24px minmax(0, 1fr) 62px 138px;
+  }
+
+  .strip-main {
+    column-gap: 10px;
   }
 }
 
