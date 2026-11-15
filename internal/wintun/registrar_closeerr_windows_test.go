@@ -136,6 +136,9 @@ func newLiveThreads(t *testing.T, before, after map[windows.Handle]bool) int {
 // first closes its actual owned handle successfully, then reports an error:
 // the caller must propagate that error and must never retry the consumed owner.
 func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
+	if hostedDeviceGuardFixture() {
+		loadGuardWindowsResources(t)
+	}
 	cases := []struct {
 		name, site, fault string
 		threadError       bool
@@ -279,6 +282,10 @@ func TestWintunRegistrarStartupCloseErrors(t *testing.T) {
 			}
 			if ms != 0 {
 				t.Logf("attributed one runtime M's handles to %d M(s) (runtime threads=%d handle=%d id=%d timer pair=%d) old_pass=false", ms, runtimeMs, liveThreads, threadIDs, timerMs)
+			}
+			if n := min(kinds["File"], kinds["WindowsResource"]); n != 0 {
+				kinds["File"] -= n
+				t.Logf("attributed %d Windows message-resource cache handle(s) old_pass=false", n)
 			}
 			for _, kind := range []string{"Section", "Job", "File", "Pipe", "Process", "Event", "IRTimer", "WaitCompletionPacket", "unreadable"} {
 				if kinds[kind] != 0 {

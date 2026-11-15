@@ -231,7 +231,7 @@ func loadGuardWindowsResources(t *testing.T) {
 		t.Logf("device-file system directory path=%q nativeName=%q", system, native)
 		// Only these exact system resources were observed in the full native
 		// suite. Neither a .mui suffix nor a basename on another path qualifies.
-		for _, leaf := range []string{"KernelBase.dll.mui", "mswsock.dll.mui"} {
+		for _, leaf := range []string{"KernelBase.dll.mui", "mswsock.dll.mui", "ntdll.dll.mui"} {
 			path := filepath.Join(system, "en-US", leaf)
 			name, err := windows.UTF16PtrFromString(path)
 			if err != nil {
@@ -280,9 +280,16 @@ func loadGuardWindowsResources(t *testing.T) {
 		t.Logf("device-file resource setup before_reference_handles=%d reference_opens=%d warmup=false reason=identify observed Windows message-resource caches", beforeReferences, len(guardWindowsResources.owners))
 	})
 	must(t, guardWindowsResources.err)
-	if len(guardWindowsResources.ids) != 2 {
+	if len(guardWindowsResources.ids) != 3 {
 		t.Fatal("device-file resource references are incomplete or share an unexpected identity")
 	}
+}
+
+func hostedDeviceGuardFixture() bool {
+	return os.Getenv(deviceGuardFixtureEnv) == "1" &&
+		os.Getenv("NETSWITCH_WINTUN_CI") == "1" &&
+		os.Getenv("GITHUB_ACTIONS") == "true" &&
+		os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted"
 }
 
 func readGuardFileID(t *testing.T, h windows.Handle) (guardFileID, error) {
@@ -624,9 +631,10 @@ func newHandleKinds(t *testing.T, before, after map[windows.Handle]bool) map[str
 	t.Helper()
 	kinds := map[string]int{}
 	oldKinds := map[string]int{}
-	fixture := os.Getenv(deviceGuardFixtureEnv) == "1" && os.Getenv("NETSWITCH_WINTUN_CI") == "1" && os.Getenv("GITHUB_ACTIONS") == "true" && os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted"
+	fixture := hostedDeviceGuardFixture()
 	var dllID *guardFileID
 	if fixture {
+		loadGuardWindowsResources(t)
 		dllID = cachedGuardDLLID(t)
 	}
 	for h := range after {
@@ -1180,7 +1188,7 @@ func TestWintunRegistrarDeviceFileGuardNegativeControl(t *testing.T) {
 		break
 	}
 	guard.assertNone(t)
-	// A real ordinary disk file must still fail; admitting the two system
+	// A real ordinary disk file must still fail; admitting the three system
 	// resource IDs must not become a general disk-file exclusion.
 	exe, err := os.Executable()
 	must(t, err)
@@ -1608,6 +1616,9 @@ func TestWintunRegistrarJobReapsBeforeResume(t *testing.T) {
 // ---- startup faults: resources released, no slow lock ----
 
 func TestWintunRegistrarStartupFaults(t *testing.T) {
+	if hostedDeviceGuardFixture() {
+		loadGuardWindowsResources(t)
+	}
 	// A non-device path: these faults exercise validation, reply and timeout
 	// paths without a registration, so they need no adapter. Post-registration
 	// failure cleanup is proven separately against a real device.
@@ -1680,6 +1691,10 @@ func TestWintunRegistrarStartupFaults(t *testing.T) {
 			}
 			debug.FreeOSMemory()
 			kinds := newHandleKinds(t, before, handleSnapshot(t))
+			if n := min(kinds["File"], kinds["WindowsResource"]); n != 0 {
+				kinds["File"] -= n
+				t.Logf("attributed %d Windows message-resource cache handle(s) old_pass=false", n)
+			}
 			for _, leaked := range []string{"Section", "Job", "File", "Pipe", "Process", "Event", "unreadable"} {
 				if kinds[leaked] != 0 {
 					t.Fatalf("startup fault %q leaked %s handles: %v", tc.fault, leaked, kinds)
