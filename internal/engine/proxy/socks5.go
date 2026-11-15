@@ -128,6 +128,9 @@ func openSOCKS5UDP(ctx context.Context, tcpConn platform.TCPConn, udpConn platfo
 	if err != nil {
 		return fail(err)
 	}
+	if rep == 0x07 {
+		return fail(platform.ErrUnsupportedUDP)
+	}
 	if err := classifySOCKS5Rep(rep); err != nil {
 		return fail(err)
 	}

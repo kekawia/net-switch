@@ -88,9 +88,15 @@ type Platform struct {
 	// AddressRemoved gets the line and the address it lost.
 	AddressRemoved func(line string, addr netip.Addr)
 	Fatal          func(error)
+	onVPNFirewall  func(platform.VPNFirewall)
 	WrapTun        func(platform.TunDevice) platform.TunDevice
 	ProbeTLS       *tls.Config
 	ProbeError     func() error
+	fwMu           sync.Mutex
+	fwIndex        int
+	fwPort         uint16
+	fwKey          [32]byte
+	fwStepped      bool
 }
 type bindingSnapshot struct {
 	tunIndex   int
@@ -987,6 +993,8 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 		if err != nil {
 			p.clearBindings()
 		}
+		onFW := p.onVPNFirewall
+		capturing := p.capturing
 		p.routeMu.Unlock()
 		if err != nil {
 			if ctx.Err() == nil && p.Fatal != nil {
@@ -1002,6 +1010,12 @@ func (p *Platform) monitor(ctx context.Context, done chan struct{}) {
 		for _, a := range removed {
 			if p.AddressRemoved != nil {
 				p.AddressRemoved(a.Line, a.Address)
+			}
+		}
+		if capturing && ctx.Err() == nil && onFW != nil {
+			if fw := p.checkLiveVPNFirewall(ctx); fw != nil {
+				onFW(*fw)
+				return
 			}
 		}
 	}
@@ -1081,6 +1095,11 @@ func (p *Platform) Cleanup(ctx context.Context) error {
 		p.lastSlot, p.slotQuiet = 0, [256]time.Time{}
 		p.capturing = false
 		p.allocated = false
+		p.fwMu.Lock()
+		p.fwIndex = 0
+		p.fwPort = 0
+		p.fwStepped = false
+		p.fwMu.Unlock()
 	}
 	return err
 }

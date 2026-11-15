@@ -68,6 +68,9 @@ func (d *Driver) launch(ctx context.Context, env engine.Env) error {
 	const launch = `if [ -f "$1" ]; then mount --bind "$1" /etc/resolv.conf || exit; fi; shift; exec "$@"`
 	p.cmd = exec.Command("nsenter", "--net="+filepath.Join("/run/netns", env.Netns), "--", "unshare", "--mount", "--propagation", "private", "--", "sh", "-c", launch, "nsengine", filepath.Join("/etc/netns", env.Netns, "resolv.conf"), d.exe.Path, "run", "--socket", p.socket, "--state-dir", p.state)
 	p.cmd.Env = append(os.Environ(), "SSL_CERT_FILE="+filepath.Join(filepath.Dir(env.WorkDir), "inet", "probe-ca.pem"))
+	if len(env.ExtraEnv) > 0 {
+		p.cmd.Env = append(p.cmd.Env, env.ExtraEnv...)
+	}
 	if env.CPUs > 0 {
 		var allowed unix.CPUSet
 		if err := unix.SchedGetaffinity(0, &allowed); err != nil {

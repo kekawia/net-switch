@@ -78,6 +78,7 @@ type Env struct {
 	inspectLoad                     bool
 	streamFlows                     map[string]engine.Flow
 	engineCPUs                      int
+	engineExtraEnv                  []string
 }
 
 type caseFunc func(e *Env)
@@ -228,20 +229,31 @@ func (e *Env) Snapshot() topo.Snapshot {
 	return s
 }
 
-// StartEngine starts the engine (stopping the case if it can't) and stops it
-// after the case.
-func (e *Env) StartEngine(cfg engine.Config) {
+// StartEngineErr starts the engine and returns any startup error without
+// immediately failing the case (for example when testing foreign VPN firewall step-aside).
+func (e *Env) StartEngineErr(cfg engine.Config) error {
 	if e.Before == nil {
 		e.Before = e.Snapshot()
 		_ = e.Before.Write(filepath.Join(e.T.Dir(), "state-before.txt"))
 	}
 	e.engCfg = cfg
-	env := engine.Env{Netns: topo.DUT, WorkDir: filepath.Join(e.T.Dir(), "engine"), Logf: e.T.Logf, CPUs: e.engineCPUs}
+	env := engine.Env{Netns: topo.DUT, WorkDir: filepath.Join(e.T.Dir(), "engine"), Logf: e.T.Logf, CPUs: e.engineCPUs, ExtraEnv: e.engineExtraEnv}
 	start := time.Now()
-	if err := e.Eng.Start(e.Ctx(), env, cfg); err != nil {
+	err := e.Eng.Start(e.Ctx(), env, cfg)
+	if err == nil {
+		e.T.Logf("engine started in %s", time.Since(start).Round(time.Millisecond))
+	} else {
+		e.T.Logf("engine start returned in %s: %v", time.Since(start).Round(time.Millisecond), err)
+	}
+	return err
+}
+
+// StartEngine starts the engine (stopping the case if it can't) and stops it
+// after the case.
+func (e *Env) StartEngine(cfg engine.Config) {
+	if err := e.StartEngineErr(cfg); err != nil {
 		e.T.Fatalf("engine didn't start: %v", err)
 	}
-	e.T.Logf("engine started in %s", time.Since(start).Round(time.Millisecond))
 }
 
 // StopEngine stops the engine, recording a failed stop as a check.

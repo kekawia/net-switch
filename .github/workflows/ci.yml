@@ -239,7 +239,7 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.legacy_windows != 'false') }}
     name: Windows acceptance / ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -295,12 +295,21 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -o dist/windows-test/udpreject.exe ./tests/windows/udpreject
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -o dist/windows-test/wgpeer.exe ./tests/windows/wgpeer
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: go
       - uses: ./.github/actions/cache-pinned-archive
         with:
           artifact: wintun
+      - name: Verify dynamic kernel WFP kill-switch detection and step-aside
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
+        env:
+          NETSWITCH_WFP_KILLSWITCH_CI: '1'
+        run: |
+          go test -count=1 -v -run '^TestHostedDynamicWFPKillSwitchStepAside$' ./internal/engine/windows
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Measure cold owner latency at 1950–2100 actual TCP rows
         if: ${{ !cancelled() && steps.native-build.outcome == 'success' }}
         env:
@@ -330,6 +339,34 @@ jobs:
         run: |
           node tests/windows/acceptance.mjs --engine-exe dist/windows-test/netswitch-engine.exe --profile v1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Cache pinned official WireGuard for Windows 1.1.1 MSI
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' && steps.native-dll.outcome == 'success' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: dist/cache/wireguard-${{ matrix.arch == 'ARM64' && 'arm64' || 'amd64' }}-1.1.1.msi
+          key: wireguard-msi-v1-1.1.1-${{ matrix.arch == 'ARM64' && 'arm64-8336335c738d4aff040fa9d11b752da65a80b6f41d3262d6ba5e82f97ebd1bd4' || 'amd64-7bfed60ad61b785c914b38b61555a975488e1d3ec472dbfb2fcdf498fca75242' }}
+      - name: Verify and run official WireGuard 1.1.1 VPN modes and WFP kill-switch matrix
+        if: ${{ !cancelled() && steps.native-build.outcome == 'success' && steps.native-dll.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ProgressPreference = 'SilentlyContinue'
+          . ./scripts/build-common.ps1
+          [IO.Directory]::CreateDirectory("$PWD/dist/cache") | Out-Null
+          $pin = if ('${{ matrix.arch }}' -eq 'ARM64') {
+            [pscustomobject]@{
+              url = 'https://download.wireguard.com/windows-client/wireguard-arm64-1.1.1.msi'
+              sha256 = '8336335c738d4aff040fa9d11b752da65a80b6f41d3262d6ba5e82f97ebd1bd4'
+            }
+          } else {
+            [pscustomobject]@{
+              url = 'https://download.wireguard.com/windows-client/wireguard-amd64-1.1.1.msi'
+              sha256 = '7bfed60ad61b785c914b38b61555a975488e1d3ec472dbfb2fcdf498fca75242'
+            }
+          }
+          Get-Artifact $pin "$PWD/dist/cache" | Out-Null
+          node tests/windows/wireguard.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Keep report, executable identities and traffic evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -339,6 +376,8 @@ jobs:
             dist/windows-acceptance/*.json
             dist/windows-acceptance/testisp/*.json
             dist/windows-acceptance/**/*.log*
+            dist/windows-wireguard/*.json
+            dist/windows-wireguard/*.log*
           retention-days: 14
 
   testisp:

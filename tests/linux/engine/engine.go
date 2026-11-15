@@ -21,6 +21,8 @@ import (
 	"time"
 
 	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
 
 	"github.com/AyoubAchour/net-switch/tests/linux/harness"
 )
@@ -38,6 +40,14 @@ type LineID string
 type Line struct {
 	ID        LineID
 	Interface string
+	VPN       bool
+	Proxy     *platform.ProxyLine
+}
+
+// ProxyCredential holds in-memory auth credentials for an outbound proxy line.
+type ProxyCredential struct {
+	Username string
+	Password string
 }
 
 // App names a program the way Net Switch pins it. Path is where its executable
@@ -93,8 +103,9 @@ type Config struct {
 	Policy Policy
 	// Lanes points a line's lane at another line (failover); a line missing
 	// here points at itself.
-	Lanes   map[LineID]LineID
-	Profile Profile
+	Lanes            map[LineID]LineID
+	Profile          Profile
+	ProxyCredentials map[LineID]ProxyCredential
 }
 
 // Flow is one connection or UDP session as the engine reports it.
@@ -142,6 +153,8 @@ type Env struct {
 	Netns string
 	// WorkDir holds the engine's config, state and log for this case.
 	WorkDir string
+	// ExtraEnv appends or overrides environment variables on the engine process.
+	ExtraEnv []string
 	// Logf goes to the case log.
 	Logf func(format string, args ...any)
 }
@@ -346,6 +359,9 @@ type Stats struct {
 	LookupCount, LookupMisses, LookupAmbiguous uint64
 	LookupTime                                 time.Duration
 	LookupHistogram                            [201]uint64
+	UnsupportedUDP                             uint64
+	UnsupportedUDPInfo                         flows.UnsupportedUDPSummary
+	VPNFirewall                                *platform.VPNFirewall
 	// Counters reports every other counter the engine sent, by name.
 	Counters map[string]uint64
 }
@@ -383,6 +399,9 @@ type Controller interface {
 	Probe(ctx context.Context, opID string, line LineID, request ProbeRequest) (ProbeResult, error)
 	Predict(ctx context.Context, app App) (Prediction, error)
 	Stats(ctx context.Context) (Stats, error)
+	Status(ctx context.Context) (protocol.Status, error)
+	SetProxyCredentials(ctx context.Context, creds map[LineID]ProxyCredential) error
+	TestProxyLine(ctx context.Context, opID string, line platform.ProxyLine, cred ProxyCredential, target string) (platform.ProxyTestResult, error)
 	InjectFault(ctx context.Context, f Fault) (FaultAck, error)
 }
 
@@ -396,6 +415,8 @@ type V1 interface {
 	// makes it the session the Driver methods use from then on: the old
 	// session stops renewing and the new one renews itself.
 	Attach(ctx context.Context) (Controller, error)
+	// ApplyConfig sends the next revision replacing the full Config (including Lines).
+	ApplyConfig(ctx context.Context, cfg Config) error
 	// Session is the session the Driver methods use.
 	Session() Controller
 	// WaitExit waits for the engine process to exit.

@@ -256,6 +256,42 @@ func (s *Session) Stats(ctx context.Context) (engine.Stats, error) {
 	return decodeStats(raw)
 }
 
+// Status implements engine.Controller.
+func (s *Session) Status(ctx context.Context) (protocol.Status, error) {
+	var st protocol.Status
+	if err := s.d.do(ctx, protocol.Request{ID: s.d.id("status"), Method: "status"}, &st); err != nil {
+		return protocol.Status{}, err
+	}
+	return st, nil
+}
+
+// SetProxyCredentials implements engine.Controller.
+func (s *Session) SetProxyCredentials(ctx context.Context, creds map[engine.LineID]engine.ProxyCredential) error {
+	req := s.request("setProxyCredentials")
+	req.Credentials = make(map[string]protocol.ProxyCredential, len(creds))
+	for id, c := range creds {
+		req.Credentials[string(id)] = protocol.ProxyCredential{Username: c.Username, Password: c.Password}
+	}
+	return s.d.do(ctx, req, nil)
+}
+
+// TestProxyLine implements engine.Controller.
+func (s *Session) TestProxyLine(ctx context.Context, opID string, line platform.ProxyLine, cred engine.ProxyCredential, target string) (platform.ProxyTestResult, error) {
+	req := s.request("testProxyLine")
+	req.OpID = opID
+	req.ProxyTest = &protocol.ProxyTestSpec{
+		Line:     line,
+		Username: cred.Username,
+		Password: cred.Password,
+		Target:   target,
+	}
+	var out platform.ProxyTestResult
+	if err := s.d.do(ctx, req, &out); err != nil {
+		return platform.ProxyTestResult{}, err
+	}
+	return out, nil
+}
+
 // InjectFault requires the live engine's acknowledgement. Production binaries
 // reject these commands; the acceptance workflow builds with -tags acceptance.
 func (s *Session) InjectFault(ctx context.Context, f engine.Fault) (engine.FaultAck, error) {
@@ -303,11 +339,21 @@ func wireConfig(cfg engine.Config, lines []platform.Line) policy.Config {
 func (d *Driver) revision(ctx context.Context, n uint64, cfg engine.Config) (policy.Revision, error) {
 	lines := make([]platform.Line, 0, len(cfg.Lines))
 	for _, l := range cfg.Lines {
+		if l.Proxy != nil {
+			cp := *l.Proxy
+			if cp.CredentialsRef == "" {
+				if cred, ok := cfg.ProxyCredentials[l.ID]; ok && (cred.Username != "" || cred.Password != "") {
+					cp.CredentialsRef = string(l.ID)
+				}
+			}
+			lines = append(lines, platform.Line{ID: string(l.ID), Proxy: &cp})
+			continue
+		}
 		addrs, err := d.addresses(ctx, d.env.Netns, l.Interface)
 		if err != nil {
 			return policy.Revision{}, fmt.Errorf("line %s's addresses: %w", l.ID, err)
 		}
-		lines = append(lines, platform.Line{ID: string(l.ID), Interface: l.Interface, Addresses: addrs})
+		lines = append(lines, platform.Line{ID: string(l.ID), Interface: l.Interface, VPN: l.VPN, Addresses: addrs})
 	}
 	c := wireConfig(cfg, lines)
 	return policy.Revision{N: n, Hash: policy.Hash(c), Config: c}, nil
@@ -378,6 +424,17 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 	if err := json.Unmarshal(gauges, &g); err != nil {
 		return engine.Stats{}, fmt.Errorf("stats gauges: %w", err)
 	}
+	var unsupported flows.UnsupportedUDPSummary
+	if rawU, ok := nested["unsupportedUDP"]; ok {
+		_ = json.Unmarshal(rawU, &unsupported)
+	}
+	var vpnFW *platform.VPNFirewall
+	if rawFW, ok := nested["vpnFirewall"]; ok && len(rawFW) > 0 && string(rawFW) != "null" {
+		var parsed platform.VPNFirewall
+		if json.Unmarshal(rawFW, &parsed) == nil {
+			vpnFW = &parsed
+		}
+	}
 	return engine.Stats{
 		RefusedTCP: g.RefusedTCP, RefusedUDP: g.RefusedUDP,
 		PeakUnknown: g.PeakUnknown, PeakUnknownUDP: g.PeakUnknownUDP,
@@ -396,8 +453,11 @@ func decodeStats(raw []byte) (engine.Stats, error) {
 		Admitted:        g.Admitted, Rejected: g.Rejected, DroppedNotices: g.DroppedNotices, TimeWaitSkipped: g.TimeWaitSkipped,
 		EventsDropped: top.EventsDropped + g.EventsDropped,
 		LookupCount:   g.LookupCount, LookupMisses: g.LookupMisses, LookupAmbiguous: g.LookupAmbiguous,
-		LookupTime:      time.Duration(g.LookupNanoseconds),
-		LookupHistogram: g.LookupHistogram,
-		Counters:        counters,
+		LookupTime:         time.Duration(g.LookupNanoseconds),
+		LookupHistogram:    g.LookupHistogram,
+		UnsupportedUDP:     g.UnsupportedUDP,
+		UnsupportedUDPInfo: unsupported,
+		VPNFirewall:        vpnFW,
+		Counters:           counters,
 	}, nil
 }
