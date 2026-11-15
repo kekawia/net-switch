@@ -175,6 +175,20 @@ jobs:
             jq nftables iproute2 flatpak fuse3 squashfs-tools \
             dante-server microsocks squid-openssl wireguard-tools gcc make libc6-dev
           sudo rm -f /usr/sbin/policy-rc.d
+          # Ubuntu 26.04 ships default AppArmor profiles for wg and wg-quick
+          # that omit capability dac_read_search on wg and capability net_admin
+          # plus read access on src_valid_mark in wg-quick//sysctl, breaking
+          # test-only WireGuard tunnel setup inside isolated namespaces.
+          for name in wg wg-quick; do
+            profile="/etc/apparmor.d/$name"
+            if [[ -f "$profile" ]]; then
+              sudo mkdir -p /etc/apparmor.d/disable
+              sudo ln -sf "$profile" /etc/apparmor.d/disable/
+              if [[ -r /sys/kernel/security/apparmor/profiles ]] && sudo grep -Eq "^${name} " /sys/kernel/security/apparmor/profiles; then
+                sudo apparmor_parser -R "$profile"
+              fi
+            fi
+          done
       - name: Read the pinned snap revisions
         id: snaps
         run: |
