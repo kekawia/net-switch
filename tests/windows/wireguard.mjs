@@ -358,6 +358,12 @@ let peerProc = null;
 let peerState = null;
 let activeEngine = null;
 let msiInstalled = false;
+let mainError = null;
+const stateDirs = [
+  path.join(dir, 'state-order-a'),
+  path.join(dir, 'state-killswitch-startup'),
+  path.join(dir, 'state-post-killswitch'),
+];
 
 try {
   await step('verify and install official WireGuard 1.1.1 MSI', async () => {
@@ -674,6 +680,8 @@ try {
       startupFirewall: startupStatus.vpnFirewall,
     };
   });
+} catch (err) {
+  mainError = err;
 } finally {
   const cleanupErrors = [];
   if (activeEngine) {
@@ -701,10 +709,23 @@ try {
     await run('msiexec.exe', ['/x', msiPath, '/qn', '/norestart', '/l*v', msiUninstallLog], { timeout: 120_000 })
       .catch((e) => cleanupErrors.push(e));
   }
-  await engineFirewall(engineExe, false).catch((e) => cleanupErrors.push(e));
+  // Observe the real post-stop WFP and route state FIRST so emergency recovery
+  // never hides a normal-shutdown leak (verification-playbook).
+  let firewallLeftover = false;
+  await engineFirewall(engineExe, false).catch((e) => {
+    firewallLeftover = true;
+    cleanupErrors.push(e);
+  });
   const remainingCapture = await netSwitchCaptureRoutes().catch(() => []);
   if (remainingCapture.length) {
     cleanupErrors.push(new Error(`Leftover NetSwitch capture routes: ${JSON.stringify(remainingCapture)}`));
+  }
+  if (firewallLeftover || remainingCapture.length) {
+    for (const sd of stateDirs) {
+      if (existsSync(sd)) {
+        await run(engineExe, ['cleanup', '--state-dir', sd], { failure: true, timeout: 15_000 }).catch(() => {});
+      }
+    }
   }
   engineLog.end();
   peerLog.end();
@@ -712,8 +733,18 @@ try {
     arch: process.arch,
     msi: WIRE_MSI,
     results,
+    mainError: mainError ? (mainError.stack ?? String(mainError)) : null,
     cleanupErrors: cleanupErrors.map((e) => e.stack ?? String(e)),
   }, null, 2));
+  if (mainError && cleanupErrors.length) {
+    throw new AggregateError(
+      [mainError, ...cleanupErrors],
+      `WireGuard CI failed (${mainError.message}) with ${cleanupErrors.length} cleanup error(s)`,
+    );
+  }
+  if (mainError) {
+    throw mainError;
+  }
   if (cleanupErrors.length) {
     throw new AggregateError(cleanupErrors, 'WireGuard CI cleanup failed');
   }

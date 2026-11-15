@@ -4,6 +4,7 @@ package winengine
 
 import (
 	"context"
+	"maps"
 	"os"
 	"runtime"
 	"testing"
@@ -213,7 +214,57 @@ func TestHostedDynamicWFPKillSwitchStepAside(t *testing.T) {
 		t.Fatalf("second checkLiveVPNFirewall after step-aside = %+v, want nil", again)
 	}
 
-	// 3. Closing the dynamic WFP session removes all dynamic filters and restores normal probing.
+	// 3. Coexistence under BFE sublayer weight normalization: while WireGuard's
+	// dynamic "WireGuard filters" sublayer holds Weight 0xFFFF, creating Net Switch's
+	// persistent wfp-sublayer causes BFE to normalize readback Weight below 65535.
+	// Both live inspection (!recovering) and cleanup removal must accept the owned
+	// sublayer and delete it cleanly without stranding it in BFE.
+	initialFW, err := FirewallState()
+	if err != nil {
+		t.Fatalf("FirewallState() before sublayer coexistence check: %v", err)
+	}
+	if initialFW["sublayer"] == true {
+		t.Fatalf("unexpected pre-existing NetSwitch WFP sublayer before test: %+v", initialFW)
+	}
+	subLayerOwner := "0123456789abcdef0123456789abcdef"
+	subLayerFP := wfpLayerFingerprint(subLayerOwner)
+	wfpObj := &objects{}
+	t.Cleanup(func() {
+		wfpObj.recovering = true
+		_ = removeWFP(wfpObj, "wfp-sublayer", subLayerFP)
+		_ = wfpObj.commitFirewallBatch()
+		_ = wfpObj.closeFirewall()
+	})
+	wfpObj.wfpCreates = 1
+	if err := createWFP(wfpObj, "wfp-sublayer", subLayerFP); err != nil {
+		t.Fatalf("createWFP(wfp-sublayer) alongside 0xFFFF WireGuard sublayer failed: %v", err)
+	}
+	var readbackRow *wfpSubLayer
+	ourSubKey := mustGUID(wfpSubLayerKey)
+	if err := wfpCall("FwpmSubLayerGetByKey0", uintptr(wfpObj.wfp), uintptr(unsafe.Pointer(&ourSubKey)), uintptr(unsafe.Pointer(&readbackRow))); err != nil {
+		t.Fatalf("FwpmSubLayerGetByKey0(wfp-sublayer) failed: %v", err)
+	}
+	readbackWeight := readbackRow.Weight
+	wfpDLL.NewProc("FwpmFreeMemory0").Call(uintptr(unsafe.Pointer(&readbackRow)))
+	t.Logf("BFE readback weight for wfp-sublayer alongside 0xFFFF WireGuard sublayer: %d", readbackWeight)
+	if readbackWeight < wfpMinSubLayerWeight {
+		t.Fatalf("readback weight %d is below wfpMinSubLayerWeight (%d)", readbackWeight, wfpMinSubLayerWeight)
+	}
+	liveFP, foundSub, err := inspectWFP(wfpObj, "wfp-sublayer", subLayerFP)
+	if err != nil || !foundSub || !maps.Equal(liveFP, subLayerFP) {
+		t.Fatalf("inspectWFP(wfp-sublayer) alongside 0xFFFF sublayer = (%v, %v, %v), want (%v, true, nil)", liveFP, foundSub, err, subLayerFP)
+	}
+	if err := removeWFP(wfpObj, "wfp-sublayer", subLayerFP); err != nil {
+		t.Fatalf("removeWFP(wfp-sublayer) failed: %v", err)
+	}
+	if err := wfpObj.commitFirewallBatch(); err != nil {
+		t.Fatalf("commitFirewallBatch(remove wfp-sublayer) failed: %v", err)
+	}
+	if _, stillThere, err := inspectWFP(wfpObj, "wfp-sublayer", subLayerFP); err != nil || stillThere {
+		t.Fatalf("after removeWFP: inspectWFP = (found=%v, err=%v), want (false, nil)", stillThere, err)
+	}
+
+	// 4. Closing the dynamic WFP session removes all dynamic filters and restores normal probing.
 	closeDynamic()
 	if blocker, found, err := inspectForeignVPNKillSwitch(); err != nil || found {
 		t.Fatalf("after dynamic session close: inspectForeignVPNKillSwitch = (%q, %v, %v), want (\"\", false, nil)", blocker, found, err)

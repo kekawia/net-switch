@@ -201,13 +201,13 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/3proxy-src
-          key: 3proxy-src-v1-1.0.3-71acfaf75cdabe6c486aa182eb2ecb8ec731bdb05d52d3f4efe68ecdc1898492
+          key: 3proxy-src-v1-1.0.3-464553674be2b6d4f36c007604fb547df7841a8277f8282a3e3cda88134e0708
       - name: Verify and build pinned 3proxy 1.0.3
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/3proxy-src" "$RUNNER_TEMP/3proxy-build" "$RUNNER_TEMP/3proxy-bin"
           archive="$RUNNER_TEMP/3proxy-src/3proxy-1.0.3.tar.gz"
-          sha256="71acfaf75cdabe6c486aa182eb2ecb8ec731bdb05d52d3f4efe68ecdc1898492"
+          sha256="464553674be2b6d4f36c007604fb547df7841a8277f8282a3e3cda88134e0708"
           if [[ ! -s "$archive" ]]; then
             curl --fail --silent --show-error --location --retry 3 --retry-delay 3 --max-time 120 \
               -o "$archive" "https://github.com/3proxy/3proxy/archive/refs/tags/1.0.3.tar.gz"

@@ -100,3 +100,65 @@ func TestWFPAllowsOnlyOwnedInboundErrorTypes(t *testing.T) {
 		}
 	}
 }
+
+func TestWFPSubLayerOwnershipAndWeightNormalization(t *testing.T) {
+	const owner = "0123456789abcdef0123456789abcdef"
+	fp := wfpLayerFingerprint(owner)
+	display, blob, marker := wfpMetadata(owner)
+	defer func() { _ = marker }()
+
+	makeSubLayer := func(weight uint16) wfpSubLayer {
+		return wfpSubLayer{
+			Key:     mustGUID(wfpSubLayerKey),
+			Display: display,
+			Flags:   1,
+			Data:    blob,
+			Weight:  weight,
+		}
+	}
+
+	// BFE readback weight normalized alongside WireGuard/WinDivert 0xFFFF sublayers
+	// remains owned and valid above wfpMinSubLayerWeight.
+	for _, w := range []uint16{65535, 65534, 65515, wfpMinSubLayerWeight} {
+		row := makeSubLayer(w)
+		if !matchesWFPSubLayer(&row, fp) {
+			t.Fatalf("owned persistent sublayer at weight %d failed ownership check", w)
+		}
+		if row.Weight < wfpMinSubLayerWeight {
+			t.Fatalf("weight %d unexpectedly below minimum %d", row.Weight, wfpMinSubLayerWeight)
+		}
+	}
+
+	// Demoted owned sublayer (< wfpMinSubLayerWeight, e.g. 0x8000 universal tier)
+	// still matches ownership so recovery/cleanup removes it instead of stranding
+	// it in BFE, while live monitoring rejects row.Weight < wfpMinSubLayerWeight.
+	demoted := makeSubLayer(0x8000)
+	if !matchesWFPSubLayer(&demoted, fp) {
+		t.Fatal("demoted owned sublayer must remain owned so cleanup deletes it")
+	}
+	if demoted.Weight >= wfpMinSubLayerWeight {
+		t.Fatalf("0x8000 must be below wfpMinSubLayerWeight (0x%x)", wfpMinSubLayerWeight)
+	}
+
+	nonPersistent := makeSubLayer(65535)
+	nonPersistent.Flags = 0
+	if matchesWFPSubLayer(&nonPersistent, fp) {
+		t.Fatal("non-persistent dynamic sublayer was adopted")
+	}
+
+	providerGUID := mustGUID("{11111111-2222-3333-4444-555555555555}")
+	providerOwned := makeSubLayer(65535)
+	providerOwned.Provider = &providerGUID
+	if matchesWFPSubLayer(&providerOwned, fp) {
+		t.Fatal("provider-associated sublayer was adopted")
+	}
+
+	otherDisplay, otherBlob, otherMarker := wfpMetadata("fedcba9876543210fedcba9876543210")
+	defer func() { _ = otherMarker }()
+	foreignOwner := makeSubLayer(65535)
+	foreignOwner.Display = otherDisplay
+	foreignOwner.Data = otherBlob
+	if matchesWFPSubLayer(&foreignOwner, fp) {
+		t.Fatal("another owner's sublayer was adopted")
+	}
+}

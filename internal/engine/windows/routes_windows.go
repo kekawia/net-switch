@@ -491,7 +491,7 @@ func (r *Routes) monitor(ctx context.Context, done chan struct{}) {
 						break
 					}
 				} else if !maps.Equal(live, permission.Fingerprint) {
-					err = errors.New("owned WFP ICMP permission changed")
+					err = fmt.Errorf("owned WFP ICMP permission changed (%s): expected=%v observed=%v", permission.Kind, permission.Fingerprint, live)
 					break
 				}
 			}
