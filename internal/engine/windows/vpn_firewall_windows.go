@@ -338,6 +338,10 @@ func (r *Routes) CheckVPNFirewall(ctx context.Context, tunIndex int, tunPort uin
 	r.fwStepped = false
 	r.fwMu.Unlock()
 
+	blocker, found, err := inspectForeignVPNKillSwitch()
+	if err != nil || !found {
+		return nil, nil
+	}
 	blocked, err := probeLocalTUN(ctx, tunIndex, tunPort, healthKey, vpnProbeChallengeTimeout)
 	if err != nil {
 		if ctx.Err() != nil {
@@ -348,7 +352,6 @@ func (r *Routes) CheckVPNFirewall(ctx context.Context, tunIndex int, tunPort uin
 	if !blocked {
 		return nil, nil
 	}
-	blocker, _, _ := inspectForeignVPNKillSwitch()
 	if blocker == "" {
 		blocker = "VPN firewall"
 	}
@@ -368,11 +371,14 @@ func (r *Routes) checkLiveVPNFirewall(ctx context.Context) *platform.VPNFirewall
 	if stepped || idx <= 0 || port == 0 {
 		return nil
 	}
+	blocker, found, err := inspectForeignVPNKillSwitch()
+	if err != nil || !found {
+		return nil
+	}
 	blocked, err := probeLocalTUN(ctx, idx, port, key[:], vpnProbeChallengeTimeout)
 	if err != nil || !blocked {
 		return nil
 	}
-	blocker, _, _ := inspectForeignVPNKillSwitch()
 	if blocker == "" {
 		blocker = "VPN firewall"
 	}

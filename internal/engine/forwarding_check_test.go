@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"net/netip"
 	"testing"
 	"time"
@@ -44,5 +45,27 @@ func TestPrivateForwardingChallengeUsesNetstackAndBothPumps(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("private packet did not traverse read pump, netstack and write pump")
+	}
+
+	// Host TCP probes to 198.18.0.2:port must terminate locally inside netstack
+	// without entering the promiscuous WAN TCP forwarder or admitting a flow.
+	synSeg := make([]byte, 20)
+	binary.BigEndian.PutUint16(synSeg[0:2], source.Port())
+	binary.BigEndian.PutUint16(synSeg[2:4], target.Port())
+	binary.BigEndian.PutUint32(synSeg[4:8], 100)
+	synSeg[12], synSeg[13] = 5<<4, 0x02 // data offset 5, SYN
+	binary.BigEndian.PutUint16(synSeg[14:16], 65535)
+	binary.BigEndian.PutUint16(synSeg[16:18], ^packet.Sum(synSeg, packet.Pseudo(source.Addr(), target.Addr(), 6, len(synSeg))))
+	tun.In <- packet.IP(source.Addr(), target.Addr(), 6, synSeg)
+	select {
+	case got := <-tun.Out:
+		if len(got) < 40 || got[9] != 6 || got[33]&0x12 != 0x12 {
+			t.Fatalf("expected local TCP SYN-ACK from private endpoint, got: %x", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("private TCP endpoint did not answer SYN locally")
+	}
+	if snap := e.Table.Stats(); snap.Flows != 0 || snap.Admitted != 0 {
+		t.Fatalf("private TCP probe leaked into flow table: %+v", snap)
 	}
 }

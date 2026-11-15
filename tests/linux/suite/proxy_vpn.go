@@ -94,6 +94,8 @@ func setupPeerNetns(e *Env) netip.Addr {
 	}); err != nil {
 		e.T.Fatalf("configure peer-wan in %s: %v", topo.CTR, err)
 	}
+	nftNat := "table ip wgnat {\n chain post {\n  type nat hook postrouting priority 100; policy accept;\n  oifname \"peer-wan\" masquerade\n }\n}\n"
+	e.T.Require(r.Nft(ctx, topo.CTR, nftNat) == nil, "install peer-wan masquerade in peer netns")
 	return peerPublic4
 }
 
@@ -322,11 +324,11 @@ flush
 
 	_, ctrl := e.v1()
 	badTest, err := ctrl.TestProxyLine(e.Ctx(), "test-3p-bad", socksSpec, engine.ProxyCredential{Username: "nsuser", Password: "wrong"}, To(topo.ProbeTargets["cloudflare"], 443))
-	e.T.Check(err == nil && !badTest.OK && (badTest.ErrorKind == "auth-failed" || badTest.ErrorKind == "proxy-rejected"),
+	e.T.Check(err == nil && !badTest.OK && (badTest.ErrorKind == "auth" || badTest.ErrorKind == "proxy-rejected"),
 		"TestProxyLine rejects wrong 3proxy SOCKS5 password (res=%+v err=%v)", badTest, err)
 	badHTTPTest, err := ctrl.TestProxyLine(e.Ctx(), "test-3p-http-bad", httpSpec, engine.ProxyCredential{Username: "nsuser", Password: "wrong"}, To(topo.ProbeTargets["cloudflare"], 443))
-	e.T.Check(err == nil && !badHTTPTest.OK && badHTTPTest.ErrorKind == "auth-failed",
-		"TestProxyLine rejects wrong 3proxy HTTP password with 407 auth-failed (res=%+v err=%v)", badHTTPTest, err)
+	e.T.Check(err == nil && !badHTTPTest.OK && badHTTPTest.ErrorKind == "auth",
+		"TestProxyLine rejects wrong 3proxy HTTP password with 407 auth (res=%+v err=%v)", badHTTPTest, err)
 	goodHTTPTest, err := ctrl.TestProxyLine(e.Ctx(), "test-3p-http-ok", httpSpec, engine.ProxyCredential{Username: "nsuser", Password: "nspass"}, To(topo.ProbeTargets["cloudflare"], 443))
 	e.T.Check(err == nil && goodHTTPTest.OK, "TestProxyLine accepts valid 3proxy HTTP Basic credentials (res=%+v err=%v)", goodHTTPTest, err)
 
@@ -562,8 +564,6 @@ func setupPeerWGServer(e *Env, wgBin, linkName, cidr string, port int, srvKey wg
 	e.T.Require(err == nil, "configure %s in peer netns (%v)", linkName, err)
 	_, err = r.IP(ctx, topo.CTR, "link", "set", linkName, "up")
 	e.T.Require(err == nil, "bring %s up in peer netns (%v)", linkName, err)
-	nftNat := "table ip wgnat {\n chain post {\n  type nat hook postrouting priority 100; policy accept;\n  oifname \"peer-wan\" masquerade\n }\n}\n"
-	e.T.Require(r.Nft(ctx, topo.CTR, nftNat) == nil, "install peer-wan masquerade in peer netns")
 }
 
 func vpnWgQuickMatrix(e *Env) {
@@ -719,13 +719,13 @@ AllowedIPs = 0.0.0.0/0
 
 	// Verify Third4 (198.51.100.12) bypasses Net Switch TUN and exits wg-split (seen as peerIP),
 	// while Server4 (198.51.100.10) from alpha still exits physical line a!
-	splitPoke := e.UDP("alpha", AsUser, "--to", To(topo.Third4, wire.PortPoke), "--count", "3", "--wait", "2000")
-	// Third4 runs PortPoke rather than PortUDPEcho; let's check inet.Records() saw peerIP -> Third4:7005!
-	_ = splitPoke
-	pokeRecords := Select(e.Records(), func(r inet.Record) bool {
-		return r.Kind == "udp" && strings.HasPrefix(r.Dst, topo.Third4.String()+":") && strings.HasPrefix(r.Src, peerIP.String()+":")
+	splitMark := e.Mark()
+	splitEcho := e.UDP("alpha", AsUser, "--to", To(topo.Third4, wire.PortUDPEcho), "--count", "3", "--wait", "2000")
+	echoRecords := Select(e.Records(), func(r inet.Record) bool {
+		return r.T >= splitMark && r.Kind == "udp" && r.Dst == To(topo.Third4, wire.PortUDPEcho) && strings.HasPrefix(r.Src, peerIP.String()+":")
 	})
-	e.T.Check(len(pokeRecords) >= 1, "unconfigured split-VPN route %s/32 bypasses TUN capture and traverses wg-split (records=%d)", topo.Third4, len(pokeRecords))
+	e.T.Check(splitEcho.Received == 3 && countSeenAddr(splitEcho.Seen, peerIP) == 3 && len(echoRecords) >= 3,
+		"unconfigured split-VPN route %s/32 bypasses TUN capture and traverses wg-split (received=%d seen=%v records=%d)", topo.Third4, splitEcho.Received, splitEcho.Seen, len(echoRecords))
 	e.ExpectTCP("non-split destination Server4 from alpha still uses physical line a", "alpha", AsUser, "a", topo.Server4, 3)
 
 	e.T.Require(e.StopEngine(), "stop engine cleanly at end of wg-quick matrix")

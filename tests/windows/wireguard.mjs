@@ -319,7 +319,7 @@ async function routeMetricsOn(ifIndex, prefix = '0.0.0.0/0') {
 
 async function netSwitchCaptureRoutes() {
   const rows = await pwshJSON(
-    `@(Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -eq 'NetSwitch' -and $_.RouteMetric -eq 0 -and $_.RouteProtocol -eq 'NetMgmt' } | Select-Object DestinationPrefix,RouteMetric) | ConvertTo-Json -Compress`,
+    `@(Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -eq 'NetSwitch' -and $_.RouteMetric -eq 0 -and $_.Protocol -eq 3 } | Select-Object DestinationPrefix,RouteMetric) | ConvertTo-Json -Compress`,
   );
   return Array.isArray(rows) ? rows : (rows ? [rows] : []);
 }
