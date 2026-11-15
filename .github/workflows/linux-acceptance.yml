@@ -165,10 +165,30 @@ jobs:
         with:
           persist-credentials: false
       # squashfs-tools: `snap pack` builds the test snap with it.
+      # policy-rc.d keeps postinst scripts (danted, squid) from starting host daemons.
       - name: Install test tools
         run: |
           sudo apt-get update -q
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends jq nftables iproute2 flatpak fuse3 squashfs-tools
+          printf '#!/bin/sh\nexit 101\n' | sudo install -m 0755 /dev/stdin /usr/sbin/policy-rc.d
+          trap 'sudo rm -f /usr/sbin/policy-rc.d' EXIT
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \
+            jq nftables iproute2 flatpak fuse3 squashfs-tools \
+            dante-server microsocks squid-openssl wireguard-tools gcc make libc6-dev
+          sudo rm -f /usr/sbin/policy-rc.d
+          # Ubuntu 26.04 ships default AppArmor profiles for wg and wg-quick
+          # that omit capability dac_read_search on wg and capability net_admin
+          # plus read access on src_valid_mark in wg-quick//sysctl, breaking
+          # test-only WireGuard tunnel setup inside isolated namespaces.
+          for name in wg wg-quick; do
+            profile="/etc/apparmor.d/$name"
+            if [[ -f "$profile" ]]; then
+              sudo mkdir -p /etc/apparmor.d/disable
+              sudo ln -sf "$profile" /etc/apparmor.d/disable/
+              if [[ -r /sys/kernel/security/apparmor/profiles ]] && sudo grep -Eq "^${name} " /sys/kernel/security/apparmor/profiles; then
+                sudo apparmor_parser -R "$profile"
+              fi
+            fi
+          done
       - name: Read the pinned snap revisions
         id: snaps
         run: |
@@ -191,6 +211,28 @@ jobs:
           mode=verify
           if [[ "$CACHE_HIT" != true ]]; then mode=fetch; fi
           bash tests/linux/snap-inputs.sh "$mode" "$RUNNER_TEMP/snap-inputs"
+      - name: Cache pinned 3proxy source archive
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/3proxy-src
+          key: 3proxy-src-v1-1.0.3-464553674be2b6d4f36c007604fb547df7841a8277f8282a3e3cda88134e0708
+      - name: Verify and build pinned 3proxy 1.0.3
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/3proxy-src" "$RUNNER_TEMP/3proxy-build" "$RUNNER_TEMP/3proxy-bin"
+          archive="$RUNNER_TEMP/3proxy-src/3proxy-1.0.3.tar.gz"
+          sha256="464553674be2b6d4f36c007604fb547df7841a8277f8282a3e3cda88134e0708"
+          if [[ ! -s "$archive" ]]; then
+            curl --fail --silent --show-error --location --retry 3 --retry-delay 3 --max-time 120 \
+              -o "$archive" "https://github.com/3proxy/3proxy/archive/refs/tags/1.0.3.tar.gz"
+          fi
+          printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --strict
+          rm -rf "$RUNNER_TEMP/3proxy-build/3proxy-1.0.3"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/3proxy-build"
+          mkdir -p "$RUNNER_TEMP/3proxy-build/3proxy-1.0.3/bin"
+          CFLAGS=-O2 LDFLAGS=-O2 make -C "$RUNNER_TEMP/3proxy-build/3proxy-1.0.3" -f Makefile.Linux -j2 \
+            PLUGINS="" MAILPROXY=false FTP=false PCRE_CHECK=false PAM_CHECK=false WOLFSSL_CHECK=false OPENSSL_CHECK=false
+          install -m 0755 "$RUNNER_TEMP/3proxy-build/3proxy-1.0.3/bin/3proxy" "$RUNNER_TEMP/3proxy-bin/3proxy"
       - name: Read the pinned Node version
         id: pins
         run: |
@@ -271,6 +313,7 @@ jobs:
           sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-${{ github.run_id }}-${{ strategy.job-index }}" --
           env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
           "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
+          "NSACCEPT_3PROXY_BIN=$RUNNER_TEMP/3proxy-bin/3proxy"
           "NSACCEPT_PROFILE=$PROFILE"
           "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine"
           --build-mode release
@@ -286,6 +329,7 @@ jobs:
           sudo systemd-run --scope --quiet -p Delegate=yes --unit "nsaccept-faults-${{ github.run_id }}-${{ strategy.job-index }}" --
           env "PATH=$PATH" "GITHUB_ACTIONS=$GITHUB_ACTIONS" "RUNNER_ENVIRONMENT=$RUNNER_ENVIRONMENT" "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY"
           "NSACCEPT_SNAP_CACHE=$RUNNER_TEMP/snap-inputs"
+          "NSACCEPT_3PROXY_BIN=$RUNNER_TEMP/3proxy-bin/3proxy"
           "NSACCEPT_PROFILE=$PROFILE"
           "$RUNNER_TEMP/nsaccept" run --engine netswitch-engine --engine-path "$RUNNER_TEMP/netswitch-engine-faults"
           --build-mode faults

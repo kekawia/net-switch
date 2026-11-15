@@ -3,7 +3,9 @@
 package linux
 
 import (
+	"encoding/binary"
 	"net"
+	"net/netip"
 	"testing"
 
 	"github.com/vishvananda/netlink"
@@ -110,5 +112,40 @@ func TestForeignMarkAndSplitTunnelBypassRules(t *testing.T) {
 	splitRules := splitTunnelBypassRules(band, []netlink.Link{wgCorp, wgLine, ownTun}, map[int]bool{10: true}, 11, foreignRoutes, false)
 	if len(splitRules) != 1 || splitRules[0].Dst.String() != "198.51.100.0/24" || splitRules[0].Priority != band.splitBypass {
 		t.Fatalf("unexpected splitTunnelBypassRules: %+v", splitRules)
+	}
+
+	var sa4 [16]byte
+	binary.NativeEndian.PutUint16(sa4[0:2], unix.AF_INET)
+	binary.BigEndian.PutUint16(sa4[2:4], 51820)
+	copy(sa4[4:8], []byte{192, 0, 2, 13})
+	ep4, ok := parseWGPeerEndpoint(sa4[:])
+	if !ok || ep4 != netip.MustParseAddr("192.0.2.13") {
+		t.Fatalf("parseWGPeerEndpoint(v4) = (%v, %v), want 192.0.2.13", ep4, ok)
+	}
+
+	var sa6 [28]byte
+	binary.NativeEndian.PutUint16(sa6[0:2], unix.AF_INET6)
+	binary.BigEndian.PutUint16(sa6[2:4], 51820)
+	ip6 := netip.MustParseAddr("2001:db8::13").As16()
+	copy(sa6[8:24], ip6[:])
+	ep6, ok := parseWGPeerEndpoint(sa6[:])
+	if !ok || ep6 != netip.MustParseAddr("2001:db8::13") {
+		t.Fatalf("parseWGPeerEndpoint(v6) = (%v, %v), want 2001:db8::13", ep6, ok)
+	}
+
+	epRules := unmarkedWireGuardEndpointRules(band, []netip.Addr{
+		ep4,
+		ep4, // duplicate
+		ep6,
+		netip.MustParseAddr("127.0.0.1"),  // loopback -> skipped
+		netip.MustParseAddr("10.0.0.5"),   // covered by RFC1918 bypass -> skipped
+		netip.MustParseAddr("100.64.1.2"), // covered by CGNAT bypass -> skipped
+	}, false)
+	if len(epRules) != 2 || epRules[0].Dst.String() != "192.0.2.13/32" || epRules[1].Dst.String() != "2001:db8::13/128" {
+		t.Fatalf("unexpected unmarkedWireGuardEndpointRules: %+v", epRules)
+	}
+	epRulesV4Only := unmarkedWireGuardEndpointRules(band, []netip.Addr{ep4, ep6}, true)
+	if len(epRulesV4Only) != 1 || epRulesV4Only[0].Dst.String() != "192.0.2.13/32" {
+		t.Fatalf("unexpected unmarkedWireGuardEndpointRules(ipv4Only): %+v", epRulesV4Only)
 	}
 }

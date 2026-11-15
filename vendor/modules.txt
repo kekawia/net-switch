@@ -60,16 +60,20 @@ github.com/vishvananda/netlink/nl
 github.com/vishvananda/netns
 # golang.org/x/crypto v0.57.0
 ## explicit; go 1.26.0
+golang.org/x/crypto/blake2s
 golang.org/x/crypto/chacha20
 golang.org/x/crypto/chacha20poly1305
+golang.org/x/crypto/curve25519
 golang.org/x/crypto/internal/alias
 golang.org/x/crypto/internal/poly1305
+golang.org/x/crypto/poly1305
 # golang.org/x/exp v0.0.0-20250711185948-6ae5c78190dc
 ## explicit; go 1.23.0
 golang.org/x/exp/constraints
 # golang.org/x/net v0.59.0
 ## explicit; go 1.26.0
 golang.org/x/net/bpf
+golang.org/x/net/dns/dnsmessage
 golang.org/x/net/internal/iana
 golang.org/x/net/internal/socket
 golang.org/x/net/ipv4
@@ -93,8 +97,15 @@ golang.zx2c4.com/wintun
 ## explicit; go 1.23.1
 golang.zx2c4.com/wireguard/conn
 golang.zx2c4.com/wireguard/conn/winrio
+golang.zx2c4.com/wireguard/device
+golang.zx2c4.com/wireguard/ipc
+golang.zx2c4.com/wireguard/ipc/namedpipe
+golang.zx2c4.com/wireguard/ratelimiter
+golang.zx2c4.com/wireguard/replay
 golang.zx2c4.com/wireguard/rwcancel
+golang.zx2c4.com/wireguard/tai64n
 golang.zx2c4.com/wireguard/tun
+golang.zx2c4.com/wireguard/tun/netstack
 # gvisor.dev/gvisor v0.0.0-20261017122056-1b7906fdee8c => ./third_party/gvisor
 ## explicit; go 1.27.2
 gvisor.dev/gvisor/pkg/atomicbitops

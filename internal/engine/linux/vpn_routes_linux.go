@@ -3,11 +3,14 @@
 package linux
 
 import (
+	"encoding/binary"
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 
 	"github.com/vishvananda/netlink"
+	"github.com/vishvananda/netlink/nl"
 	"golang.org/x/sys/unix"
 )
 
@@ -415,4 +418,186 @@ func hasAddrFamily(addrs []netip.Addr, v6 bool) bool {
 		}
 	}
 	return false
+}
+
+const (
+	wgGenlName          = "wireguard"
+	wgGenlVersion       = 1
+	wgCmdGetDevice      = 0
+	wgDeviceAttrIfindex = 1
+	wgDeviceAttrFwmark  = 7
+	wgDeviceAttrPeers   = 8
+	wgPeerAttrEndpoint  = 4
+)
+
+func parseWGPeerEndpoint(raw []byte) (netip.Addr, bool) {
+	if len(raw) < 2 {
+		return netip.Addr{}, false
+	}
+	switch binary.NativeEndian.Uint16(raw[:2]) {
+	case unix.AF_INET:
+		if len(raw) < 16 {
+			return netip.Addr{}, false
+		}
+		var b [4]byte
+		copy(b[:], raw[4:8])
+		return netip.AddrFrom4(b), true
+	case unix.AF_INET6:
+		if len(raw) < 28 {
+			return netip.Addr{}, false
+		}
+		var b [16]byte
+		copy(b[:], raw[8:24])
+		return netip.AddrFrom16(b).Unmap(), true
+	default:
+		return netip.Addr{}, false
+	}
+}
+
+func inspectWireGuardDevice(familyID uint16, ifindex int) (fwmark uint32, endpoints []netip.Addr, ok bool) {
+	req := nl.NewNetlinkRequest(int(familyID), unix.NLM_F_REQUEST|unix.NLM_F_DUMP)
+	req.AddData(&nl.Genlmsg{Command: wgCmdGetDevice, Version: wgGenlVersion})
+	req.AddData(nl.NewRtAttr(wgDeviceAttrIfindex, nl.Uint32Attr(uint32(ifindex))))
+	msgs, err := req.Execute(unix.NETLINK_GENERIC, 0)
+	if err != nil || len(msgs) == 0 {
+		return 0, nil, false
+	}
+	defer func() {
+		// WG_CMD_GET_DEVICE includes WGDEVICE_A_PRIVATE_KEY under CAP_NET_ADMIN;
+		// zero raw netlink buffers as soon as fwmark and peer endpoints are read.
+		for _, m := range msgs {
+			clear(m)
+		}
+	}()
+
+	for _, m := range msgs {
+		if len(m) < nl.SizeofGenlmsg {
+			continue
+		}
+		attrs, err := nl.ParseRouteAttr(m[nl.SizeofGenlmsg:])
+		if err != nil {
+			continue
+		}
+		ok = true
+		for _, a := range attrs {
+			switch a.Attr.Type & nlaTypeMask {
+			case wgDeviceAttrFwmark:
+				if len(a.Value) == 4 {
+					fwmark = binary.NativeEndian.Uint32(a.Value)
+				}
+			case wgDeviceAttrPeers:
+				peerList, err := nl.ParseRouteAttr(a.Value)
+				if err != nil {
+					continue
+				}
+				for _, peerEntry := range peerList {
+					peerAttrs, err := nl.ParseRouteAttr(peerEntry.Value)
+					if err != nil {
+						continue
+					}
+					for _, pa := range peerAttrs {
+						if (pa.Attr.Type & nlaTypeMask) == wgPeerAttrEndpoint {
+							if ip, valid := parseWGPeerEndpoint(pa.Value); valid {
+								endpoints = append(endpoints, ip)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return fwmark, endpoints, ok
+}
+
+func unmarkedWireGuardEndpointRules(band ruleBand, endpoints []netip.Addr, ipv4Only bool) []netlink.Rule {
+	seen := make(map[netip.Addr]bool)
+	var out []netlink.Rule
+	for _, ip := range endpoints {
+		ip = ip.Unmap()
+		if !ip.IsValid() || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+			continue
+		}
+		if ipv4Only && ip.Is6() {
+			continue
+		}
+		dst := prefix(netip.PrefixFrom(ip, ip.BitLen()).String())
+		if coveredByBypass(dst) {
+			continue
+		}
+		if seen[ip] {
+			continue
+		}
+		seen[ip] = true
+		fam := unix.AF_INET
+		if ip.Is6() {
+			fam = unix.AF_INET6
+		}
+		br := netlink.NewRule()
+		br.Family = fam
+		br.Priority = band.splitBypass
+		br.Table = unix.RT_TABLE_MAIN
+		br.Dst = dst
+		br.Protocol = routeProtocol
+		br.Type = 1
+		out = append(out, *br)
+	}
+	return out
+}
+
+// wireguardEndpointBypassRules inspects active kernel WireGuard links via
+// read-only Generic Netlink. When a WireGuard link has no fwmark (such as
+// wg-quick Table = off or manual split-tunnel wg setups) or its fwmark has no
+// corresponding ip rule, kernel WireGuard emits unmarked outer UDP packets on
+// iif lo with no userspace socket owner. Bypassing each peer endpoint IP to
+// main at band.splitBypass prevents TUN capture from swallowing the outer UDP.
+func wireguardEndpointBypassRules(band ruleBand, links []netlink.Link, tunIndex int, foreignRules []netlink.Rule, ipv4Only bool) []netlink.Rule {
+	var wgIndices []int
+	for _, link := range links {
+		if link == nil || link.Attrs() == nil {
+			continue
+		}
+		attrs := link.Attrs()
+		if attrs.Index <= 0 || attrs.Index == tunIndex || strings.HasPrefix(attrs.Alias, "netswitch:") {
+			continue
+		}
+		if attrs.Flags&net.FlagUp == 0 || !strings.EqualFold(link.Type(), "wireguard") {
+			continue
+		}
+		wgIndices = append(wgIndices, attrs.Index)
+	}
+	if len(wgIndices) == 0 {
+		return nil
+	}
+
+	fam, err := netlink.GenlFamilyGet(wgGenlName)
+	if err != nil || fam == nil || fam.ID == 0 {
+		return nil
+	}
+
+	markBypassRules := foreignMarkBypassRules(band, []int{unix.AF_INET, unix.AF_INET6}, foreignRules)
+	markCovered := func(fwmark uint32) bool {
+		if fwmark == 0 {
+			return false
+		}
+		for _, r := range markBypassRules {
+			mask := ^uint32(0)
+			if r.Mask != nil {
+				mask = *r.Mask
+			}
+			if (fwmark & mask) == (r.Mark & mask) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var unmarkedEndpoints []netip.Addr
+	for _, idx := range wgIndices {
+		fwmark, eps, ok := inspectWireGuardDevice(fam.ID, idx)
+		if !ok || len(eps) == 0 || markCovered(fwmark) {
+			continue
+		}
+		unmarkedEndpoints = append(unmarkedEndpoints, eps...)
+	}
+	return unmarkedWireGuardEndpointRules(band, unmarkedEndpoints, ipv4Only)
 }

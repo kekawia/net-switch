@@ -100,12 +100,32 @@ func (d *Driver) Start(ctx context.Context, env engine.Env, cfg engine.Config) e
 		return err
 	}
 	d.session = s
+	s.SetAutoRenew(true)
+	if len(cfg.ProxyCredentials) > 0 {
+		if err := s.SetProxyCredentials(ctx, cfg.ProxyCredentials); err != nil {
+			return err
+		}
+	}
 	d.n = 1
 	if _, err := s.Start(ctx, d.n, cfg); err != nil {
 		return err
 	}
-	s.SetAutoRenew(true)
 	return nil
+}
+
+// ApplyConfig implements engine.V1: replaces the full config (including Lines) in the next revision.
+func (d *Driver) ApplyConfig(ctx context.Context, cfg engine.Config) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.session == nil {
+		return notConnected("applyConfig")
+	}
+	if cfg.ProxyCredentials != nil {
+		if err := d.session.SetProxyCredentials(ctx, cfg.ProxyCredentials); err != nil {
+			return err
+		}
+	}
+	return d.next(ctx, cfg)
 }
 
 // Apply implements engine.Driver: the next revision, with the new policy.

@@ -20,10 +20,19 @@ type forwardingInfo struct {
 }
 type forwardingCheck struct {
 	*gonet.UDPConn
-	done chan struct{}
+	tcpLn   *gonet.TCPListener
+	done    chan struct{}
+	tcpDone chan struct{}
 }
 
-func (c *forwardingCheck) Close() { c.UDPConn.Close(); <-c.done }
+func (c *forwardingCheck) Close() {
+	c.UDPConn.Close()
+	<-c.done
+	if c.tcpLn != nil {
+		_ = c.tcpLn.Close()
+		<-c.tcpDone
+	}
+}
 
 func (e *Engine) ForwardingCheck() (int, uint16) {
 	if info := e.healthInfo.Load(); info != nil {
@@ -59,9 +68,27 @@ func (e *Engine) startForwardingCheck() error {
 		return errors.New(err.String())
 	}
 	c := &forwardingCheck{UDPConn: gonet.NewUDPConn(&queue, ep), done: make(chan struct{})}
+	port := uint16(c.LocalAddr().(*net.UDPAddr).Port)
+	tcpLn, tcpErr := gonet.ListenTCP(e.stack, tcpip.FullAddress{NIC: ns.NIC, Addr: addr, Port: port}, header.IPv4ProtocolNumber)
+	if tcpErr != nil {
+		c.UDPConn.Close()
+		return tcpErr
+	}
+	c.tcpLn = tcpLn
+	c.tcpDone = make(chan struct{})
 	key := append([]byte(nil), e.deps.HealthKey...)
 	e.health = c
-	e.healthInfo.Store(&forwardingInfo{indexer.ForwardingIndex(), uint16(c.LocalAddr().(*net.UDPAddr).Port)})
+	e.healthInfo.Store(&forwardingInfo{indexer.ForwardingIndex(), port})
+	go func() {
+		defer close(c.tcpDone)
+		for {
+			conn, err := tcpLn.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
 	go func() {
 		defer close(c.done)
 		var b [41]byte

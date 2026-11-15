@@ -4,6 +4,7 @@ package linux
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -131,7 +132,18 @@ func ServeHosted(parent context.Context, socket, dir string, options host.Option
 		}
 		return tun, err
 	}
-	e := engine.New(forwarding, engine.Dependencies{OpenTun: openTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners, HealthKey: options.HealthKey, ProbeTLS: options.ProbeTLS}, flows.Defaults(), history)
+	healthKey := options.HealthKey
+	if len(healthKey) != 32 {
+		var generated [32]byte
+		if _, err := rand.Read(generated[:]); err != nil {
+			return err
+		}
+		healthKey = generated[:]
+	}
+	e := engine.New(forwarding, engine.Dependencies{OpenTun: openTun, Routes: p, Dialer: p, Owners: p.Owners, Identities: p.Owners, HealthKey: healthKey, ProbeTLS: options.ProbeTLS}, flows.Defaults(), history)
+	p.onVPNFirewall = func(fw platform.VPNFirewall) {
+		go func() { _ = e.StepAsideForVPNFirewall(context.Background(), fw) }()
+	}
 	runtime := serviceRuntime{Engine: e, cancel: cancelForwarding, state: state}
 	srv := protocol.New(runtime, e.Table, e.WrapProber(p))
 	srv.Instance = p.Instance

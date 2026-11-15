@@ -19,6 +19,12 @@ import (
 const wfpSubLayerKey = "{F7B27863-9B62-4815-B4F9-51D4986E0805}"
 const wfpName = "NetSwitch engine ICMP errors"
 
+// Windows BFE normalizes readback FWPM_SUBLAYER0.Weight below 0xFFFF when
+// another sublayer (such as WireGuard's dynamic "WireGuard filters" at 0xFFFF
+// or WinDivert handles) already occupies the top slot. Any weight >= 0xFF00
+// stays far above Windows Defender Firewall's universal sublayer (0x8000).
+const wfpMinSubLayerWeight = 0xFF00
+
 var wfpDLL = windows.NewLazySystemDLL("fwpuclnt.dll")
 var wfpArrival = mustGUID("{618A9B6D-386B-4136-AD6E-B51587CFB1CD}")
 var wfpICMPType = mustGUID("{0C1BA1AF-5765-453F-AF22-A8F791AC775B}")
@@ -255,6 +261,8 @@ func createWFP(o *objects, kind string, fp journal.Fingerprint) (err error) {
 		row := wfpSubLayer{Key: mustGUID(wfpSubLayerKey), Display: display, Flags: 1, Data: blob, Weight: 65535}
 		err := wfpCall("FwpmSubLayerAdd0", uintptr(h), uintptr(unsafe.Pointer(&row)), 0)
 		runtime.KeepAlive(marker)
+		runtime.KeepAlive(display)
+		runtime.KeepAlive(&row)
 		return err
 	}
 	if match, err := interfaceMatches(fp); err != nil || !match {
@@ -311,6 +319,11 @@ func matchesWFPFilter(row *wfpFilter, fp journal.Fingerprint) bool {
 	return seen[wfpArrival] && seen[wfpICMPType]
 }
 
+func matchesWFPSubLayer(row *wfpSubLayer, fp journal.Fingerprint) bool {
+	return row.Key == mustGUID(fp["key"]) && row.Flags == 1 && row.Provider == nil &&
+		matchingWFPMetadata(row.Display, row.Data, fp["owner"])
+}
+
 func inspectWFP(o *objects, kind string, fp journal.Fingerprint) (journal.Fingerprint, bool, error) {
 	h, err := o.firewall()
 	if err != nil {
@@ -327,9 +340,14 @@ func inspectWFP(o *objects, kind string, fp journal.Fingerprint) (journal.Finger
 			return nil, false, err
 		}
 		defer wfpDLL.NewProc("FwpmFreeMemory0").Call(uintptr(unsafe.Pointer(&row)))
-		if row.Key != key || row.Flags != 1 || row.Provider != nil || row.Weight != 65535 ||
-			!matchingWFPMetadata(row.Display, row.Data, fp["owner"]) {
+		if !matchesWFPSubLayer(row, fp) {
 			live["changed"] = "1"
+			live["observedFlags"] = number(uint64(row.Flags))
+			live["observedWeight"] = number(uint64(row.Weight))
+			live["observedProvider"] = fmt.Sprint(row.Provider != nil)
+			live["metadataMatch"] = fmt.Sprint(matchingWFPMetadata(row.Display, row.Data, fp["owner"]))
+		} else if row.Weight < wfpMinSubLayerWeight && !o.recovering {
+			return nil, false, fmt.Errorf("owned WFP sublayer weight %d is below minimum %d", row.Weight, wfpMinSubLayerWeight)
 		}
 	} else {
 		var row *wfpFilter
@@ -342,6 +360,9 @@ func inspectWFP(o *objects, kind string, fp journal.Fingerprint) (journal.Finger
 		defer wfpDLL.NewProc("FwpmFreeMemory0").Call(uintptr(unsafe.Pointer(&row)))
 		if !matchesWFPFilter(row, fp) {
 			live["changed"] = "1"
+			live["observedFlags"] = number(uint64(row.Flags))
+			live["observedSubLayer"] = row.SubLayer.String()
+			live["metadataMatch"] = fmt.Sprint(matchingWFPMetadata(row.Display, row.Data, fp["owner"]))
 		} else if row.Flags&32 != 0 && !o.recovering {
 			return nil, false, errors.New("owned WFP permission is disabled")
 		}
