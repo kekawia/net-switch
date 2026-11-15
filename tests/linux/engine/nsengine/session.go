@@ -259,7 +259,7 @@ func (s *Session) Stats(ctx context.Context) (engine.Stats, error) {
 // Status implements engine.Controller.
 func (s *Session) Status(ctx context.Context) (protocol.Status, error) {
 	var st protocol.Status
-	if err := s.d.do(ctx, protocol.Request{ID: s.d.id("status"), Method: "status"}, &st); err != nil {
+	if err := s.d.do(ctx, s.request("status"), &st); err != nil {
 		return protocol.Status{}, err
 	}
 	return st, nil

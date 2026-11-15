@@ -775,6 +775,11 @@ func (p *Platform) reconcileLocked(ctx context.Context) error {
 			return err
 		}
 	}
+	for _, r := range wireguardEndpointBypassRules(p.band, links, p.tunSpec.Index, foreignRules, p.ipv4Only) {
+		if err := keep("rule", ruleFP(p.objects, r)); err != nil {
+			return err
+		}
+	}
 	// Preserve ordinary link/default-route recovery on every unambiguous
 	// line. A DHCP gap must not become a whole-engine shutdown merely because
 	// a different line is ambiguous. Fail open when ambiguity itself leaves

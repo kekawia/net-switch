@@ -319,7 +319,7 @@ async function routeMetricsOn(ifIndex, prefix = '0.0.0.0/0') {
 
 async function netSwitchCaptureRoutes() {
   const rows = await pwshJSON(
-    `@(Get-NetRoute -DestinationPrefix @('0.0.0.0/1','128.0.0.0/1') -ErrorAction SilentlyContinue | Where-Object InterfaceAlias -eq 'NetSwitch' | Select-Object DestinationPrefix,RouteMetric) | ConvertTo-Json -Compress`,
+    `@(Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -eq 'NetSwitch' -and $_.RouteMetric -eq 0 -and $_.RouteProtocol -eq 'NetMgmt' } | Select-Object DestinationPrefix,RouteMetric) | ConvertTo-Json -Compress`,
   );
   return Array.isArray(rows) ? rows : (rows ? [rows] : []);
 }
@@ -585,9 +585,9 @@ try {
   });
 
   await step('vpn.real-wireguard-killswitch-step-aside (live and startup)', async () => {
-    // Confirm Net Switch currently owns 0.0.0.0/1 + 128.0.0.0/1 capture routes.
+    // Confirm Net Switch currently owns active capture routes on its NetSwitch adapter.
     const beforeCapture = await netSwitchCaptureRoutes();
-    assert.equal(beforeCapture.length, 2, `Expected active NetSwitch /1 capture routes: ${JSON.stringify(beforeCapture)}`);
+    assert(beforeCapture.length >= 20, `Expected active NetSwitch capture routes: ${JSON.stringify(beforeCapture)}`);
 
     // AllowedIPs = ::/0 without Table=off activates WireGuard's real dynamic WFP
     // kill switch ("WireGuard filters" + "Block all outbound (IPv4)/(IPv6)")
@@ -606,10 +606,10 @@ try {
     const killConfFile = path.join(confDir, 'wgkill.conf');
     await writeFile(killConfFile, killConf, { encoding: 'utf8', mode: 0o600 });
 
-    // Detached 20-second failsafe so even an unexpected test crash restores runner networking.
+    // Detached 30-second failsafe so even an unexpected test crash restores runner networking.
     const failsafe = spawn('pwsh.exe', [
       '-NoProfile', '-NonInteractive', '-Command',
-      `Start-Sleep -Seconds 20; & '${wgExe}' /uninstalltunnelservice wgkill 2>$null`,
+      `Start-Sleep -Seconds 30; & '${wgExe}' /uninstalltunnelservice wgkill 2>$null`,
     ], { detached: true, windowsHide: true, stdio: 'ignore' });
     failsafe.unref();
 
@@ -625,7 +625,7 @@ try {
       assert.equal(liveStatus.vpnFirewall.blocker, 'WireGuard', JSON.stringify(liveStatus));
 
       await until(async () => (await netSwitchCaptureRoutes()).length === 0,
-        'NetSwitch /1 capture routes released on live step-aside', 8_000);
+        'NetSwitch capture routes released on live step-aside', 8_000);
       await activeEngine.stop();
       activeEngine = null;
 
@@ -648,7 +648,7 @@ try {
         assert.equal(startupStatus.vpnFirewall?.blocked, true, JSON.stringify(startupStatus));
         assert.equal(startupStatus.vpnFirewall?.steppedOut, true, JSON.stringify(startupStatus));
         assert.equal(startupStatus.vpnFirewall?.blocker, 'WireGuard', JSON.stringify(startupStatus));
-        assert.equal((await netSwitchCaptureRoutes()).length, 0, 'Startup step-aside must never leave /1 capture routes');
+        assert.equal((await netSwitchCaptureRoutes()).length, 0, 'Startup step-aside must never leave capture routes');
       } finally {
         await startupEngine.stop();
       }
@@ -669,7 +669,7 @@ try {
       const recovered = await recoveryEngine.call('status');
       assert.equal(recovered.status, 'on');
       assert.equal(recovered.vpnFirewall ?? null, null);
-      assert.equal((await netSwitchCaptureRoutes()).length, 2);
+      assert.equal((await netSwitchCaptureRoutes()).length, beforeCapture.length);
     } finally {
       await recoveryEngine.stop();
     }

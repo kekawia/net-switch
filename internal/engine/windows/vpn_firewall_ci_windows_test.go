@@ -81,8 +81,11 @@ func TestHostedDynamicWFPKillSwitchStepAside(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	// Baseline: without a foreign kill switch, the UDP challenge to 198.18.0.2:9
-	// hits read deadline (permitted by WFP) and must NOT trigger step-aside.
+	// Baseline: without a foreign kill switch, the local TCP probe to 198.18.0.2:9
+	// is permitted by WFP (hits timeout/refused) and must NOT trigger step-aside.
+	if blocked, err := probeLocalTUN(ctx, probeIndex, 9, key[:], vpnProbeChallengeTimeout); err != nil || blocked {
+		t.Fatalf("baseline probeLocalTUN = (blocked=%v, err=%v), want (false, nil)", blocked, err)
+	}
 	var baseRoutes Routes
 	if fw, err := baseRoutes.CheckVPNFirewall(ctx, probeIndex, 9, key[:]); err != nil || fw != nil {
 		t.Fatalf("baseline CheckVPNFirewall = (%+v, %v), want (nil, nil)", fw, err)
@@ -187,6 +190,9 @@ func TestHostedDynamicWFPKillSwitchStepAside(t *testing.T) {
 	runtime.KeepAlive(blockDesc)
 
 	// 1. Pre-capture CheckVPNFirewall must detect kernel WSAEACCES and name WireGuard.
+	if blocked, err := probeLocalTUN(ctx, probeIndex, 9, key[:], vpnProbeChallengeTimeout); err != nil || !blocked {
+		t.Fatalf("blocked probeLocalTUN = (blocked=%v, err=%v), want (true, nil)", blocked, err)
+	}
 	var r Routes
 	start := time.Now()
 	fw, err := r.CheckVPNFirewall(ctx, probeIndex, 9, key[:])

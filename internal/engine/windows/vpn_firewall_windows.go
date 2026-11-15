@@ -3,15 +3,13 @@
 package winengine
 
 import (
-	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
-	"os"
 	"strings"
-	"sync/atomic"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -41,8 +39,6 @@ const (
 	fwpmFilterFlagDisabled   = 0x0020
 	vpnProbeChallengeTimeout = 25 * time.Millisecond
 )
-
-var vpnProbeSerial atomic.Uint64
 
 type wfpFilterSummary struct {
 	Layer          windows.GUID
@@ -275,78 +271,55 @@ func inspectForeignVPNKillSwitch() (blocker string, found bool, err error) {
 	return bestBlocker, found, nil
 }
 
-// probeLocalTUN sends one authenticated 40-byte UDP challenge bound to tunIndex
-// toward the child netstack's private 198.18.0.2:tunPort responder. No WAN
-// traffic is emitted. Returns blockedByWFP=true only on WSAEACCES (WFP hard
-// block on ALE_AUTH_CONNECT_V4); a read deadline without WSAEACCES means WFP
-// permitted the flow and any forwarding stall belongs to the host watchdog.
-func probeLocalTUN(ctx context.Context, tunIndex int, tunPort uint16, healthKey []byte, timeout time.Duration) (blockedByWFP bool, err error) {
-	sock, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
-	if err != nil {
-		return false, err
-	}
-	defer sock.Close()
+func isWindowsFirewallBlockErr(err error) bool {
+	return errors.Is(err, windows.WSAEACCES) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+}
 
-	raw, err := sock.SyscallConn()
-	if err != nil {
-		return false, err
-	}
+// probeLocalTUN performs a bounded TCP connect check bound to tunIndex toward
+// the child netstack's private 198.18.0.2:tunPort endpoint. On Windows, WFP
+// evaluates FWPM_LAYER_ALE_AUTH_CONNECT_V4 synchronously during TCP ConnectEx
+// before sending any packet and fails inline with WSAEACCES (10013) when a
+// foreign kill switch blocks untunneled egress (whereas UDP datagrams are
+// silently dropped post-WSASend). When WFP permits the flow, child netstack
+// replies immediately with TCP RST (WSAECONNREFUSED) or, if the TUN read pump
+// is stalled, DialContext hits the 25ms timeout without triggering step-aside.
+func probeLocalTUN(ctx context.Context, tunIndex int, tunPort uint16, _ []byte, timeout time.Duration) (blockedByWFP bool, err error) {
 	var bindErr error
-	if err := raw.Control(func(fd uintptr) {
-		var b [4]byte
-		binary.BigEndian.PutUint32(b[:], uint32(tunIndex))
-		bindErr = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, ipUnicastIf, int(binary.LittleEndian.Uint32(b[:])))
-		if bindErr == nil {
-			bindErr = windows.Connect(windows.Handle(fd), &windows.SockaddrInet4{Addr: [4]byte{198, 18, 0, 2}, Port: int(tunPort)})
-		}
-	}); err != nil {
-		return false, err
+	dialer := net.Dialer{
+		Timeout: timeout,
+		Control: func(_, _ string, c syscall.RawConn) error {
+			if err := c.Control(func(fd uintptr) {
+				var b [4]byte
+				binary.BigEndian.PutUint32(b[:], uint32(tunIndex))
+				bindErr = windows.SetsockoptInt(windows.Handle(fd), windows.IPPROTO_IP, ipUnicastIf, int(binary.LittleEndian.Uint32(b[:])))
+			}); err != nil {
+				return err
+			}
+			return bindErr
+		},
+	}
+
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	conn, dialErr := dialer.DialContext(probeCtx, "tcp4", fmt.Sprintf("198.18.0.2:%d", tunPort))
+	if conn != nil {
+		_ = conn.Close()
+	}
+	if dialErr == nil {
+		return false, nil
+	}
+	if isWindowsFirewallBlockErr(dialErr) {
+		return true, nil
 	}
 	if bindErr != nil {
-		if errors.Is(bindErr, windows.WSAEACCES) {
+		if isWindowsFirewallBlockErr(bindErr) {
 			return true, nil
 		}
 		return false, bindErr
 	}
-
-	deadline := time.Now().Add(timeout)
-	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
-		deadline = ctxDeadline
-	}
-	_ = sock.SetDeadline(deadline)
-
-	var req [40]byte
-	copy(req[:32], healthKey[:32])
-	seq := vpnProbeSerial.Add(1)
-	binary.BigEndian.PutUint64(req[32:], seq)
-
-	if _, err := sock.Write(req[:]); err != nil {
-		if errors.Is(err, windows.WSAEACCES) {
-			return true, nil
-		}
-		if errors.Is(err, os.ErrDeadlineExceeded) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	// Drain the echo briefly so 198.18.0.1 does not emit ICMP port-unreachable
-	// when the socket closes; a timeout here is NOT a WFP block.
-	var resp [41]byte
-	for range 4 {
-		n, _, err := sock.ReadFrom(resp[:])
-		if err != nil {
-			if errors.Is(err, windows.WSAEACCES) {
-				return true, nil
-			}
-			if errors.Is(err, os.ErrDeadlineExceeded) {
-				return false, nil
-			}
-			return false, err
-		}
-		if n == 40 && bytes.Equal(resp[:40], req[:]) {
-			return false, nil
-		}
+	if ctx.Err() != nil {
+		return false, ctx.Err()
 	}
 	return false, nil
 }

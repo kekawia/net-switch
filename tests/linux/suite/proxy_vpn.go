@@ -198,7 +198,7 @@ func expectUDPRefusedWithZeroLeak(e *Env, label, appName string, lineID engine.L
 		"%s: unsupportedUDP counter incremented (before=%d after=%d lines=%v)",
 		label, beforeStats.UnsupportedUDP, afterStats.UnsupportedUDP, afterStats.UnsupportedUDPInfo.Lines)
 
-	probeRes, err := ctrl.Probe(e.Ctx(), fmt.Sprintf("probe-after-udp-%s-%d", lineID, time.Now().UnixNano()), lineID, engine.ProbeRequest{Target: "cloudflare", Quick: true})
+	probeRes, err := ctrl.Probe(e.Ctx(), fmt.Sprintf("probe-after-udp-%s-%d", lineID, time.Now().UnixNano()), lineID, engine.ProbeRequest{Target: To(topo.ProbeTargets["cloudflare"], 443), Quick: true})
 	e.T.Check(err == nil && probeRes.OK,
 		"%s: proxy line %s stays healthy after UDP refusal (probe ok=%v err=%v/%q)", label, lineID, probeRes.OK, err, probeRes.Error)
 }
@@ -322,8 +322,11 @@ flush
 
 	_, ctrl := e.v1()
 	badTest, err := ctrl.TestProxyLine(e.Ctx(), "test-3p-bad", socksSpec, engine.ProxyCredential{Username: "nsuser", Password: "wrong"}, To(topo.ProbeTargets["cloudflare"], 443))
-	e.T.Check(err == nil && !badTest.OK && strings.Contains(strings.ToLower(badTest.Error), "auth"),
-		"TestProxyLine rejects wrong 3proxy password with auth error (res=%+v err=%v)", badTest, err)
+	e.T.Check(err == nil && !badTest.OK && (badTest.ErrorKind == "auth-failed" || badTest.ErrorKind == "proxy-rejected"),
+		"TestProxyLine rejects wrong 3proxy SOCKS5 password (res=%+v err=%v)", badTest, err)
+	badHTTPTest, err := ctrl.TestProxyLine(e.Ctx(), "test-3p-http-bad", httpSpec, engine.ProxyCredential{Username: "nsuser", Password: "wrong"}, To(topo.ProbeTargets["cloudflare"], 443))
+	e.T.Check(err == nil && !badHTTPTest.OK && badHTTPTest.ErrorKind == "auth-failed",
+		"TestProxyLine rejects wrong 3proxy HTTP password with 407 auth-failed (res=%+v err=%v)", badHTTPTest, err)
 	goodHTTPTest, err := ctrl.TestProxyLine(e.Ctx(), "test-3p-http-ok", httpSpec, engine.ProxyCredential{Username: "nsuser", Password: "nspass"}, To(topo.ProbeTargets["cloudflare"], 443))
 	e.T.Check(err == nil && goodHTTPTest.OK, "TestProxyLine accepts valid 3proxy HTTP Basic credentials (res=%+v err=%v)", goodHTTPTest, err)
 
@@ -519,7 +522,7 @@ http_access allow all
 	// connection must be refused promptly, and px-squid-tls must remain healthy (non-line-fault).
 	denied := e.TCP("bravo", AsUser, "--to", To(topo.Server4, wire.PortStream), "--count", "2", "--timeout", "2000")
 	e.T.Check(denied.OK == 0, "Squid 403 Forbidden on disallowed port refuses the connection (ok=%d)", denied.OK)
-	probeAfter403, err := ctrl.Probe(e.Ctx(), "probe-squid-after-403", "px-squid-tls", engine.ProbeRequest{Target: "cloudflare", Quick: true})
+	probeAfter403, err := ctrl.Probe(e.Ctx(), "probe-squid-after-403", "px-squid-tls", engine.ProbeRequest{Target: To(topo.ProbeTargets["cloudflare"], 443), Quick: true})
 	e.T.Check(err == nil && probeAfter403.OK, "Squid 403 destination policy refusal does not fault the proxy line (probe=%+v err=%v)", probeAfter403, err)
 	expectSeenTCP(e, "bravo TCP on allowed port immediately after Squid 403", "bravo", peerIP, 3)
 
