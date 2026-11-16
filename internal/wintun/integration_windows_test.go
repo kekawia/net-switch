@@ -847,6 +847,11 @@ func warmRuntimeThreads() {
 	runtime.LockOSThread()
 	time.Sleep(15 * time.Millisecond)
 	runtime.UnlockOSThread()
+	// FormatMessage loads KernelBase.dll.mui and ntdll.dll.mui lazily on the
+	// first Win32 and NTSTATUS error strings and retains their File handles for
+	// process life (nightly job 132684603830).
+	_ = windows.ERROR_INVALID_HANDLE.Error()
+	_ = windows.STATUS_INVALID_HANDLE.Error()
 }
 
 func TestWintunLifetime(t *testing.T) {

@@ -209,18 +209,33 @@ func TestRingWarmRuntimeThreadsOpensLazyEvents(t *testing.T) {
 		warmRuntimeThreads()
 		before := handleSnapshot(t)
 		time.Sleep(15 * time.Millisecond)
+		// Formatting Win32 and NTSTATUS errors invokes FormatMessage, which loads
+		// KernelBase.dll.mui and ntdll.dll.mui on first call and retains their File
+		// handles for process life (nightly job 132684603830).
+		_ = windows.ERROR_INVALID_HANDLE.Error()
+		_ = windows.STATUS_INVALID_HANDLE.Error()
 		after := handleSnapshot(t)
-		var newEvents []windows.Handle
+		var newEvents, newFiles []windows.Handle
 		for h := range after {
 			if before[h] {
 				continue
 			}
-			if kind, err := objectType(h); err == nil && kind == "Event" {
+			kind, err := objectType(h)
+			if err != nil {
+				continue
+			}
+			switch kind {
+			case "Event":
 				newEvents = append(newEvents, h)
+			case "File":
+				newFiles = append(newFiles, h)
 			}
 		}
 		if len(newEvents) != 0 {
 			t.Fatalf("runtime opened %d lazy Event handle(s) (%v) after warmRuntimeThreads", len(newEvents), newEvents)
+		}
+		if len(newFiles) != 0 {
+			t.Fatalf("message formatting opened %d lazy File handle(s) (%v) after warmRuntimeThreads", len(newFiles), newFiles)
 		}
 		return
 	}
@@ -233,7 +248,7 @@ func TestRingWarmRuntimeThreadsOpensLazyEvents(t *testing.T) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("fresh child saw lazy Event allocation after warmRuntimeThreads: %v\n%s", err, output)
+		t.Fatalf("fresh child saw lazy Event or message-resource File allocation after warmRuntimeThreads: %v\n%s", err, output)
 	}
 }
 
