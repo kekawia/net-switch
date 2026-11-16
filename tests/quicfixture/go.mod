@@ -1,6 +1,6 @@
 // The acceptance suites' QUIC fixture, in its own module so QUIC stays out of
 // Net Switch's dependencies: the product's go.mod and vendor/ never see it.
-module github.com/AyoubAchour/net-switch/tests/quicfixture
+module github.com/kekawia/net-switch/tests/quicfixture
 
 go 1.27.4
 

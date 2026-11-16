@@ -3,7 +3,7 @@ package apps
 import (
 	"bytes"
 	"encoding/json"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 // Set replaces an existing property in place, just like assigning a JS key.

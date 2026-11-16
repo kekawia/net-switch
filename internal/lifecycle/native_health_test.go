@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/supervisor"
+	"github.com/kekawia/net-switch/internal/engine/supervisor"
 )
 
 func TestNativeHealthLifecycleDeadlines(t *testing.T) {

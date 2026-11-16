@@ -9,7 +9,7 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 )
 
 type UDPReplyResult struct {

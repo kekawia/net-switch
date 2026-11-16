@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/app"
-	"github.com/AyoubAchour/net-switch/tests/linux/engine"
+	"github.com/kekawia/net-switch/tests/linux/app"
+	"github.com/kekawia/net-switch/tests/linux/engine"
 )
 
 // sweepOf builds an app's sweep result: every socket answered from its held

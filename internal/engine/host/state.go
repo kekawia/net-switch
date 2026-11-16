@@ -7,8 +7,8 @@ import (
 	"os"
 	"sync"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
-	"github.com/AyoubAchour/net-switch/internal/sharedfile"
+	"github.com/kekawia/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/sharedfile"
 )
 
 // Record is historical state, never a loaded policy. A point is meaningful only

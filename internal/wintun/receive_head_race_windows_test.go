@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/packet"
+	"github.com/kekawia/net-switch/internal/engine/packet"
 )
 
 // Hosted evidence for the Receive.Head race in the signed 0.14.1 driver (see

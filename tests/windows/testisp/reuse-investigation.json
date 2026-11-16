@@ -4,9 +4,9 @@
   "fixed": true,
   "fix": "PR #35 replaces Wintun 0.14.1's userspace session with our own internal/wintun session and wake-up handling. The signed 0.14.1 driver is unchanged; no deadline was relaxed, failed round retried, or wake-up traffic added.",
   "postFix": {
-    "pullRequest": "https://github.com/AyoubAchour/net-switch/pull/35",
+    "pullRequest": "https://github.com/kekawia/net-switch/pull/35",
     "run": 39307764131,
-    "url": "https://github.com/AyoubAchour/net-switch/actions/runs/39307764131",
+    "url": "https://github.com/kekawia/net-switch/actions/runs/39307764131",
     "totals": [
       { "architecture": "x64", "attempts": 100000, "atLeast100ms": 0, "nonClosed": 0 },
       { "architecture": "arm64", "attempts": 100000, "atLeast100ms": 0, "nonClosed": 0 }
@@ -26,7 +26,7 @@
       "id": 39253385682,
       "stage": "Before PR #33",
       "commit": "3ed892dc54f948d31b109b3c147f5b577a23e87b",
-      "url": "https://github.com/AyoubAchour/net-switch/actions/runs/39253385682",
+      "url": "https://github.com/kekawia/net-switch/actions/runs/39253385682",
       "totals": [
         {
           "architecture": "x64",
@@ -232,7 +232,7 @@
       "id": 39254207549,
       "stage": "After merging PR #33 and regenerating vendor",
       "commit": "3e9a172f6312733318eae526e4929ecbe8194a37",
-      "url": "https://github.com/AyoubAchour/net-switch/actions/runs/39254207549",
+      "url": "https://github.com/kekawia/net-switch/actions/runs/39254207549",
       "totals": [
         {
           "architecture": "x64",
@@ -438,7 +438,7 @@
       "id": 39255636353,
       "stage": "Post-#33 Windows Packet Monitor capture",
       "commit": "9dff27856d432b2300aa7115706b4332fbf857ab",
-      "url": "https://github.com/AyoubAchour/net-switch/actions/runs/39255636353",
+      "url": "https://github.com/kekawia/net-switch/actions/runs/39255636353",
       "totals": [
         {
           "architecture": "x64",

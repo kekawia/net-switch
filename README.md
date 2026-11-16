@@ -45,7 +45,7 @@ two, or as many as you have.
 ## Download
 
 Get the installer for your PC from the
-[latest release](https://github.com/AyoubAchour/net-switch/releases/latest):
+[latest release](https://github.com/kekawia/net-switch/releases/latest):
 
 - **Intel or AMD, Windows 10 or 11:** `NetSwitch-Setup-<version>-x64.exe`.
 - **ARM64, Windows 11:** `NetSwitch-Setup-<version>-arm64.exe`.
@@ -59,8 +59,8 @@ first, each release lists its SHA-256 hashes in `SHA256SUMS.txt`, and you can
 verify it was built from this repository by GitHub Actions:
 
 ```
-gh attestation verify NetSwitch-Setup-<version>-x64.exe -R AyoubAchour/net-switch
-gh attestation verify NetSwitch-Setup-<version>-arm64.exe -R AyoubAchour/net-switch
+gh attestation verify NetSwitch-Setup-<version>-x64.exe -R kekawia/net-switch
+gh attestation verify NetSwitch-Setup-<version>-arm64.exe -R kekawia/net-switch
 ```
 
 ## Before you install
@@ -85,7 +85,7 @@ gh attestation verify NetSwitch-Setup-<version>-arm64.exe -R AyoubAchour/net-swi
 - **It's young.** It's been used daily on Windows 11 with an Ethernet cable and
   a USB Wi-Fi adapter. Other setups (Windows 10, VPN software, phone
   tethering, non-English Windows) should work but haven't been tested much.
-  [Bug reports](https://github.com/AyoubAchour/net-switch/issues) are welcome.
+  [Bug reports](https://github.com/kekawia/net-switch/issues) are welcome.
 
 ## First run
 
@@ -120,8 +120,14 @@ When a newer version is out, Net Switch says so in its window (and in the tray
 icon's right-click menu). Press **Download**, then run the installer: it closes
 Net Switch, updates it in place and keeps your settings, including your lines
 from older versions. You can also just download the latest installer from the
-[releases page](https://github.com/AyoubAchour/net-switch/releases/latest) and
+[releases page](https://github.com/kekawia/net-switch/releases/latest) and
 run it over your current copy.
+
+> **Updating from 0.3.x:** Because the GitHub repository moved to
+> `kekawia/net-switch`, copies up to 0.3.1 won't show later releases on their
+> own. Download the latest installer once from the
+> [releases page](https://github.com/kekawia/net-switch/releases/latest) and run
+> it over your existing copy — your lines, app rules and usage carry over.
 
 Net Switch asks GitHub about new versions twice a day; turn that off with
 **Check for updates** in its settings, or press **Check now** there to look

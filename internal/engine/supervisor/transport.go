@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
 )
 
 const Connections = 4

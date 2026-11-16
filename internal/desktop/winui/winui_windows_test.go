@@ -20,7 +20,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/desktop"
+	"github.com/kekawia/net-switch/internal/desktop"
 )
 
 func TestNotifyIconDataSize64(t *testing.T) {

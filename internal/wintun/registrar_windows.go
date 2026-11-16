@@ -16,9 +16,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/platform/winchild"
-	"github.com/AyoubAchour/net-switch/internal/winclock"
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	"github.com/kekawia/net-switch/internal/platform/winchild"
+	"github.com/kekawia/net-switch/internal/winclock"
+	"github.com/kekawia/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 

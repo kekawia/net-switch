@@ -5,8 +5,8 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/packet"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/packet"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 func same(a, b platform.Owner) bool {

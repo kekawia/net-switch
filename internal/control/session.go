@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 // PublishSession retains launch.ps1 and the C# tray's token handoff. It is a

@@ -30,7 +30,7 @@ import (
 const (
 	productionEngineEnv       = "NETSWITCH_WINTUN_PRODUCTION_ENGINE"
 	productionEngineSHA256Env = "NETSWITCH_WINTUN_PRODUCTION_ENGINE_SHA256"
-	productionEngineModule    = "github.com/AyoubAchour/net-switch/cmd/netswitch-engine"
+	productionEngineModule    = "github.com/kekawia/net-switch/cmd/netswitch-engine"
 	memPrivate                = 0x20000   // MEMORY_BASIC_INFORMATION.Type for private memory
 	memImage                  = 0x1000000 // MEMORY_BASIC_INFORMATION.Type for a mapped image
 	objInherit                = 0x2       // HandleAttributes bit for an inheritable handle

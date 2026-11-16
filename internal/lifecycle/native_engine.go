@@ -9,11 +9,11 @@ import (
 	"runtime"
 	"sync"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/host"
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
-	"github.com/AyoubAchour/net-switch/internal/faultpoint"
-	"github.com/AyoubAchour/net-switch/internal/service"
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/engine/host"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/faultpoint"
+	"github.com/kekawia/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 func runNativeChild(ctx context.Context, ready func(), c Config, log func(string), configure func(*host.Options)) error {

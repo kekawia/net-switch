@@ -14,8 +14,8 @@ import (
 	"strings"
 	"unsafe"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/windowsundo"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/windowsundo"
 	"golang.org/x/sys/windows"
 )
 

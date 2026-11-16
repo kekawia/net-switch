@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/replayledger"
+	"github.com/kekawia/net-switch/internal/replayledger"
 )
 
 const revisionFileProof = "ordered rule-file projection of acknowledged native revision"

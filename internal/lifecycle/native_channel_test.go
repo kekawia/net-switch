@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/supervisor"
+	"github.com/kekawia/net-switch/internal/engine/supervisor"
 )
 
 func TestNativeSupervisorDrainsCompletionAndFencesLateState(t *testing.T) {

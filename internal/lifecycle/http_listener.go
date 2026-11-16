@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/localipc"
 )
 
 type httpPeerKey struct{}

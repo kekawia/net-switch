@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/inet"
+	"github.com/kekawia/net-switch/tests/linux/inet"
 )
 
 func linuxNativeProbe(t *testing.T, data, inetDir string) nativeProbeFixture {

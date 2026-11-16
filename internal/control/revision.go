@@ -9,9 +9,9 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/AyoubAchour/net-switch/internal/control/engine"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/control/engine"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 type closureIntent struct {

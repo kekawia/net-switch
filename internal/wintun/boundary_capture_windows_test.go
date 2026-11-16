@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
+	ns "github.com/kekawia/net-switch/internal/engine/stack"
 	"gvisor.dev/gvisor/pkg/buffer"
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 )

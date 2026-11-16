@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/localipc"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 // fakeDesktopControl answers the desktop's requests over an in-memory pipe.

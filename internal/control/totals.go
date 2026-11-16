@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/usage"
+	"github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/usage"
 )
 
 // totalsEvery is how often Control reads the engine's exact accounting.

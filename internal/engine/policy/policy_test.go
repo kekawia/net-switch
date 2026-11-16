@@ -3,7 +3,7 @@ package policy
 import (
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 func config() Config {

@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/localipc"
 	"golang.org/x/sys/windows"
 )
 

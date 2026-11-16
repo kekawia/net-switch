@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 // TraySettings stores per-user desktop tray preferences.

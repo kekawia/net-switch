@@ -13,7 +13,7 @@ import (
 
 // The pass gate needs the module prefix to bind a source-relative mapping to
 // an exact go test package, rather than accepting a same-named foreign package.
-const Module = "github.com/AyoubAchour/net-switch"
+const Module = "github.com/kekawia/net-switch"
 
 type TestEvent struct {
 	Action     string

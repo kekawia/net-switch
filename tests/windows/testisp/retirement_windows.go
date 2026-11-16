@@ -11,7 +11,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	"github.com/kekawia/net-switch/internal/wintun"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )

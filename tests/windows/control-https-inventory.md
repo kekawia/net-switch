@@ -57,7 +57,7 @@ retried or counted as a pass.
 | TestISP proof: pause/drop, route withdrawal, direct-only firewall block, unaffected path and recovery | Same | **Can move the fault assertions local**, after keeping the public baseline on both paths. A replacement must still depend on the selected interface's default route; a local host route would invalidate withdrawal coverage. |
 | Product background health while Node Control/acceptance runs | `https://1.1.1.1/cdn-cgi/trace`, `https://8.8.8.8/`; native quick checks use their port 443 | **Keep for real internet health/failover coverage.** They are product behavior, not one-shot test requests. This PR does not change frozen Node code or suppress its probes. |
 | Product background health while Go Control runs | `1.1.1.1:443`, `8.8.8.8:443`, `9.9.9.9:443` (quick TCP and full HTTPS checks) | **Keep for operator/health coverage.** A local fixture could isolate unrelated traffic tests later, but would not prove external operator reachability. |
-| CI/release installer smoke: the installed app's background update timer | `https://api.github.com/repos/AyoubAchour/net-switch/releases/latest` | **Can isolate locally or disable in the test setup.** The smoke script starts the real installed app with default settings, so a long-lived instance can check releases; no installer assertion requires a real release response. The installer itself is unchanged here. |
+| CI/release installer smoke: the installed app's background update timer | `https://api.github.com/repos/kekawia/net-switch/releases/latest` | **Can isolate locally or disable in the test setup.** The smoke script starts the real installed app with default settings, so a long-lived instance can check releases; no installer assertion requires a real release response. The installer itself is unchanged here. |
 
 Every retained public dependency in that follow-up needs a distinct
 `public target unavailable` classification only for HTTP 5xx received over a
@@ -116,7 +116,7 @@ Product health traffic is untouched. The installer smoke test leaves the first
 start fresh, then turns the existing update preference off through the app's
 own settings API before its first check can fire, and checks it stays off.
 
-The [default-route proof dispatch](https://github.com/AyoubAchour/net-switch/actions/runs/39508044986)
+The [default-route proof dispatch](https://github.com/kekawia/net-switch/actions/runs/39508044986)
 passed on x64 (job 118921850928) and ARM64 (118921850646). For each local TLS
 destination, the counter was 0 before, 1 after the working request, still 1
 during withdrawal, and 2 after recovery. Withdrawal returned an unreachable
@@ -125,7 +125,7 @@ and observed-orphan recovery also passed. That early run used a local relay in
 the direct-firewall case; it does not prove the gateway's real-uplink isolation.
 Review restored the public relay for that case, which final-head CI rechecks.
 
-The [temporary diagnostics dispatch](https://github.com/AyoubAchour/net-switch/actions/runs/39508070773)
+The [temporary diagnostics dispatch](https://github.com/kekawia/net-switch/actions/runs/39508070773)
 failed deliberately on both runners after suspending the owned CI engine.
 The final diagnostics implementation, including `signal.aborted`, the 90-second
 PowerShell budget and the PID 0 filter, was unchanged during this proof:
@@ -143,19 +143,19 @@ engine resumed; final cleanup passed on both
 ```
 
 The injection and temporary dispatch code are removed from the final tree.
-The [ten-job repeat](https://github.com/AyoubAchour/net-switch/actions/runs/39510714152)
+The [ten-job repeat](https://github.com/kekawia/net-switch/actions/runs/39510714152)
 is pinned to `5d8ef68a3c75b5b5ac48ef95630c99aa1344266f`: three complete acceptance
 jobs and two complete TestISP proof jobs per architecture, at most four at once.
 Proof and acceptance retain their separate 15- and 25-minute limits.
 This repeat predates the review's restoration of the public firewall relay,
 additional saved-config comparisons and clearer installer error. The remaining
 moved traffic paths are unchanged; final-head CI covers those review changes.
-See [PR #53](https://github.com/AyoubAchour/net-switch/pull/53) for its results and
+See [PR #53](https://github.com/kekawia/net-switch/pull/53) for its results and
 final-head CI; an intentional diagnostic failure is not a passing traffic run.
 
 ## What the 99/100 failure actually shows
 
-[Run 39469242976](https://github.com/AyoubAchour/net-switch/actions/runs/39469242976),
+[Run 39469242976](https://github.com/kekawia/net-switch/actions/runs/39469242976),
 job 118788636733, used sing-box 1.14.2 on ARM64 with Node 24.21.0.
 At the recorded head `f236281fdeb42ee725ef4d8dd082bb70edc6da96`,
 `e2e-tun.mjs:192` asserts the size of `oldIds` **before** calling
@@ -196,13 +196,13 @@ and all 20 ordinary lifecycle cycles.
 ### Round 2: deliberately stalled engine
 
 The coordinator adopted the reviewer's diagnostic suggestions. A temporary
-four-job [dispatch 39496916346](https://github.com/AyoubAchour/net-switch/actions/runs/39496916346)
+four-job [dispatch 39496916346](https://github.com/kekawia/net-switch/actions/runs/39496916346)
 used commit `a9399d7b6c06c20ca45d6a2d621b2fa373ed9b71`.
 Only its Node x64 job suspended sing-box, after three successful TUN TLS requests.
 The next request failed at the unchanged ten-second deadline. The injection,
 dispatch input and helper were removed before the final head.
 
-[Job 118884241637](https://github.com/AyoubAchour/net-switch/actions/runs/39496916346/job/118884241637)
+[Job 118884241637](https://github.com/kekawia/net-switch/actions/runs/39496916346/job/118884241637)
 failed as intended. Abridged evidence, collected before cleanup:
 
 ```text

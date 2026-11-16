@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/AyoubAchour/net-switch/internal/buildinfo"
-	"github.com/AyoubAchour/net-switch/internal/lifecycle"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/buildinfo"
+	"github.com/kekawia/net-switch/internal/lifecycle"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 func main() {

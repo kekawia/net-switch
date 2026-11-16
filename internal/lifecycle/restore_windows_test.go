@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 func testUndoFiles() settings.Files {

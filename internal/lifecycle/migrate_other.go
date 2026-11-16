@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/AyoubAchour/net-switch/internal/control"
+	"github.com/kekawia/net-switch/internal/control"
 )
 
 type MigrateProfilesResult struct{}

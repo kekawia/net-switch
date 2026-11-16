@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
+	"github.com/kekawia/net-switch/internal/engine/proxy"
 	"golang.org/x/sys/windows"
 )
 

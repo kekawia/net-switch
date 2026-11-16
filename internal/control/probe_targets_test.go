@@ -5,8 +5,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 func TestExplicitLegacyPairReplacesAllDefaultOperators(t *testing.T) {

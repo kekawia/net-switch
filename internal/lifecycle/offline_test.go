@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	assets "github.com/AyoubAchour/net-switch"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
+	assets "github.com/kekawia/net-switch"
+	"github.com/kekawia/net-switch/internal/localipc"
 )
 
 func TestRPCStopAcknowledgementBeforeEOF(t *testing.T) {

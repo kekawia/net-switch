@@ -12,9 +12,9 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/packet"
-	"github.com/AyoubAchour/net-switch/internal/winclock"
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	"github.com/kekawia/net-switch/internal/engine/packet"
+	"github.com/kekawia/net-switch/internal/winclock"
+	"github.com/kekawia/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"
 )

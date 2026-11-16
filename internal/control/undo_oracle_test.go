@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 func TestUndoFailureOracle(t *testing.T) {

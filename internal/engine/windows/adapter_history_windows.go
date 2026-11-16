@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/sharedfile"
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	"github.com/kekawia/net-switch/internal/sharedfile"
+	"github.com/kekawia/net-switch/internal/wintun"
 	"golang.org/x/sys/windows"
 )
 

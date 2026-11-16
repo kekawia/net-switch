@@ -7,7 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/localipc"
 )
 
 // A connection that falls into the unresolved pool keeps its reason in the

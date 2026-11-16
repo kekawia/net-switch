@@ -11,8 +11,8 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/buildinfo"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/buildinfo"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 func ServiceCommand(name string, args []string) error {

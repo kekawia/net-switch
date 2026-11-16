@@ -14,8 +14,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apps"
 )
 
 const maxIconBytes = 512 * 1024

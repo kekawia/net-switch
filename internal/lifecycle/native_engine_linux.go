@@ -7,10 +7,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/host"
-	"github.com/AyoubAchour/net-switch/internal/engine/linux"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/engine/host"
+	"github.com/kekawia/net-switch/internal/engine/linux"
+	"github.com/kekawia/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 func replaceNativeState(from, to string) error { return durableRename(from, to) }

@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/control"
-	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
-	ep "github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/settings"
-	"github.com/AyoubAchour/net-switch/internal/updates"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/control"
+	ce "github.com/kekawia/net-switch/internal/control/engine"
+	ep "github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/updates"
 )
 
 type nativeRunClock struct{ origin time.Time }

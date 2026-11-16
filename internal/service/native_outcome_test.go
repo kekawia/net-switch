@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/host"
+	"github.com/kekawia/net-switch/internal/engine/host"
 )
 
 func TestNativeStatusRequiresMatchingSuccessfulRecovery(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	"github.com/kekawia/net-switch/internal/engine/testfake"
 )
 
 func TestDestroyDuringPendingLookup(t *testing.T) {

@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 func newServiceCoreForVPNProxy(t *testing.T) (*Core, *fakeEngine, *fakeClock, *memoryFiles) {

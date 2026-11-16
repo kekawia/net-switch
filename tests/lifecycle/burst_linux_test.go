@@ -3,7 +3,7 @@ package lifecycle_test
 import (
 	"errors"
 	"fmt"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/localipc"
 	"net"
 	"sync"
 	"sync/atomic"

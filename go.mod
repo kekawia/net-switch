@@ -1,4 +1,4 @@
-module github.com/AyoubAchour/net-switch
+module github.com/kekawia/net-switch
 
 go 1.27.4
 

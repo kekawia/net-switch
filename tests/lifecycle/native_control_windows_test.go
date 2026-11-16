@@ -3,7 +3,7 @@ package lifecycle_test
 import (
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/service"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 

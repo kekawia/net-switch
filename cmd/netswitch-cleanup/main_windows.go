@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	win "github.com/AyoubAchour/net-switch/internal/platform/windows"
+	win "github.com/kekawia/net-switch/internal/platform/windows"
 	"golang.org/x/sys/windows"
 )
 

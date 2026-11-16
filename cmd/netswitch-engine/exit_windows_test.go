@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
+	winengine "github.com/kekawia/net-switch/internal/engine/windows"
 )
 
 func TestMainUsesOnlyDirectCompletedEngineExitOutcome(t *testing.T) {

@@ -17,12 +17,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	"github.com/AyoubAchour/net-switch/internal/engine/host"
-	"github.com/AyoubAchour/net-switch/internal/lifecycle"
-	"github.com/AyoubAchour/net-switch/internal/lines"
-	"github.com/AyoubAchour/net-switch/internal/service"
-	"github.com/AyoubAchour/net-switch/internal/usage"
+	"github.com/kekawia/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/engine/host"
+	"github.com/kekawia/net-switch/internal/lifecycle"
+	"github.com/kekawia/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/usage"
 )
 
 // controlJournal is the part of Control's journal these proofs read.

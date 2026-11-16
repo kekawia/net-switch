@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/AyoubAchour/net-switch/internal/platform/worker"
+	"github.com/kekawia/net-switch/internal/platform/worker"
 )
 
 type System struct {

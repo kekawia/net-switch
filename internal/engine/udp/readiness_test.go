@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/packet"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
-	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	"github.com/kekawia/net-switch/internal/engine/packet"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	ns "github.com/kekawia/net-switch/internal/engine/stack"
+	"github.com/kekawia/net-switch/internal/engine/testfake"
 )
 
 type readyDatagram struct {

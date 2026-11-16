@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/localipc"
 )
 
 const routeOwner = "S-1-5-21-1-2-3-1001"

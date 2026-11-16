@@ -10,8 +10,8 @@ import (
 	"strconv"
 	"strings"
 
-	assets "github.com/AyoubAchour/net-switch"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	assets "github.com/kekawia/net-switch"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 type ClientError struct{ Message string }

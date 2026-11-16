@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 var versionPattern = regexp.MustCompile(`^v?([0-9]+)\.([0-9]+)\.([0-9]+)$`)
@@ -40,8 +40,17 @@ type Offer struct {
 	Installer string `json:"installer"`
 }
 
+const ReleaseBase = "https://github.com/kekawia/net-switch/releases/"
+
 func OfferFrom(release map[string]any, current, arch string) *Offer {
-	if (arch != "x64" && arch != "arm64") || release == nil || js.Truth(release["draft"]) || js.Truth(release["prerelease"]) {
+	return OfferFromBase(release, current, arch, ReleaseBase)
+}
+
+// OfferFromBase validates a release payload against an explicit GitHub releases
+// base URL so frozen 0.3.x oracle and differential fixtures can replay their
+// recorded release URLs while production accepts only ReleaseBase.
+func OfferFromBase(release map[string]any, current, arch, base string) *Offer {
+	if (arch != "x64" && arch != "arm64") || release == nil || base == "" || js.Truth(release["draft"]) || js.Truth(release["prerelease"]) {
 		return nil
 	}
 	version := strings.TrimPrefix(js.Text(release["tag_name"]), "v")
@@ -49,7 +58,6 @@ func OfferFrom(release map[string]any, current, arch string) *Offer {
 		return nil
 	}
 	page := js.Text(release["html_url"])
-	const base = "https://github.com/AyoubAchour/net-switch/releases/"
 	if !strings.HasPrefix(page, base+"tag/") {
 		return nil
 	}

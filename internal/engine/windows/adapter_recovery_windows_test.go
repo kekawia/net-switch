@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	"github.com/kekawia/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/wintun"
 	"golang.org/x/sys/windows"
 )
 

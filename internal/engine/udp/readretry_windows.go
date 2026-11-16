@@ -6,7 +6,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/kekawia/net-switch/internal/winclock"
 )
 
 func waitReadRetry(ctx context.Context) bool {

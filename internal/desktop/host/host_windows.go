@@ -13,8 +13,8 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/AyoubAchour/net-switch/internal/desktop"
-	"github.com/AyoubAchour/net-switch/internal/desktop/winui"
+	"github.com/kekawia/net-switch/internal/desktop"
+	"github.com/kekawia/net-switch/internal/desktop/winui"
 )
 
 type windowsDesktopUI struct {

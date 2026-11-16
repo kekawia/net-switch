@@ -31,6 +31,6 @@ jobs:
       - name: Read the already captured Windows trace
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh run download 39494705642 --repo AyoubAchour/net-switch --name windows-engine-focus-ARM64 --dir dist
+        run: gh run download 39494705642 --repo kekawia/net-switch --name windows-engine-focus-ARM64 --dir dist
       - name: Explain waits without running the engine
         run: node tests/windows/stop-trace.mjs

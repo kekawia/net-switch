@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
-	"github.com/AyoubAchour/net-switch/internal/sharedfile"
+	"github.com/kekawia/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/sharedfile"
 )
 
 type Outcome struct {

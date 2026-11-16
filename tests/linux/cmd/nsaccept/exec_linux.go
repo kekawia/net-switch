@@ -14,7 +14,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/netns"
+	"github.com/kekawia/net-switch/tests/linux/netns"
 )
 
 type listFlag []string

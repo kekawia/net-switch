@@ -3,8 +3,8 @@ package winengine
 import (
 	"slices"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 func retainLineSelectors(wanted, previous []platform.Line, table *flows.Table) []platform.Line {

@@ -5,7 +5,7 @@ package suite
 import (
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/harness"
+	"github.com/kekawia/net-switch/tests/linux/harness"
 )
 
 func TestReleaseCatalogueHasNoBlockersOrPendingGates(t *testing.T) {

@@ -5,7 +5,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/lines"
 )
 
 const BusyBytesPerSecond = 256 * 1024

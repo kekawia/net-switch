@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 // renameFiles mirrors Control's journal writes: os.WriteFile for the temporary

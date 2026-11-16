@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/tests/linux/app"
-	"github.com/AyoubAchour/net-switch/tests/linux/engine"
-	"github.com/AyoubAchour/net-switch/tests/linux/harness"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/tests/linux/app"
+	"github.com/kekawia/net-switch/tests/linux/engine"
+	"github.com/kekawia/net-switch/tests/linux/harness"
 )
 
 func TestCapacityMissingGenerationReportsQueryEvidence(t *testing.T) {

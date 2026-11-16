@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/proxy"
 )
 
 func TestLineErrorSkipsNonFaultProxyErrorsAndUnsupportedUDP(t *testing.T) {

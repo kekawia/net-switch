@@ -12,8 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/apps"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 type Cap struct {

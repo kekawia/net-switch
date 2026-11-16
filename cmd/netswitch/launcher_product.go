@@ -6,8 +6,8 @@ import (
 	"os"
 	"runtime"
 
-	assets "github.com/AyoubAchour/net-switch"
-	"github.com/AyoubAchour/net-switch/internal/buildinfo"
+	assets "github.com/kekawia/net-switch"
+	"github.com/kekawia/net-switch/internal/buildinfo"
 )
 
 const productUsage = "usage: netswitch service <command> | netswitch worker <mode> | netswitch -version\n" +

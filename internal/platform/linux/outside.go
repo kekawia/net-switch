@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/platform"
-	"github.com/AyoubAchour/net-switch/internal/platform/outside"
+	"github.com/kekawia/net-switch/internal/platform"
+	"github.com/kekawia/net-switch/internal/platform/outside"
 )
 
 const (

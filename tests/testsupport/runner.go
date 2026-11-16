@@ -12,13 +12,13 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/linehealth"
-	"github.com/AyoubAchour/net-switch/internal/lines"
-	"github.com/AyoubAchour/net-switch/internal/settings"
-	"github.com/AyoubAchour/net-switch/internal/updates"
-	"github.com/AyoubAchour/net-switch/internal/usage"
+	"github.com/kekawia/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/linehealth"
+	"github.com/kekawia/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/updates"
+	"github.com/kekawia/net-switch/internal/usage"
 )
 
 type Call struct {
@@ -355,7 +355,8 @@ func (r *Runner) Call(c Call) (any, any) {
 	case "isNewer":
 		result = updates.IsNewer(s(0), s(1))
 	case "offerFrom":
-		result = updates.OfferFrom(arg(a, 0, map[string]any{}), s(1), arg(a, 2, "x64"))
+		const legacy03xFixtureBase = "https://github.com/AyoubAchour/net-switch/releases/"
+		result = updates.OfferFromBase(arg(a, 0, map[string]any{}), s(1), arg(a, 2, "x64"), legacy03xFixtureBase)
 	case "nativeArchitecture":
 		result = "x64"
 	default:

@@ -2,7 +2,7 @@
 
 package winengine
 
-import "github.com/AyoubAchour/net-switch/internal/engine/platform"
+import "github.com/kekawia/net-switch/internal/engine/platform"
 
 // The engine finds the optional interfaces by type assertion, so a signature
 // drift would still compile and silently take the fallback: for ReadyTCP and

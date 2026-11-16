@@ -6,7 +6,7 @@ test('release guard rejects a tag even when symbols were stripped, and rejects h
  const meta='build\tGOOS=windows\nbuild\tGOARCH=arm64', symbols='123 T main.main\n';
  assert.doesNotThrow(()=>assertNoIntegrityBuild(meta,symbols));
  assert.throws(()=>assertNoIntegrityBuild(meta+'\nbuild\t-tags=wintun_integrity',symbols),/Diagnostic/);
- assert.throws(()=>assertNoIntegrityBuild(meta,symbols+'123 D github.com/AyoubAchour/net-switch/internal/wintun.integrityRingHook'),/Diagnostic/);
+ assert.throws(()=>assertNoIntegrityBuild(meta,symbols+'123 D github.com/kekawia/net-switch/internal/wintun.integrityRingHook'),/Diagnostic/);
  assert.throws(()=>assertNoIntegrityBuild(meta,''),/Missing/);
  assert.throws(()=>assertNoIntegrityBuild('',symbols),/Missing/);
  assert.throws(()=>assertNoIntegrityBuild(meta+'\nbuild\t-tags=wintun_boundaries',symbols),/Diagnostic/);

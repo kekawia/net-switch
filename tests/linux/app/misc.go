@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 )
 
 // PingResult is the ping mode's answer.

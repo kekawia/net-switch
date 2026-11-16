@@ -6,7 +6,7 @@ import { generated, repoView } from './repo.mjs';
 // The Go rules golist.mjs reimplements, case by case, on small in-memory
 // trees. golist-check.mjs compares the whole selection with go list in CI.
 
-const module = 'github.com/AyoubAchour/net-switch';
+const module = 'github.com/kekawia/net-switch';
 const treeOf = files => new GoTree(repoView(files), { skip: path => generated.test(path) });
 
 test('file names constrain GOOS and architecture the way go/build does', () => {

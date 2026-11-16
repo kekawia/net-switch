@@ -25,8 +25,8 @@ import (
 	"syscall"
 	"time"
 
-	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	winengine "github.com/kekawia/net-switch/internal/engine/windows"
+	"github.com/kekawia/net-switch/internal/wintun"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 )
 

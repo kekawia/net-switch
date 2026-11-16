@@ -8,17 +8,22 @@ import (
 	"net/http"
 )
 
-// Check retrieves the existing update offer. Applying an update remains an
-// explicit installer/updater transaction owned by milestone five.
+const LatestReleaseAPIURL = "https://api.github.com/repositories/1418987447/releases/latest"
+
+// Check retrieves the existing update offer by numeric repository ID.
 func Check(ctx context.Context, version, architecture string) (*Offer, error) {
-	request, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/repos/AyoubAchour/net-switch/releases/latest", nil)
+	return checkURL(ctx, LatestReleaseAPIURL, http.DefaultClient, version, architecture)
+}
+
+func checkURL(ctx context.Context, url string, client *http.Client, version, architecture string) (*Offer, error) {
+	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "NetSwitch/"+version)
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
-	response, err := http.DefaultClient.Do(request)
+	response, err := client.Do(request)
 	if err != nil {
 		return nil, err
 	}

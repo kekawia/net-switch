@@ -123,8 +123,8 @@ First public release.
 - Windows installer that bundles Node.js and sing-box, and offers to undo
   Net Switch's Windows setting changes when you uninstall.
 
-[Unreleased]: https://github.com/AyoubAchour/net-switch/compare/v0.3.1...HEAD
-[0.3.1]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.3.1
-[0.3.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.3.0
-[0.2.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.2.0
-[0.1.0]: https://github.com/AyoubAchour/net-switch/releases/tag/v0.1.0
+[Unreleased]: https://github.com/kekawia/net-switch/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/kekawia/net-switch/releases/tag/v0.3.1
+[0.3.0]: https://github.com/kekawia/net-switch/releases/tag/v0.3.0
+[0.2.0]: https://github.com/kekawia/net-switch/releases/tag/v0.2.0
+[0.1.0]: https://github.com/kekawia/net-switch/releases/tag/v0.1.0

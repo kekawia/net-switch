@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
-	"github.com/AyoubAchour/net-switch/internal/journal"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	winengine "github.com/kekawia/net-switch/internal/engine/windows"
+	"github.com/kekawia/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/service"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc/mgr"
 )

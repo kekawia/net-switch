@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/platform"
+	"github.com/kekawia/net-switch/internal/platform"
 )
 
 type DesktopWork struct {

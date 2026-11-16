@@ -106,13 +106,13 @@ jobs:
         if: matrix.control == 'go'
         run: |
           $directory = Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI'
-          go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch.exe" ./cmd/netswitch
+          go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch.exe" ./cmd/netswitch
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-engine.exe" ./cmd/netswitch-engine
+          go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-engine.exe" ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-desktop.exe" ./cmd/netswitch-desktop
+          go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-desktop.exe" ./cmd/netswitch-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go build -tags lifecycle_test -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitchctl.exe" ./cmd/netswitchctl
+          go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitchctl.exe" ./cmd/netswitchctl
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -c -o "$directory/lifecycle.test.exe" ./tests/lifecycle
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

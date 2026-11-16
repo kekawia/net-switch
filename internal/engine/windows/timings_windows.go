@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
-	"github.com/AyoubAchour/net-switch/internal/winclock"
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	"github.com/kekawia/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/winclock"
+	"github.com/kekawia/net-switch/internal/wintun"
 )
 
 type phaseTiming struct {

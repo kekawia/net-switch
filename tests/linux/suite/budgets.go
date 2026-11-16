@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/app"
-	"github.com/AyoubAchour/net-switch/tests/linux/engine"
-	"github.com/AyoubAchour/net-switch/tests/linux/topo"
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/app"
+	"github.com/kekawia/net-switch/tests/linux/engine"
+	"github.com/kekawia/net-switch/tests/linux/topo"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 )
 
 func fault(e *Env, s engine.Controller, kind, mode string) {

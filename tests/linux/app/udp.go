@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 )
 
 // Socket options not every Go release names in package syscall.

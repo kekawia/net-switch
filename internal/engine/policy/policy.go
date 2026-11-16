@@ -11,8 +11,8 @@ import (
 	"math/bits"
 	"net/netip"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/flowapi"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 const Fibonacci uint64 = 0x9E3779B97F4A7C15

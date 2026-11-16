@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"fyne.io/systray"
-	"github.com/AyoubAchour/net-switch/internal/desktop"
+	"github.com/kekawia/net-switch/internal/desktop"
 )
 
 // Callbacks handle user selections from the Linux system tray menu.

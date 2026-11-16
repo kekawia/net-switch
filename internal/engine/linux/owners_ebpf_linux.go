@@ -14,8 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/linux/ownerbpf"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/linux/ownerbpf"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 	"golang.org/x/sys/unix"
 )
 

@@ -2,7 +2,7 @@ package lifecycle_test
 
 import (
 	"errors"
-	"github.com/AyoubAchour/net-switch/internal/usage"
+	"github.com/kekawia/net-switch/internal/usage"
 	"os"
 	"runtime"
 	"syscall"

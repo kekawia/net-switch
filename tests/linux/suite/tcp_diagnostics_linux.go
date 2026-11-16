@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/engine"
+	"github.com/kekawia/net-switch/tests/linux/engine"
 )
 
 // Keep diagnostics outside the engine's data path. The ordinary release build

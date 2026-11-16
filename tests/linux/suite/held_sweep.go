@@ -10,8 +10,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/app"
-	"github.com/AyoubAchour/net-switch/tests/linux/engine"
+	"github.com/kekawia/net-switch/tests/linux/app"
+	"github.com/kekawia/net-switch/tests/linux/engine"
 )
 
 // Section 5.9, "Held sessions stay responsive": at the UDP cap, an echo

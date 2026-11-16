@@ -3,8 +3,8 @@ package udp
 import (
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/testfake"
 )
 
 func TestUnknownGenerationValidationKeepsKnownIdentityChecks(t *testing.T) {

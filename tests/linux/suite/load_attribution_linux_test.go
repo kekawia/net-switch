@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/engine"
-	"github.com/AyoubAchour/net-switch/tests/linux/harness"
-	"github.com/AyoubAchour/net-switch/tests/linux/topo"
+	"github.com/kekawia/net-switch/tests/linux/engine"
+	"github.com/kekawia/net-switch/tests/linux/harness"
+	"github.com/kekawia/net-switch/tests/linux/topo"
 )
 
 // runBurstJudgement runs judgeBurstSession on one sample as the real case

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/kekawia/net-switch/internal/winclock"
 )
 
 // TestTableReadsCoverEveryWaiter checks the scheduler's rules without native

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/updates"
+	"github.com/kekawia/net-switch/internal/updates"
 )
 
 func TestFailedUpdateCheckKeepsSettingsResponseSuccessful(t *testing.T) {

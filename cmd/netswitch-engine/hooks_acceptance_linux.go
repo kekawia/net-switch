@@ -3,9 +3,9 @@
 package main
 
 import (
-	"github.com/AyoubAchour/net-switch/internal/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/linux"
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/engine"
+	"github.com/kekawia/net-switch/internal/engine/linux"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
 )
 
 func installTestHooks(p *linux.Platform, e *engine.Engine, s *protocol.Server) {

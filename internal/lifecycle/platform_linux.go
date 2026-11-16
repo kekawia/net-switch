@@ -16,10 +16,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/desktop/xdg"
-	"github.com/AyoubAchour/net-switch/internal/platform"
-	linuxplatform "github.com/AyoubAchour/net-switch/internal/platform/linux"
-	"github.com/AyoubAchour/net-switch/internal/platform/worker"
+	"github.com/kekawia/net-switch/internal/desktop/xdg"
+	"github.com/kekawia/net-switch/internal/platform"
+	linuxplatform "github.com/kekawia/net-switch/internal/platform/linux"
+	"github.com/kekawia/net-switch/internal/platform/worker"
 )
 
 type linuxPlatform struct {

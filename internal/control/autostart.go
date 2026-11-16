@@ -2,7 +2,7 @@ package control
 
 import (
 	"context"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 func (c *Core) RefreshAutostart(ctx context.Context) {

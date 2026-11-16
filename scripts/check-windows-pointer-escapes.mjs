@@ -89,7 +89,7 @@ assert.equal(connectSource.match(/uintptr\(unsafe\.Pointer\(&w\./g)?.length, 3, 
 
 for (const tags of ['', 'netswitch_handlecheck']) {
   const build = spawnSync('go', ['build',
-    '-gcflags=github.com/AyoubAchour/net-switch/internal/...=-m', '-gcflags=internal/poll=-m',
+    '-gcflags=github.com/kekawia/net-switch/internal/...=-m', '-gcflags=internal/poll=-m',
     '-gcflags=golang.org/x/sys/windows=-m',
     './internal/engine/windows', './internal/wintun', './internal/winlock'],
   { env: { ...env, GOFLAGS: `${env.GOFLAGS}${tags ? ` -tags=${tags}` : ''}` },
@@ -112,7 +112,7 @@ for (const tags of ['', 'netswitch_handlecheck']) {
 // explicit retention/pin must have compiler evidence too, not just a comment
 // citing the standard library's separate operation allocation.
 const fixture = spawnSync('go', ['test', '-c', '-o', 'dist/windows-pointer-audit.test.exe',
-  '-gcflags=github.com/AyoubAchour/net-switch/internal/engine/windows=-m', './internal/engine/windows'],
+  '-gcflags=github.com/kekawia/net-switch/internal/engine/windows=-m', './internal/engine/windows'],
 { env: { ...env, GOFLAGS: `${env.GOFLAGS} -tags=netswitch_handlecheck` }, encoding: 'utf8', windowsHide: true, maxBuffer: 16 << 20 });
 assert.equal(fixture.status, 0, fixture.error?.message ?? fixture.stderr);
 const fixtureLines = `${fixture.stdout}\n${fixture.stderr}`.split(/\r?\n/);

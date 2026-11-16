@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AyoubAchour/net-switch/internal/wintrust"
+	"github.com/kekawia/net-switch/internal/wintrust"
 	"golang.org/x/sys/windows"
 )
 

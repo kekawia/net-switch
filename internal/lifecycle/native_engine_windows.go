@@ -5,8 +5,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/host"
-	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
+	"github.com/kekawia/net-switch/internal/engine/host"
+	winengine "github.com/kekawia/net-switch/internal/engine/windows"
 	"golang.org/x/sys/windows"
 )
 

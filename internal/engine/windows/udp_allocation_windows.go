@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	"github.com/kekawia/net-switch/internal/winhandle"
 )
 
 type udpAllocationFailure struct {

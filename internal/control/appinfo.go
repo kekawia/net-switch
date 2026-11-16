@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 // DesktopConnected reopens failed display-only reads after the owner's session

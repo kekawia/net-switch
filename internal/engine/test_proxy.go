@@ -6,8 +6,8 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/testproxy"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/testproxy"
 )
 
 func (e *Engine) StartTestProxy(_ context.Context, address string) (testproxy.Status, error) {

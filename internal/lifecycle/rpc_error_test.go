@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
 )
 
 func TestNativeProtocolRejectsLegacyPrimerWithAnImmediateRPCError(t *testing.T) {

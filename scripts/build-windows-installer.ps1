@@ -138,8 +138,8 @@ try {
   }
   Write-Host $reported
 
-  $baseLdflags = "-s -w -buildid= -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=v$Version"
-  $guiLdflags = "-s -w -buildid= -H=windowsgui -X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=v$Version"
+  $baseLdflags = "-s -w -buildid= -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
+  $guiLdflags = "-s -w -buildid= -H=windowsgui -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
 
   & $go build -C $repoRoot -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitch.exe') ./cmd/netswitch
   if ($LASTEXITCODE -ne 0) { throw "Building netswitch.exe failed (exit $LASTEXITCODE)." }

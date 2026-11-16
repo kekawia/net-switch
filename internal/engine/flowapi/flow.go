@@ -5,7 +5,7 @@ import (
 	"context"
 	"net/netip"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 type Decision struct {

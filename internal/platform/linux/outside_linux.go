@@ -20,8 +20,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/linux/ownerbpf"
-	"github.com/AyoubAchour/net-switch/internal/platform/outside"
+	"github.com/kekawia/net-switch/internal/engine/linux/ownerbpf"
+	"github.com/kekawia/net-switch/internal/platform/outside"
 	"golang.org/x/sys/unix"
 )
 

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/apps"
 	"golang.org/x/sys/windows"
 )
 

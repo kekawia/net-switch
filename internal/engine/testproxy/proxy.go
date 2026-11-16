@@ -18,8 +18,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/flowapi"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 const Enabled = true

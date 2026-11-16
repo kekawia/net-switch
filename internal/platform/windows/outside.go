@@ -7,7 +7,7 @@ import (
 	"math/bits"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/platform/outside"
+	"github.com/kekawia/net-switch/internal/platform/outside"
 )
 
 // Connections that go around the routing engine, with their byte counts from

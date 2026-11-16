@@ -1,7 +1,7 @@
 package lifecycle_test
 
 import (
-	"github.com/AyoubAchour/net-switch/internal/lifecycle"
+	"github.com/kekawia/net-switch/internal/lifecycle"
 	"path/filepath"
 	"sync"
 	"testing"

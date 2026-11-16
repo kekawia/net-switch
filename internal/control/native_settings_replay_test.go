@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/replayledger"
-	"github.com/AyoubAchour/net-switch/internal/updates"
+	"github.com/kekawia/net-switch/internal/replayledger"
+	"github.com/kekawia/net-switch/internal/updates"
 )
 
 func replayNativeSettings(t *testing.T, c *Core, e *nativeStartupEngine, clock *fakeClock, files *memoryFiles, trace replayledger.Trace, cmp *nativeTraceComparator, fc *startupFileCursor) map[int]string {
@@ -80,7 +80,8 @@ func replayNativeSettings(t *testing.T, c *Core, e *nativeStartupEngine, clock *
 		if updateStatus != 200 {
 			return nil, fmt.Errorf("GitHub answered %d", updateStatus)
 		}
-		return updates.OfferFrom(release, c.op.Version, "x64"), nil
+		const legacy03xFixtureBase = "https://github.com/AyoubAchour/net-switch/releases/"
+		return updates.OfferFromBase(release, c.op.Version, "x64", legacy03xFixtureBase), nil
 	}
 	checked := map[int]string{}
 	completion := 58 // the startup's two probe votes have completed

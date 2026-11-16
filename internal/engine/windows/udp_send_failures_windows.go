@@ -9,8 +9,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 // UDP sends that fail with anything but would-block, a counted local drop or

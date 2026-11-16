@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/journal"
 )
 
 type delayedRetirement struct {

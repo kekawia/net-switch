@@ -33,8 +33,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/topo"
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/topo"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 	"golang.org/x/sys/unix"
 )
 

@@ -8,9 +8,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/AyoubAchour/net-switch/internal/buildinfo"
-	"github.com/AyoubAchour/net-switch/internal/desktop/host"
-	"github.com/AyoubAchour/net-switch/internal/lifecycle"
+	"github.com/kekawia/net-switch/internal/buildinfo"
+	"github.com/kekawia/net-switch/internal/desktop/host"
+	"github.com/kekawia/net-switch/internal/lifecycle"
 )
 
 func main() {

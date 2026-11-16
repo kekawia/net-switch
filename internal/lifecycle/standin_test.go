@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/journal"
 )
 
 // The pre-release stand-in build left engine-state.json without the native

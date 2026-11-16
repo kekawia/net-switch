@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/engine/policy"
 )
 
 func TestNativeStateSerializesEpochAndRevisionWithoutPersistingPoint(t *testing.T) {

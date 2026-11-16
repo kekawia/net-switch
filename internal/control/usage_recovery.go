@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"time"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/settings"
-	"github.com/AyoubAchour/net-switch/internal/usage"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/usage"
 )
 
 // Incremental records hold usage counted while the original is unreadable.
