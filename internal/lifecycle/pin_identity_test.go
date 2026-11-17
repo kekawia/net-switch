@@ -3,11 +3,11 @@ package lifecycle
 import (
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apps"
+	ce "github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/policy"
 )
 
 // decide compiles Control's revision for the given platform rules and asks the

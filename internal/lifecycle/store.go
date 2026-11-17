@@ -13,8 +13,8 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/AyoubAchour/net-switch/internal/service"
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 type Config struct {

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/journal"
 )
 
 type outcomeLock func(context.Context) (func() error, error)

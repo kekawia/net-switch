@@ -3,7 +3,7 @@
   "exceptions": [
     {
       "path": "CHANGELOG.md",
-      "sha256": "e7f0ea5c5543b229c75ee79f95550688f45919ee638ecc608d93f917a57530cd",
+      "sha256": "adb255e90c21e905ed56b1e9a81d4a366785372bcd3f9ec02ed4377cfd61ba52",
       "matches": 1,
       "category": "historical-doc",
       "reason": "Historical architecture and retirement documentation"
@@ -17,14 +17,14 @@
     },
     {
       "path": "README.md",
-      "sha256": "67a8fb5fbbf37034dbd00953cdf276b2a657953ce5fd9fa8b371ae213e01b022",
+      "sha256": "4df8c092caa2ea404dc16da47e833aa27f3c1398e349601a009d966913c9aac5",
       "matches": 5,
       "category": "historical-doc",
       "reason": "Historical architecture and retirement documentation"
     },
     {
       "path": "SECURITY.md",
-      "sha256": "e56f5cc808f261bc03b848ea32971bf7dc06ae9dc22ade6f7b873dd8ba7b94bb",
+      "sha256": "ba05d43a1ee0ae7e4f3a256d0e64674193968cb7a7077d1c09a07c78ee0d872a",
       "matches": 2,
       "category": "historical-doc",
       "reason": "Historical architecture and retirement documentation"
@@ -38,7 +38,7 @@
     },
     {
       "path": "docs/m4-native-service-contracts.md",
-      "sha256": "09e5521af369207f502176aacb412b5d3aabc14b1f36de9abd7df09a898ef5a5",
+      "sha256": "43e141268458f743163dbe704db77550c472faef68ef4b6972d4adc84828f84b",
       "matches": 5,
       "category": "historical-doc",
       "reason": "Historical architecture and retirement documentation"
@@ -80,49 +80,49 @@
     },
     {
       "path": "internal/control/native_live_replay_test.go",
-      "sha256": "3381e6f45ff81a3106c13ed41183ec7742ae0577299da315a4f699df1a72296e",
+      "sha256": "137cdb403b5ca7a41cf690d5fa3e33ab2e4660e05db5be4065e63ad8d1831f31",
       "matches": 1,
       "category": "oracle-fixture",
       "reason": "Pinned 0.3.x oracle replay trace or harness reference"
     },
     {
       "path": "internal/control/replay_test.go",
-      "sha256": "bc00e4162e19044d3902069b8b1d41c4c5de15b90d641fb1bca18ca5d1e40dd3",
+      "sha256": "2334dc5826bd64aa753e3a10ff67ab688bcff2abee8ac4bcad7ec21f5af816e3",
       "matches": 2,
       "category": "oracle-fixture",
       "reason": "Pinned 0.3.x oracle replay trace or harness reference"
     },
     {
       "path": "internal/lifecycle/native_remaining_replay_test.go",
-      "sha256": "fc82510d10ab162562e0735755187792beabbd5f9f99151f760e52f209c7f2ea",
+      "sha256": "7e6248d8aefdd64ddf96f22a63772f9b41462fcb710325d362dc5df25ee7aa32",
       "matches": 1,
       "category": "stand-in-refusal",
       "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
     },
     {
       "path": "internal/lifecycle/remote_native.go",
-      "sha256": "a7e7950e1cb47dec8c7b8e375f86fadcc123c2003c90c469c7297fa99521c192",
+      "sha256": "d47fb9f12e0c9afa96b7089821cacc028d868d709c953ab7cf44d4f39474808c",
       "matches": 1,
       "category": "stand-in-refusal",
       "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
     },
     {
       "path": "internal/lifecycle/remote_native_test.go",
-      "sha256": "be16ffe9ebedbf61e0acff4cc5e1ff206a0d19d7e03e5ee764c623d492adbed4",
+      "sha256": "b6e10088a8516e741447b5fd9140e0e422463ec03e07f201efbce45fb90b927c",
       "matches": 1,
       "category": "stand-in-refusal",
       "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
     },
     {
       "path": "internal/lifecycle/standin.go",
-      "sha256": "587008080d85376366af6649da1f1bdcb48d42e7890b6667904c13f053a76e77",
+      "sha256": "436a698565577a2a31a6d7639d377442c2ed284a69d4a253b1dfa3130a827795",
       "matches": 1,
       "category": "stand-in-refusal",
       "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
     },
     {
       "path": "internal/lifecycle/standin_test.go",
-      "sha256": "8970dfb850752e130722314d8715063a7f11edc8a0c39a8d2bb248a2312bf06f",
+      "sha256": "cf88f89799e4f2cf856216a2346865e991086c70981bd7e6c5daf064d247597e",
       "matches": 2,
       "category": "stand-in-refusal",
       "reason": "Stand-in refusal literal and negative test rejecting legacy sing-box config"
@@ -409,14 +409,14 @@
     },
     {
       "path": "tests/windows/ci-failure-investigation.md",
-      "sha256": "240bf54dfa56ba076a2487423869b6dbb482872fa5d1afc4b9a7e0986e0f4137",
+      "sha256": "8fdb218fb5bdc556123053faad2d0b11e89c808b65c5daf044a955776de5780e",
       "matches": 4,
       "category": "historical-doc",
       "reason": "Historical architecture and retirement documentation"
     },
     {
       "path": "tests/windows/control-https-inventory.md",
-      "sha256": "5cd80c806d7bc087ad94276033267c87262ef354e8eb8e422a0000537492ea67",
+      "sha256": "1684363d27483e86d5ff68ece6ab7a4c5b753b42be787478c1a6bd12c9fa873e",
       "matches": 7,
       "category": "historical-doc",
       "reason": "Historical architecture and retirement documentation"

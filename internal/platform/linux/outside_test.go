@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/platform"
-	"github.com/AyoubAchour/net-switch/internal/platform/outside"
+	"github.com/kekawia/net-switch/internal/platform"
+	"github.com/kekawia/net-switch/internal/platform/outside"
 )
 
 func buildInetDiagMsg(family byte, state byte, local, remote netip.AddrPort, ifindex uint32, cookie uint64, uid, inode uint32, padAttr bool, tcpInfo []byte) []byte {

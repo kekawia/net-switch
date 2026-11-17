@@ -8,8 +8,8 @@ import (
 	"log"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
 )
 
 // shutdownTail is the resource boundary used by Serve after accepting clients.

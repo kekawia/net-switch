@@ -18,7 +18,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/linux"
+	"github.com/kekawia/net-switch/internal/engine/linux"
 )
 
 // Opt-in diagnostics use the production binary and add no hooks to lookup or

@@ -11,12 +11,12 @@ import (
 	"testing"
 	"time"
 
-	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
-	"github.com/AyoubAchour/net-switch/internal/lifecycle"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	ce "github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/lifecycle"
+	"github.com/kekawia/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 func arm(t *testing.T, data, point string) {

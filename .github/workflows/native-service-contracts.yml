@@ -109,7 +109,7 @@ jobs:
             $tagArgs = if ($variant -eq 'faults') { @('-tags', 'lifecycle_test') } else { @() }
             $env:NETSWITCH_LIFECYCLE_DIR = Join-Path $env:ProgramFiles "NetSwitch-Native-CI-$variant"
             foreach ($name in @('netswitch', 'netswitch-engine', 'netswitch-desktop', 'netswitchctl')) {
-              go build @tagArgs -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-$variant" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
+              go build @tagArgs -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-$variant" -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR "$name.exe") "./cmd/$name"
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
             go test -c -o (Join-Path $env:NETSWITCH_LIFECYCLE_DIR 'lifecycle.test.exe') ./tests/lifecycle
@@ -160,7 +160,7 @@ jobs:
             export NETSWITCH_LIFECYCLE_DIR="/usr/lib/netswitch-native-ci-$variant"
             sudo install -d -o "$(id -u)" -g "$(id -g)" "$NETSWITCH_LIFECYCLE_DIR"
             for name in netswitch netswitch-engine netswitch-desktop netswitchctl; do
-              go build -tags "$tags" -ldflags "-X github.com/AyoubAchour/net-switch/internal/buildinfo.Version=${{ github.sha }}-$variant" -o "$NETSWITCH_LIFECYCLE_DIR/$name" "./cmd/$name"
+              go build -tags "$tags" -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-$variant" -o "$NETSWITCH_LIFECYCLE_DIR/$name" "./cmd/$name"
             done
             go test -c -o "$NETSWITCH_LIFECYCLE_DIR/lifecycle.test" ./tests/lifecycle
             sudo chown -R root:root "$NETSWITCH_LIFECYCLE_DIR"

@@ -8,7 +8,7 @@ import (
 	"log"
 	"sync/atomic"
 
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	"github.com/kekawia/net-switch/internal/wintun"
 )
 
 // This identity belongs only to the hosted TestISP fixture, never NetSwitch.

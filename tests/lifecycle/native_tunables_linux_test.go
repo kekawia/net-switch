@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/topo"
+	"github.com/kekawia/net-switch/tests/linux/topo"
 )
 
 func nativeLinuxTun(t *testing.T, instance string) string {

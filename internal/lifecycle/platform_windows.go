@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/AyoubAchour/net-switch/internal/platform"
-	win "github.com/AyoubAchour/net-switch/internal/platform/windows"
-	"github.com/AyoubAchour/net-switch/internal/platform/worker"
+	"github.com/kekawia/net-switch/internal/platform"
+	win "github.com/kekawia/net-switch/internal/platform/windows"
+	"github.com/kekawia/net-switch/internal/platform/worker"
 )
 
 func nativePlatform(c Config, log func(string)) platform.System {

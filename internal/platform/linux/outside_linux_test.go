@@ -13,8 +13,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/platform"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/platform"
 	"golang.org/x/sys/unix"
 )
 

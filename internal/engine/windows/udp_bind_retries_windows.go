@@ -11,9 +11,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/kekawia/net-switch/internal/engine"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/winclock"
 	"golang.org/x/sys/windows"
 )
 

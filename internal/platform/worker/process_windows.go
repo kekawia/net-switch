@@ -12,7 +12,7 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
+	"github.com/kekawia/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 

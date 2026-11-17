@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 // Aliases retains Object.entries order, including JS's integer-index ordering.

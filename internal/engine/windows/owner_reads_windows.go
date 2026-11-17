@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/winclock"
+	"github.com/kekawia/net-switch/internal/winclock"
 )
 
 // ownerParallelReads is how many native owner-table reads one table family

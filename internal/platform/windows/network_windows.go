@@ -12,7 +12,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/linehealth"
+	"github.com/kekawia/net-switch/internal/linehealth"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )

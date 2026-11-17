@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/journal"
 )
 
 func TestJournalCompactionRetainsLiveIntentAndCreatedState(t *testing.T) {

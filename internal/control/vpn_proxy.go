@@ -10,12 +10,12 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/probe"
-	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/probe"
+	"github.com/kekawia/net-switch/internal/engine/proxy"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/lines"
 )
 
 func isCaptureAlias(alias string) bool {

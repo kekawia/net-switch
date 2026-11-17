@@ -15,8 +15,8 @@ import (
 	"time"
 	"unsafe"
 
-	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	winplatform "github.com/kekawia/net-switch/internal/platform/windows"
+	"github.com/kekawia/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 

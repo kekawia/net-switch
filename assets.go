@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/AyoubAchour/net-switch/internal/buildinfo"
-	"github.com/AyoubAchour/net-switch/internal/updates"
+	"github.com/kekawia/net-switch/internal/buildinfo"
+	"github.com/kekawia/net-switch/internal/updates"
 )
 
 // UI contains the unchanged UI used by the Node application and C# tray.

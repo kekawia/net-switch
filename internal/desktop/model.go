@@ -54,7 +54,7 @@ const (
 	PaletteSize     = 6
 	MaxLabel        = 18
 	MaxBriefLabel   = 14
-	InstallerPrefix = "https://github.com/AyoubAchour/net-switch/releases/download/"
+	InstallerPrefix = "https://github.com/kekawia/net-switch/releases/download/"
 )
 
 // LineView is a summarized line row rendered in the tray icon and tooltip.

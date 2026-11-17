@@ -7,8 +7,8 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 var ErrDisabled = errors.New("test proxy is disabled in product builds")

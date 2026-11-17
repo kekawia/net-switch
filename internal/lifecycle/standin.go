@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/journal"
 )
 
 // standInRefusal is the message for a data folder written by the pre-release

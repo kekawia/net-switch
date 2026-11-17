@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/replayledger"
+	"github.com/kekawia/net-switch/internal/replayledger"
 )
 
 // SYSTEM-DESIGN 2-3 and NATIVE-REPLAY-RETIREMENT explicitly replace the old

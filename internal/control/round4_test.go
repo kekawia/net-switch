@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 func TestNetworkClockStepDoesNotFreezeSnapshots(t *testing.T) {

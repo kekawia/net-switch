@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	win "github.com/AyoubAchour/net-switch/internal/platform/windows"
-	"github.com/AyoubAchour/net-switch/internal/settings"
-	"github.com/AyoubAchour/net-switch/internal/windowsundo"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	win "github.com/kekawia/net-switch/internal/platform/windows"
+	"github.com/kekawia/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/windowsundo"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )

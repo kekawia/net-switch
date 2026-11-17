@@ -11,14 +11,14 @@ import (
 	"sync"
 	"time"
 
-	assets "github.com/AyoubAchour/net-switch"
-	"github.com/AyoubAchour/net-switch/internal/control"
-	"github.com/AyoubAchour/net-switch/internal/crashnet"
-	"github.com/AyoubAchour/net-switch/internal/faultpoint"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
-	"github.com/AyoubAchour/net-switch/internal/service"
-	"github.com/AyoubAchour/net-switch/internal/settings"
-	"github.com/AyoubAchour/net-switch/internal/updates"
+	assets "github.com/kekawia/net-switch"
+	"github.com/kekawia/net-switch/internal/control"
+	"github.com/kekawia/net-switch/internal/crashnet"
+	"github.com/kekawia/net-switch/internal/faultpoint"
+	"github.com/kekawia/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/updates"
 )
 
 func ControlService(serviceCtx context.Context, ready func(), c Config, log func(string)) error {

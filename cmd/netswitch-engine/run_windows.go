@@ -11,8 +11,8 @@ import (
 	"os/signal"
 	"path/filepath"
 
-	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	winengine "github.com/kekawia/net-switch/internal/engine/windows"
+	"github.com/kekawia/net-switch/internal/wintun"
 	"golang.org/x/sys/windows"
 )
 

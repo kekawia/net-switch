@@ -14,9 +14,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/platform/winapi"
-	"github.com/AyoubAchour/net-switch/internal/winclock"
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	"github.com/kekawia/net-switch/internal/platform/winapi"
+	"github.com/kekawia/net-switch/internal/winclock"
+	"github.com/kekawia/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 )
 

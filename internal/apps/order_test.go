@@ -4,7 +4,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apppath"
 )
 
 func TestConnectionOrderAndZeroRetention(t *testing.T) {

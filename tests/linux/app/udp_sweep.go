@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 )
 
 // SweepRequest is what a case writes to udpflood's --sweep-file once the

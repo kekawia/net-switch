@@ -7,11 +7,11 @@ import (
 	"errors"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
-	"github.com/AyoubAchour/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/proxy"
+	"github.com/kekawia/net-switch/internal/lines"
 )
 
 type Policy struct {

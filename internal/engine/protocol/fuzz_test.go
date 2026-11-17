@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/flows"
 )
 
 func FuzzProtocol(f *testing.F) {

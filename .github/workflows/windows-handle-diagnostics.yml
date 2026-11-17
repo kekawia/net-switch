@@ -245,7 +245,7 @@ jobs:
       - name: Build the tagged registrar test fixtures
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
-          $diagnostics = @(go test -c '-gcflags=github.com/AyoubAchour/net-switch/internal/wintun=-m' -o bin/wintun-registrar.test.exe ./internal/wintun 2>&1)
+          $diagnostics = @(go test -c '-gcflags=github.com/kekawia/net-switch/internal/wintun=-m' -o bin/wintun-registrar.test.exe ./internal/wintun 2>&1)
           $code = $LASTEXITCODE
           if ($code -ne 0) { $diagnostics; exit $code }
           $proof = @($diagnostics | Where-Object { "$_" -match 'registrar_production_windows_test\.go:\d+:\d+: moved to heap: limits$' })

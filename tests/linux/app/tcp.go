@@ -20,7 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 )
 
 // Attempt is one TCP connection to a whoami server.

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/AyoubAchour/net-switch/internal/lifecycle"
+	"github.com/kekawia/net-switch/internal/lifecycle"
 )
 
 func main() {

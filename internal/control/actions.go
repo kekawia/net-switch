@@ -9,13 +9,13 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/lines"
-	"github.com/AyoubAchour/net-switch/internal/platform"
-	"github.com/AyoubAchour/net-switch/internal/windowsundo"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/engine/proxy"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/platform"
+	"github.com/kekawia/net-switch/internal/windowsundo"
 )
 
 func (c *Core) Action(ctx context.Context, method, path string, b map[string]any) (any, error) {

@@ -16,7 +16,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/windows/socket"
+	"github.com/kekawia/net-switch/tests/windows/socket"
 	"golang.org/x/sys/windows"
 )
 

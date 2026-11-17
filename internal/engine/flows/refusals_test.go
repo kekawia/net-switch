@@ -3,7 +3,7 @@ package flows
 import (
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 func TestAdmissionRefusalsRecordTheOccupiedBudget(t *testing.T) {

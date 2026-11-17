@@ -8,8 +8,8 @@ import (
 	"sync"
 	"unsafe"
 
-	win "github.com/AyoubAchour/net-switch/internal/platform/windows"
-	"github.com/AyoubAchour/net-switch/internal/winlock"
+	win "github.com/kekawia/net-switch/internal/platform/windows"
+	"github.com/kekawia/net-switch/internal/winlock"
 	"golang.org/x/sys/windows"
 )
 

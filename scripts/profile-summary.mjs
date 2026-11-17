@@ -40,7 +40,7 @@ function vector(m,k) {
     return out;
   });
 }
-const short=name=>name.replace('github.com/AyoubAchour/net-switch/internal/','ns/').replace('gvisor.dev/gvisor/pkg/','gv/');
+const short=name=>name.replace('github.com/kekawia/net-switch/internal/','ns/').replace('gvisor.dev/gvisor/pkg/','gv/');
 export function summarizeProfile(compressed) {
   const p=message(gunzipSync(compressed)), strings=(p.get(6)||[]).map(b=>b.toString());
   const types=(p.get(1)||[]).map(b=>{const m=message(b);return {type:strings[one(m,1)],unit:strings[one(m,2)]};});

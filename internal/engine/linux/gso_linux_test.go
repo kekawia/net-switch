@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
+	ns "github.com/kekawia/net-switch/internal/engine/stack"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/buffer"

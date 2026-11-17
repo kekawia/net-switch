@@ -8,7 +8,7 @@ import (
 	"go/token"
 	"os"
 
-	"github.com/AyoubAchour/net-switch/internal/replayledger"
+	"github.com/kekawia/net-switch/internal/replayledger"
 )
 
 func run() error {

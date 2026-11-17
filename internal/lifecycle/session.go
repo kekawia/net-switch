@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/faultpoint"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/faultpoint"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 func sessionPresence(data string) func(string, uint32) (bool, error) {

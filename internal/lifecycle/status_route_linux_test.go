@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/localipc"
 )
 
 // The fallback must recognise the exact errors connect(2) returns for the

@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/control/engine"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/linehealth"
-	"github.com/AyoubAchour/net-switch/internal/lines"
-	"github.com/AyoubAchour/net-switch/internal/updates"
-	"github.com/AyoubAchour/net-switch/internal/usage"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/control/engine"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/linehealth"
+	"github.com/kekawia/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/updates"
+	"github.com/kekawia/net-switch/internal/usage"
 )
 
 func (c *Core) Poll(ctx context.Context) error {

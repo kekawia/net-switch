@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
-	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
+	winplatform "github.com/kekawia/net-switch/internal/platform/windows"
+	"github.com/kekawia/net-switch/internal/winhandle"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )

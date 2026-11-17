@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/engine"
-	"github.com/AyoubAchour/net-switch/tests/linux/inet"
-	"github.com/AyoubAchour/net-switch/tests/linux/topo"
+	"github.com/kekawia/net-switch/tests/linux/engine"
+	"github.com/kekawia/net-switch/tests/linux/inet"
+	"github.com/kekawia/net-switch/tests/linux/topo"
 )
 
 // Evidence the cases gather on their own, independent of what apps report:

@@ -101,8 +101,8 @@ the regular hosted Go jobs also set it explicitly.
 
 ## Job-close exit evidence
 
-On `480f3aa6`, [ARM64 job 120305520806](https://github.com/AyoubAchour/net-switch/actions/runs/39920875671/job/120305520806)
-and [x64 job 120305520603](https://github.com/AyoubAchour/net-switch/actions/runs/39920875671/job/120305520603)
+On `480f3aa6`, [ARM64 job 120305520806](https://github.com/kekawia/net-switch/actions/runs/39920875671/job/120305520806)
+and [x64 job 120305520603](https://github.com/kekawia/net-switch/actions/runs/39920875671/job/120305520603)
 both observed child exit 0 after killing the host. Every child was gone. The
 test incorrectly treated that raw number as a clean completion. Windows
 documents termination on last job-handle close without promising a nonzero exit

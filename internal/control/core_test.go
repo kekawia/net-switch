@@ -17,13 +17,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/control/engine"
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/lines"
-	"github.com/AyoubAchour/net-switch/internal/platform"
-	"github.com/AyoubAchour/net-switch/internal/settings"
-	"github.com/AyoubAchour/net-switch/internal/usage"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/control/engine"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/platform"
+	"github.com/kekawia/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/usage"
 )
 
 type memoryFiles struct {

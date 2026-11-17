@@ -3,7 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/service"
 	"testing"
 )
 

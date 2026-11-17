@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"math"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/policy"
 )
 
 // pinIdentity is the engine identity a pin binds (design decision recorded in

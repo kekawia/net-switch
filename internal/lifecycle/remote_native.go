@@ -12,16 +12,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/host"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
-	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/apppath"
+	ce "github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/host"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/engine/proxy"
+	"github.com/kekawia/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 // The native engine speaks spec §5.10 directly: revisions carry the compiled

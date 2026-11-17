@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 // Kind classifies a proxy dial or association failure so callers can separate

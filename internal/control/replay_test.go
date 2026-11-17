@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
 type traceEntry struct {

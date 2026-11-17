@@ -344,7 +344,7 @@ That completed reply must still classify as a session stall.
 
 ### ARM64 borderline trace
 
-[Job 118761509687](https://github.com/AyoubAchour/net-switch/actions/runs/39461404208/job/118761509687)
+[Job 118761509687](https://github.com/kekawia/net-switch/actions/runs/39461404208/job/118761509687)
 recorded sequence 174468 at QPC frequency 10 MHz:
 the trip was `[3786091692, 3786734914]`, the heartbeat gap was
 `[3786075803, 3786730140]`, and the two scheduler gaps were
@@ -412,7 +412,7 @@ Both comparison paths use the engine's TCP stack: a TCP timeout is not evidence
 of a DLL missed wake. A deterministic stack test loses an entire TCP window and
 requires ACK-driven recovery after one timeout, including a new SACK and a
 real reordering-timer expiry during recovery. In the
-[round-2 mutation proof](https://github.com/AyoubAchour/net-switch/actions/runs/39439354881/job/118684802958),
+[round-2 mutation proof](https://github.com/kekawia/net-switch/actions/runs/39439354881/job/118684802958),
 the fixed stack passed all four cases 25 times each; removing each of the
 three guards independently failed its targeted case all ten times. The SACK
 control passed in every mutation. The temporary switches were removed after
@@ -476,7 +476,7 @@ the workflow-level `wintun-integrity-hunts` group with `queue: max` and no
 cancellation. Only one diagnostic matrix runs at a time across either entry
 point, so at most ten diagnostic runners are active. GitHub queues up to 100
 pending workflows; submissions beyond that provider limit can be rejected.
-The scheduled job runs only in `AyoubAchour/net-switch`, not automatically in forks.
+The scheduled job runs only in `kekawia/net-switch`, not automatically in forks.
 
 The owner chose independent qualification **per implementation**: DLL, ours,
 and (in full jobs) inprocess each need a median paired diagnostic/clean ratio

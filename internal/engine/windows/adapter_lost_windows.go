@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	"github.com/kekawia/net-switch/internal/wintun"
 )
 
 // Go uses exit status 2 for unrecovered panics and fatal runtime errors. Keep

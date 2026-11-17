@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AyoubAchour/net-switch/internal/updates"
+	"github.com/kekawia/net-switch/internal/updates"
 )
 
 // ParseCurrentMarker validates the single-line {app}\current marker ("app-X.Y.Z").

@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
+	"github.com/kekawia/net-switch/internal/engine/proxy"
 )
 
 func TestUnixSecretFilePermissions0600(t *testing.T) {

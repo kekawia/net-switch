@@ -6,7 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/AyoubAchour/net-switch/internal/crashnet"
+	"github.com/kekawia/net-switch/internal/crashnet"
 	"io"
 	"strings"
 	"time"

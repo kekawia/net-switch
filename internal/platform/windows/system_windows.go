@@ -10,8 +10,8 @@ import (
 	"strings"
 	"unsafe"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
-	"github.com/AyoubAchour/net-switch/internal/platform"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/platform"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )

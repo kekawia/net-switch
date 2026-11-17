@@ -477,7 +477,7 @@ func TestFlyoutVPNAndProxyLinesAndFirewall(t *testing.T) {
 func TestUpdateOfferAndSettingsAndNotifier(t *testing.T) {
 	offered := UpdateOffer(map[string]any{"update": map[string]any{
 		"version":   "0.3.0",
-		"installer": "https://github.com/AyoubAchour/net-switch/releases/download/v0.3.0/NetSwitch-Setup-0.3.0-x64.exe",
+		"installer": "https://github.com/kekawia/net-switch/releases/download/v0.3.0/NetSwitch-Setup-0.3.0-x64.exe",
 	}})
 	if offered == nil || offered[0] != "0.3.0" {
 		t.Fatalf("offered=%v", offered)

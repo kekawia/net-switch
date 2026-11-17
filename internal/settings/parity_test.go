@@ -1,7 +1,7 @@
 package settings
 
 import (
-	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/apps"
 	"math"
 	"strings"
 	"testing"

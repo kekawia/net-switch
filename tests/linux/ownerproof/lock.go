@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/linux/ownerbpf"
+	"github.com/kekawia/net-switch/internal/engine/linux/ownerbpf"
 )
 
 //go:embed guest.lock.json

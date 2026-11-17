@@ -5,7 +5,7 @@ package lifecycle
 import (
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/host"
+	"github.com/kekawia/net-switch/internal/engine/host"
 )
 
 func TestProductNativeHostHasNoFaultInterposer(t *testing.T) {

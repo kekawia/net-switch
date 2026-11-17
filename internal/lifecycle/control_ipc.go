@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/control"
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/control"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/localipc"
 )
 
 type controlRequest struct {

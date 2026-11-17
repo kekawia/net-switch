@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	js "github.com/AyoubAchour/net-switch/internal/jsvalue"
+	js "github.com/kekawia/net-switch/internal/jsvalue"
 	"golang.org/x/sys/windows"
 )
 

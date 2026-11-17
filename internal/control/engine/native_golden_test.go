@@ -8,13 +8,13 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
-	"github.com/AyoubAchour/net-switch/internal/apps"
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
-	"github.com/AyoubAchour/net-switch/internal/lines"
-	"github.com/AyoubAchour/net-switch/internal/replayledger"
+	"github.com/kekawia/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/replayledger"
 )
 
 // Native goldens for the exact inputs of the frozen 0.3.x rule-file

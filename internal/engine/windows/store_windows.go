@@ -14,8 +14,8 @@ import (
 	"sync"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/winhandle"
-	"github.com/AyoubAchour/net-switch/internal/winlock"
+	"github.com/kekawia/net-switch/internal/winhandle"
+	"github.com/kekawia/net-switch/internal/winlock"
 	"golang.org/x/sys/windows"
 )
 

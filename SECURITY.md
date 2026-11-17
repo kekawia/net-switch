@@ -80,7 +80,7 @@ No telemetry. Net Switch makes two kinds of requests on its own.
 
 **Update checks.** A minute after it starts, then twice a day, it asks GitHub's
 API for this project's latest release
-(`api.github.com/repos/AyoubAchour/net-switch/releases/latest`). The request
+(`api.github.com/repositories/1418987447/releases/latest`). The request
 says which Net Switch version is asking, and GitHub sees your public address,
 as with any request. It only reads the answer: Net Switch never downloads or
 runs anything by itself. A newer release is offered in the window, and the

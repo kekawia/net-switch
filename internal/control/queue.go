@@ -3,7 +3,7 @@ package control
 import (
 	"context"
 	"fmt"
-	"github.com/AyoubAchour/net-switch/internal/crashnet"
+	"github.com/kekawia/net-switch/internal/crashnet"
 )
 
 type work struct {

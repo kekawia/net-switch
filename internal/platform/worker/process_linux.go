@@ -9,7 +9,7 @@ import (
 	"sync"
 	"syscall"
 
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 type linuxProcess struct {

@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/desktop"
+	"github.com/kekawia/net-switch/internal/desktop"
 	"github.com/godbus/dbus/v5"
 )
 

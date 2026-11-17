@@ -3,7 +3,7 @@ package settings
 import (
 	"encoding/json"
 	"errors"
-	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/apps"
 	"os"
 	"path/filepath"
 	"reflect"

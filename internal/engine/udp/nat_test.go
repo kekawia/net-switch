@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/packet"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	"github.com/kekawia/net-switch/internal/engine/packet"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/testfake"
 )
 
 var local = netip.MustParseAddrPort("198.18.0.2:40000")

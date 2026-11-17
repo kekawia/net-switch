@@ -4,13 +4,13 @@
   "private": true,
   "description": "Choose which internet connection each Windows app uses.",
   "license": "MIT",
-  "author": "Ayoub Achour",
-  "homepage": "https://github.com/AyoubAchour/net-switch",
+  "author": "kekawia",
+  "homepage": "https://github.com/kekawia/net-switch",
   "repository": {
     "type": "git",
-    "url": "https://github.com/AyoubAchour/net-switch.git"
+    "url": "https://github.com/kekawia/net-switch.git"
   },
-  "bugs": "https://github.com/AyoubAchour/net-switch/issues",
+  "bugs": "https://github.com/kekawia/net-switch/issues",
   "engines": {
     "node": ">=22"
   },

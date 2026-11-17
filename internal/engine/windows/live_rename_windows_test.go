@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 func TestAliasRenameBeforeControlRevisionKeepsPhysicalBinding(t *testing.T) {

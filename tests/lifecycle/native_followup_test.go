@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
-	"github.com/AyoubAchour/net-switch/internal/engine/testproxy"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/engine/testproxy"
 )
 
 type nativeProbeFixture struct {

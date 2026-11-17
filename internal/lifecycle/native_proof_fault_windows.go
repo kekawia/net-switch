@@ -5,7 +5,7 @@ package lifecycle
 import (
 	"errors"
 
-	"github.com/AyoubAchour/net-switch/internal/wintun"
+	"github.com/kekawia/net-switch/internal/wintun"
 )
 
 // nativeProofReadFault is the error the real Wintun session reports when the

@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine"
-	"github.com/AyoubAchour/net-switch/internal/engine/flows"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/protocol"
-	"github.com/AyoubAchour/net-switch/internal/engine/tcp"
+	"github.com/kekawia/net-switch/internal/engine"
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/protocol"
+	"github.com/kekawia/net-switch/internal/engine/tcp"
 )
 
 // wireScan reads a scan snapshot by its documented wire form alone, without

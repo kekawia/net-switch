@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 type observedRuntime struct {

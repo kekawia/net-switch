@@ -15,8 +15,8 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/proxy"
-	"github.com/AyoubAchour/net-switch/internal/settings"
+	"github.com/kekawia/net-switch/internal/engine/proxy"
+	"github.com/kekawia/net-switch/internal/settings"
 )
 
 const DefaultFileName = "proxy-secrets.json"

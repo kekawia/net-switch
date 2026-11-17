@@ -2,8 +2,8 @@ package lifecycle
 
 import (
 	"context"
-	"github.com/AyoubAchour/net-switch/internal/localipc"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/localipc"
+	"github.com/kekawia/net-switch/internal/service"
 	"time"
 )
 

@@ -8,8 +8,8 @@ import (
 	"net/netip"
 	"syscall"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
-	"github.com/AyoubAchour/net-switch/internal/engine/probe"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/probe"
 )
 
 func (p *Platform) Probe(ctx context.Context, line, operator string) (platform.ProbeResult, error) {

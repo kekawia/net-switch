@@ -3,7 +3,7 @@ package platform
 
 import (
 	"context"
-	"github.com/AyoubAchour/net-switch/internal/apps"
+	"github.com/kekawia/net-switch/internal/apps"
 )
 
 type TCPSelector struct {

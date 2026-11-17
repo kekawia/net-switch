@@ -20,7 +20,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/desktop"
+	"github.com/kekawia/net-switch/internal/desktop"
 )
 
 func TestNotifyIconDataSize64(t *testing.T) {
@@ -310,6 +310,11 @@ if (wv) {
 	if bounds.Right-bounds.Left <= 0 || bounds.Bottom-bounds.Top <= 0 {
 		t.Fatalf("unexpected WebView2 controller bounds: %+v", bounds)
 	}
+	// Controller.Close is asynchronous with respect to the browser process
+	// group. Keep the environment alive until its exit event releases the UDF.
+	exitWatch := watchWebViewBrowserExit(t, win)
+	defer exitWatch.close(t)
+	exitWatch.waitForController(t)
 
 	// Verify external https:// popup/link intercepted cleanly by OpenExternal without navigating inside WebView2.
 	select {
@@ -324,11 +329,14 @@ if (wv) {
 	// Verify ProcessFailed recreates 3 times, then falls back on 4th crash within 5 min.
 	for i := 0; i < 3; i++ {
 		win.TriggerTestCrash()
+		// Each injected failure must finish recreating its controller before
+		// the next failure, so there is no unobserved pending creation at close.
+		exitWatch.waitForController(t)
 	}
 	select {
 	case r := <-fallbackCh:
 		t.Fatalf("fallback triggered early after 3 crashes: %s", r)
-	case <-time.After(300 * time.Millisecond):
+	default:
 	}
 	win.TriggerTestCrash()
 	select {
@@ -338,6 +346,111 @@ if (wv) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("expected fallback after 4th WebView2 crash")
+	}
+}
+
+// These IIDs and vtable slots are from the pinned WebView2 1.0.4314.35 header.
+// BrowserProcessExited covers the entire browser process group, including
+// children which can still write the profile after the controller is closed.
+// https://learn.microsoft.com/microsoft-edge/webview2/concepts/process-related-events
+type webViewBrowserExitWatch struct {
+	window *WebView2Window
+	env    uintptr
+	token  int64
+	pid    uint32
+	exited chan uint32
+}
+
+func watchWebViewBrowserExit(t *testing.T, window *WebView2Window) *webViewBrowserExitWatch {
+	t.Helper()
+	w := &webViewBrowserExitWatch{window: window, exited: make(chan uint32, 8)}
+	err := window.loop.Do(func() error {
+		w.env = comQueryInterface(window.env, mustGUID("{319e423d-e0d7-4b8d-9254-ae9475de9b17}"))
+		if w.env == 0 {
+			return fmt.Errorf("ICoreWebView2Environment5 is unavailable")
+		}
+		handler := newCOMCallback(mustGUID("{fa504257-a216-4911-a860-fe8825712861}"), func(_, args uintptr) {
+			var pid uint32
+			if hr := comCall1(args, 4, uintptr(unsafe.Pointer(&pid))); int32(hr) >= 0 {
+				select {
+				case w.exited <- pid:
+				default:
+				}
+			}
+		})
+		defer comRelease(handler)
+		if hr := comCall2(w.env, 12, handler, uintptr(unsafe.Pointer(&w.token))); int32(hr) < 0 {
+			comRelease(w.env)
+			w.env = 0
+			return fmt.Errorf("add_BrowserProcessExited: 0x%08x", uint32(hr))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+func (w *webViewBrowserExitWatch) waitForController(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		ready := false
+		err := w.window.loop.Do(func() error {
+			if w.window.initializing || w.window.webview == 0 {
+				return nil
+			}
+			if hr := comCall1(w.window.webview, 37, uintptr(unsafe.Pointer(&w.pid))); int32(hr) < 0 || w.pid == 0 {
+				return fmt.Errorf("get_BrowserProcessId: 0x%08x pid=%d", uint32(hr), w.pid)
+			}
+			ready = true
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ready {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("WebView2 controller recreation did not complete")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func (w *webViewBrowserExitWatch) close(t *testing.T) {
+	t.Helper()
+	defer func() {
+		if err := w.window.loop.Do(func() error {
+			hr := comCall1(w.env, 13, uintptr(w.token))
+			comRelease(w.env)
+			if int32(hr) < 0 {
+				return fmt.Errorf("remove_BrowserProcessExited: 0x%08x", uint32(hr))
+			}
+			return nil
+		}); err != nil {
+			t.Error(err)
+		}
+	}()
+	w.window.Close()
+	if w.pid == 0 {
+		return // The test failed before observing a recreated controller.
+	}
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for {
+		select {
+		case pid := <-w.exited:
+			if pid == w.pid {
+				t.Logf("WEBVIEW2_PROFILE_RELEASED browser_pid=%d browser_process_group_exited=true", pid)
+				return
+			}
+		case <-deadline.C:
+			t.Errorf("WebView2 browser process group %d did not exit before profile cleanup", w.pid)
+			return
+		}
 	}
 }
 

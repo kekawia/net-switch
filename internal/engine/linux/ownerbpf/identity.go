@@ -10,7 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apppath"
 )
 
 type SandboxKind string

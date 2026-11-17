@@ -10,7 +10,7 @@ repeat does not prove either cause has been fixed.
 
 ## TestISP localhost reset
 
-[Run 39336173889, attempt 1, job 118346106447](https://github.com/AyoubAchour/net-switch/actions/runs/39336173889/attempts/1)
+[Run 39336173889, attempt 1, job 118346106447](https://github.com/kekawia/net-switch/actions/runs/39336173889/attempts/1)
 failed at 23:24:08 UTC in `direct uplink baseline`: a `/stats` fetch failed with
 `read ECONNRESET`. The report lost the nested error and did not distinguish the
 request before the HTTPS probe from the request after it.
@@ -22,12 +22,12 @@ No app or sing-box process is involved in this proof case. The failing path is
 the harness's loopback HTTP control connection, not a request routed through
 the Wintun ring. These facts do not identify which end reset the connection.
 
-[Attempt 2, job 118368537462](https://github.com/AyoubAchour/net-switch/actions/runs/39336173889/attempts/2)
+[Attempt 2, job 118368537462](https://github.com/kekawia/net-switch/actions/runs/39336173889/attempts/2)
 passed on the same commit `5f2a39856f575ef90997c4d9c04b6b4b9810c408`.
 
 ## Cap setup timeout
 
-[Run 39334336226, job 118339909824](https://github.com/AyoubAchour/net-switch/actions/runs/39334336226/job/118339909824)
+[Run 39334336226, job 118339909824](https://github.com/kekawia/net-switch/actions/runs/39334336226/job/118339909824)
 failed at 22:43:17 UTC, 9.084 seconds into the cap case. It only reported the
 client's eight-second `AbortError`, without the request's identity or phase.
 
@@ -73,19 +73,19 @@ No product or driver fix is claimed without a reproduced cause.
 
 ## Bounded repeats
 
-- [39379855692](https://github.com/AyoubAchour/net-switch/actions/runs/39379855692):
+- [39379855692](https://github.com/kekawia/net-switch/actions/runs/39379855692):
   **0 failures in 12 TestISP proof runs** (six per architecture).
   Four full acceptance runs passed (one x64, three ARM64), including cap setup.
   The second x64 run failed its initial clean-machine check because the previous
   0.3.1 run left its known non-present `sing-tun Tunnel` device. It never reached
   the cap test and is not counted as a cap failure or a pass. This repeat-design
   error remains a failed job; the clean-machine assertion was not weakened.
-- [39381331454](https://github.com/AyoubAchour/net-switch/actions/runs/39381331454):
+- [39381331454](https://github.com/kekawia/net-switch/actions/runs/39381331454):
   **0 resets in 200 fresh Node clients / 400 control requests**. Each client sent
   two requests. The slowest pair took 291.44 ms on x64 and 274.91 ms on ARM64.
   The parallel-request diagnostic regression ran once per architecture and
   passed, taking 8.10 and 8.22 seconds.
-- [39382556940](https://github.com/AyoubAchour/net-switch/actions/runs/39382556940):
+- [39382556940](https://github.com/kekawia/net-switch/actions/runs/39382556940):
   **0 failures in 200 cap setups** (100 per architecture), within one acceptance
   session per job. Both full suites and the diagnostic regression test passed.
   Each suite retained 19 harness passes, 22 parity passes, 12 confirmed baseline

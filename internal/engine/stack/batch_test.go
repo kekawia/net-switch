@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
+	ns "github.com/kekawia/net-switch/internal/engine/stack"
 )
 
 func TestLinkBatchFIFOAndLonePacket(t *testing.T) {

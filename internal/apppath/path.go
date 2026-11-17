@@ -2,7 +2,7 @@
 package apppath
 
 import (
-	"github.com/AyoubAchour/net-switch/internal/jsvalue"
+	"github.com/kekawia/net-switch/internal/jsvalue"
 	"regexp"
 	"strings"
 )

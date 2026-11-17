@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"unsafe"
 
-	"github.com/AyoubAchour/net-switch/internal/desktop"
+	"github.com/kekawia/net-switch/internal/desktop"
 )
 
 type bitmapInfoHeader struct {

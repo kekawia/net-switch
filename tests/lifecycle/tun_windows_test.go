@@ -16,8 +16,8 @@ import (
 	"time"
 	"unsafe"
 
-	winengine "github.com/AyoubAchour/net-switch/internal/engine/windows"
-	"github.com/AyoubAchour/net-switch/internal/lifecycle"
+	winengine "github.com/kekawia/net-switch/internal/engine/windows"
+	"github.com/kekawia/net-switch/internal/lifecycle"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )

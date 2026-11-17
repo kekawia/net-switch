@@ -1,8 +1,8 @@
 package usage_test
 
 import (
-	"github.com/AyoubAchour/net-switch/internal/lines"
-	"github.com/AyoubAchour/net-switch/internal/usage"
+	"github.com/kekawia/net-switch/internal/lines"
+	"github.com/kekawia/net-switch/internal/usage"
 	"testing"
 	"time"
 	_ "time/tzdata"

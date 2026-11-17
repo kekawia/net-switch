@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/flowapi"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 // listAll pages a full listing to its end and returns its records and the

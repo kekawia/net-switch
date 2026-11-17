@@ -1,7 +1,7 @@
 package lines_test
 
 import (
-	"github.com/AyoubAchour/net-switch/tests/testsupport"
+	"github.com/kekawia/net-switch/tests/testsupport"
 	"testing"
 )
 

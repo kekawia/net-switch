@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 )
 
 // echoServer answers like the acceptance echo servers: the source it saw,

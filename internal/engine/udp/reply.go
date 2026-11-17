@@ -6,9 +6,9 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/flowapi"
-	"github.com/AyoubAchour/net-switch/internal/engine/packet"
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/flowapi"
+	"github.com/kekawia/net-switch/internal/engine/packet"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 var errReplyBudget = errors.New("UDP reply byte budget exhausted")

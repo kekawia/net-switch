@@ -11,8 +11,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine"
-	winplatform "github.com/AyoubAchour/net-switch/internal/platform/windows"
+	"github.com/kekawia/net-switch/internal/engine"
+	winplatform "github.com/kekawia/net-switch/internal/platform/windows"
 	"golang.org/x/sys/windows"
 )
 

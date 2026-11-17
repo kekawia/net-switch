@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/lifecycle"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/lifecycle"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 // Invoked by the parent with its real unelevated owner token. No synthetic

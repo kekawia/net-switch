@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/replayledger"
+	"github.com/kekawia/net-switch/internal/replayledger"
 )
 
 // Reusable HTTP transport only: Control owns every action and its response.

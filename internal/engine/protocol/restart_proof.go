@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/policy"
+	"github.com/kekawia/net-switch/internal/engine/policy"
 )
 
 func (s *Server) RestartForTest(ctx context.Context, r policy.Revision) error {

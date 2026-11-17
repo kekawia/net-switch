@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	ns "github.com/AyoubAchour/net-switch/internal/engine/stack"
-	"github.com/AyoubAchour/net-switch/internal/engine/testfake"
+	ns "github.com/kekawia/net-switch/internal/engine/stack"
+	"github.com/kekawia/net-switch/internal/engine/testfake"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/checksum"

@@ -6,7 +6,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/packet"
+	"github.com/kekawia/net-switch/internal/engine/packet"
 )
 
 func TestBulkOutputLeavesReservedSlotsForDNSAndControl(t *testing.T) {

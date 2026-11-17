@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/apppath"
+	"github.com/kekawia/net-switch/internal/apppath"
 )
 
 func defaultRules(rules apppath.Rules) apppath.Rules {

@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/desktop"
-	"github.com/AyoubAchour/net-switch/internal/desktop/linuxui"
+	"github.com/kekawia/net-switch/internal/desktop"
+	"github.com/kekawia/net-switch/internal/desktop/linuxui"
 )
 
 type linuxDesktopUI struct {

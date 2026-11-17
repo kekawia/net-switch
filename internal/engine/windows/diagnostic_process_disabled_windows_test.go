@@ -68,7 +68,7 @@ func TestProductNoProcessDiagnostics(t *testing.T) {
 		}
 		for _, imp := range file.Imports {
 			path, _ := strconv.Unquote(imp.Path.Value)
-			if path == "os/exec" || path == "github.com/AyoubAchour/net-switch/internal/platform/worker" {
+			if path == "os/exec" || path == "github.com/kekawia/net-switch/internal/platform/worker" {
 				t.Fatal("product engine compiled a subprocess diagnostic", name, path)
 			}
 		}

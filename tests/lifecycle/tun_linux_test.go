@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/host"
-	"github.com/AyoubAchour/net-switch/internal/service"
-	"github.com/AyoubAchour/net-switch/tests/linux/topo"
+	"github.com/kekawia/net-switch/internal/engine/host"
+	"github.com/kekawia/net-switch/internal/service"
+	"github.com/kekawia/net-switch/tests/linux/topo"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )

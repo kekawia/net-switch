@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/platform"
 )
 
 type transport func(*http.Request) (*http.Response, error)

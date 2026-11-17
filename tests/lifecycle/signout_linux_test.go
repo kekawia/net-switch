@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/service"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 func ownerSignout(t *testing.T, c *client, owner actor) {

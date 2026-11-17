@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/AyoubAchour/net-switch/internal/journal"
+	"github.com/kekawia/net-switch/internal/journal"
 	"golang.org/x/sys/windows"
 )
 

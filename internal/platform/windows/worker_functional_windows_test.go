@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/internal/platform/worker"
+	"github.com/kekawia/net-switch/internal/platform/worker"
 	"golang.org/x/sys/windows"
 )
 

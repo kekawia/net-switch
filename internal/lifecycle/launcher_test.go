@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	assets "github.com/AyoubAchour/net-switch"
-	"github.com/AyoubAchour/net-switch/internal/buildinfo"
+	assets "github.com/kekawia/net-switch"
+	"github.com/kekawia/net-switch/internal/buildinfo"
 )
 
 func TestParseCurrentMarker(t *testing.T) {

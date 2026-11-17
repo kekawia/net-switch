@@ -56,7 +56,7 @@ const ADAPTERS = [
 const LONG_LABELS = [
   'Fibre from the basement router',
   'Wi-Fi stick on the upstairs network',
-  'Ayoub’s phone on the unlimited weekend plan',
+  'Weekend phone on the unlimited plan',
   'Second Wi-Fi stick in the back of the PC',
   'USB network adapter from the office drawer',
   'Mobile broadband modem by the window',
@@ -84,8 +84,8 @@ const INSTALLED = ['Discord', 'Epic Games Launcher', 'Firefox', 'OBS Studio', 'S
 
 const DEMO_UPDATE = {
   version: '9.9.9',
-  page: 'https://github.com/AyoubAchour/net-switch/releases/latest',
-  installer: 'https://github.com/AyoubAchour/net-switch/releases/latest',
+  page: 'https://github.com/kekawia/net-switch/releases/latest',
+  installer: 'https://github.com/kekawia/net-switch/releases/latest',
 };
 
 const startOptions = parseArgs(process.argv.slice(2));

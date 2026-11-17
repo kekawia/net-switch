@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/AyoubAchour/net-switch/tests/linux/app"
-	"github.com/AyoubAchour/net-switch/tests/linux/wire"
+	"github.com/kekawia/net-switch/tests/linux/app"
+	"github.com/kekawia/net-switch/tests/linux/wire"
 )
 
 const capacityTailAttempts = 100

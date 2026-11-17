@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	ce "github.com/AyoubAchour/net-switch/internal/control/engine"
-	"github.com/AyoubAchour/net-switch/internal/service"
+	ce "github.com/kekawia/net-switch/internal/control/engine"
+	"github.com/kekawia/net-switch/internal/service"
 )
 
 func TestStatusSnapshotDoesNotMixEngineInstances(t *testing.T) {
