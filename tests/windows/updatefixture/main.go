@@ -161,9 +161,13 @@ func run() error {
 	version := flag.String("version", "1.0.11", "target version")
 	arch := flag.String("arch", "", "x64 or arm64")
 	state := flag.String("state", "", "protected fixture connection output")
+	servicePaths := flag.Bool("service-paths", false, "read installed service paths with query-only SCM access")
 	flag.Parse()
 	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
 		return errors.New("update installer fixture requires disposable hosted CI")
+	}
+	if *servicePaths {
+		return printServicePaths()
 	}
 	if *state == "" || !filepath.IsAbs(*installer) || !updates.CanonicalVersion(*version) || (*arch != "x64" && *arch != "arm64") {
 		return errors.New("invalid update fixture arguments")

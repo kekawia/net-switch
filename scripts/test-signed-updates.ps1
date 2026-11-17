@@ -142,9 +142,14 @@ function Assert-SignedResult([string] $Version, [bool] $RoutingOn, [uint32] $Old
   $saved = Get-Content -LiteralPath (Join-Path $machineData 'settings.json') -Raw | ConvertFrom-Json
   $pin = Join-Path $env:SystemRoot 'System32\curl.exe'
   if ($saved.lines[0].label -ne 'Update primary' -or $saved.lines[1].label -ne 'Update backup' -or $saved.appLines.PSObject.Properties[$pin].Value -ne 'bb22') { throw 'Signed update lost line settings or app pin.' }
+  # WMI returned an empty PathName in the hosted proof. Read the actual SCM
+  # configuration with SERVICE_QUERY_CONFIG, preserving the restricted ACL.
+  $servicePathsJson = & $fixtureExe --service-paths
+  if ($LASTEXITCODE -ne 0) { throw 'Could not independently read installed SCM paths.' }
+  $servicePaths = $servicePathsJson | ConvertFrom-Json -AsHashtable
   foreach ($entry in @(@('NetSwitch','netswitch.exe'),@('NetSwitchEngine','netswitch-engine.exe'))) {
-    $servicePath = (Get-CimInstance Win32_Service -Filter "Name='$($entry[0])'").PathName
-    if ($servicePath -notlike "*app-$Version\$($entry[1])*--data*") { throw "Wrong service path: $servicePath" }
+    $servicePath = $servicePaths[$entry[0]]
+    if (-not $servicePath -or $servicePath -notlike "*app-$Version\$($entry[1])*--data*") { throw "Wrong service path for $($entry[0]): $servicePath" }
   }
   if ($RoutingOn) { Assert-RoutedEcho "signed result $signedPassed" }
   Wait-Until 'updater exits after desktop handoff' 25 {
