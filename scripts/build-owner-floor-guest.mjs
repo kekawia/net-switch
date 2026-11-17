@@ -317,12 +317,15 @@ async function bootFloorGuest(lock, arch, kernelImagePath, initramfsPath) {
   let qemuVersionOut;
   try {
     qemuVersionOut = run(qemuBin, ['--version']);
+    if (arch === 'arm64' && !(await stat('/usr/lib/ipxe/qemu/efi-virtio.rom')).isFile()) {
+      throw new Error('ARM64 default virtio network ROM is unavailable');
+    }
   } catch {
     const qemuPackage = arch === 'amd64' ? 'qemu-system-x86' : 'qemu-system-arm';
     const setupOptions = { timeout: 300_000, stdio: ['ignore', 'inherit', 'inherit'] };
     console.log(`FLOOR_GUEST_QEMU_INSTALL arch=${arch} package=${qemuPackage}`);
     run('sudo', ['apt-get', 'update'], setupOptions);
-    run('sudo', ['apt-get', 'install', '-y', '--no-install-recommends', qemuPackage], setupOptions);
+    run('sudo', ['apt-get', 'install', '-y', '--no-install-recommends', qemuPackage, 'ipxe-qemu'], setupOptions);
     qemuVersionOut = run(qemuBin, ['--version']);
   }
   const firstLine = (qemuVersionOut ?? '').split('\n')[0]?.trim() ?? 'unknown';
