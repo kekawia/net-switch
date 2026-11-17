@@ -76,7 +76,7 @@ function Wait-UpdateTerminal([string] $Expected) {
     if ($null -ne $journal) {
       $phase = $journal.status.phase
       if ($phase -ne $lastPhase) {
-        Write-Host "SIGNED UPDATE PHASE: $phase (runner $($journal.runnerPid))"
+        Write-Host "SIGNED UPDATE PHASE: $phase"
         $lastPhase = $phase
       }
       if ($phase -in @('complete','reboot-required','rolled-back','failed','download-error','signature-error')) {
