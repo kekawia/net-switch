@@ -21,6 +21,7 @@ function run(cmd, args, opts = {}) {
     encoding: 'utf8',
     timeout: opts.timeout ?? 1_800_000,
     maxBuffer: 64 * 1024 * 1024,
+    stdio: opts.stdio ?? 'pipe',
   });
   if (res.stdout) process.stdout.write(res.stdout);
   if (res.stderr) process.stderr.write(res.stderr);
@@ -317,8 +318,11 @@ async function bootFloorGuest(lock, arch, kernelImagePath, initramfsPath) {
   try {
     qemuVersionOut = run(qemuBin, ['--version']);
   } catch {
-    run('sudo', ['apt-get', 'update'], { timeout: 300_000 });
-    run('sudo', ['apt-get', 'install', '-y', '--no-install-recommends', 'qemu-system-x86', 'qemu-system-arm'], { timeout: 300_000 });
+    const qemuPackage = arch === 'amd64' ? 'qemu-system-x86' : 'qemu-system-arm';
+    const setupOptions = { timeout: 300_000, stdio: ['ignore', 'inherit', 'inherit'] };
+    console.log(`FLOOR_GUEST_QEMU_INSTALL arch=${arch} package=${qemuPackage}`);
+    run('sudo', ['apt-get', 'update'], setupOptions);
+    run('sudo', ['apt-get', 'install', '-y', '--no-install-recommends', qemuPackage], setupOptions);
     qemuVersionOut = run(qemuBin, ['--version']);
   }
   const firstLine = (qemuVersionOut ?? '').split('\n')[0]?.trim() ?? 'unknown';
