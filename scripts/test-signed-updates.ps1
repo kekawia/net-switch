@@ -69,11 +69,16 @@ function Read-UpdateJournal {
 
 function Wait-UpdateTerminal([string] $Expected) {
   $deadline = [DateTime]::UtcNow.AddSeconds(240)
+  $lastPhase = ''
   while ([DateTime]::UtcNow -lt $deadline) {
     if ($sourceProcess.HasExited) { throw 'Signed update source exited during the transaction.' }
     $journal = Read-UpdateJournal
     if ($null -ne $journal) {
       $phase = $journal.status.phase
+      if ($phase -ne $lastPhase) {
+        Write-Host "SIGNED UPDATE PHASE: $phase (runner $($journal.runnerPid))"
+        $lastPhase = $phase
+      }
       if ($phase -in @('complete','reboot-required','rolled-back','failed','download-error','signature-error')) {
         $detail = if ($journal.PSObject.Properties['lastError']) { $journal.lastError } else { '' }
         if ($phase -ne $Expected) { throw "Expected $Expected, got $phase : $detail" }

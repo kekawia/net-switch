@@ -179,7 +179,11 @@ func prepareUpdate(ctx context.Context, j *updateJournal) error {
 }
 
 func installerUpdateArgs(j updateJournal) []string {
-	return append([]string{"/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RESTARTEXITCODE=3010", "/DIR=" + j.AppDir, "/OWNER=" + j.Owner.User, "/DATA=" + j.Data, "/UPDATEOP=" + j.Status.Operation}, updateTestInstallerArgs(j.Data)...)
+	version := j.Status.Version
+	if j.Status.Phase == "rolling-back" {
+		version = j.Status.PreviousVersion
+	}
+	return append([]string{"/SP-", "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/RESTARTEXITCODE=3010", "/LOG=" + filepath.Join(j.stageDir(), "install-"+version+".log"), "/DIR=" + j.AppDir, "/OWNER=" + j.Owner.User, "/DATA=" + j.Data, "/UPDATEOP=" + j.Status.Operation}, updateTestInstallerArgs(j.Data)...)
 }
 
 func verifyUpdateHealth(ctx context.Context, j updateJournal, version string) error {
@@ -236,22 +240,29 @@ func rollbackUpdate(ctx context.Context, j *updateJournal) error {
 	if !j.Captured {
 		return nil
 	}
+	log := Log(j.Data, "netswitch-update")
+	log("rollback: verify kept installer")
 	if err := verifyKeptInstaller(j.AppDir, j.PreviousInstaller); err != nil {
 		return err
 	}
+	log("rollback: stop services")
 	if err := service.StopForUpdate(ctx); err != nil {
 		return err
 	}
+	log("rollback: retain latest routing intent")
 	if err := retainUpdateIntent(j); err != nil {
 		return err
 	}
+	log("rollback: restore completed data snapshot")
 	if err := restoreUpdateData(*j); err != nil {
 		return err
 	}
 	if err := seedRestoredUpdateIntent(*j); err != nil {
 		return err
 	}
+	log("rollback: run kept installer")
 	code, err := runUpdateInstaller(ctx, keptInstallerPath(j.AppDir, j.PreviousInstaller), installerUpdateArgs(*j))
+	log(fmt.Sprintf("rollback: installer returned code=%d error=%v", code, err))
 	if err != nil {
 		return err
 	}
@@ -267,6 +278,7 @@ func rollbackUpdate(ctx context.Context, j *updateJournal) error {
 			return fmt.Errorf("rollback did not restore %s executable path", name)
 		}
 	}
+	log("rollback: verify restored health")
 	return verifyUpdateHealth(ctx, *j, j.Status.PreviousVersion)
 }
 
@@ -300,6 +312,8 @@ func ApplyUpdate(ctx context.Context, data, operation string) error {
 	if j.Status.Operation != operation {
 		return errors.New("update operation has changed")
 	}
+	log := Log(j.Data, "netswitch-update")
+	log(fmt.Sprintf("update %s: runner %d entered phase %s", operation, j.RunnerPID, j.Status.Phase))
 	if completedUpdate(j.Status.Phase) {
 		return finishUpdateDesktop(ctx, &j)
 	}
@@ -324,12 +338,16 @@ func ApplyUpdate(ctx context.Context, data, operation string) error {
 			if err := saveUpdateJournal(&j); err != nil {
 				return err
 			}
+			log("update phase: " + status.Phase)
 			faultpoint.Hit(j.Data, "update-"+status.Phase)
 			return nil
 		},
 		Prepare: func(ctx context.Context) error { return prepareUpdate(ctx, &j) },
 		Install: func(ctx context.Context) (uint32, error) {
-			return runUpdateInstaller(ctx, j.installer(), installerUpdateArgs(j))
+			log("update: run staged installer")
+			code, err := runUpdateInstaller(ctx, j.installer(), installerUpdateArgs(j))
+			log(fmt.Sprintf("update: installer returned code=%d error=%v", code, err))
+			return code, err
 		},
 		Health: func(ctx context.Context) error {
 			if err := verifyUpdateHealth(ctx, j, j.Status.Version); err != nil {
@@ -344,6 +362,7 @@ func ApplyUpdate(ctx context.Context, data, operation string) error {
 		Rollback: func(ctx context.Context) error { return rollbackUpdate(ctx, &j) },
 	})
 	if applyErr != nil {
+		log("update result: " + applyErr.Error())
 		j.LastError = applyErr.Error()
 		j.Status.Error = applyErr.Error()
 		_ = saveUpdateJournal(&j)

@@ -59,6 +59,7 @@ function Save-SuiteDiagnostics([string] $Label) {
     (Join-Path $machineData 'update-journal.json'),
     (Join-Path $machineData 'netswitch.log'),
     (Join-Path $machineData 'netswitch-engine.log'),
+    (Join-Path $machineData 'netswitch-update.log'),
     (Join-Path $machineData 'settings.json'),
     (Join-Path $machineData 'windows-undo.json'),
     (Join-Path $userData 'server.log'),
@@ -68,6 +69,15 @@ function Save-SuiteDiagnostics([string] $Label) {
       Copy-Item -LiteralPath $src -Destination (Join-Path $dest ([IO.Path]::GetFileName($src))) -Force -ErrorAction SilentlyContinue
     }
   }
+  $updateStages = Join-Path $appDir 'updates\staging'
+  if (Test-Path -LiteralPath $updateStages -PathType Container) {
+    Get-ChildItem -LiteralPath $updateStages -Recurse -Filter 'install-*.log' -File | ForEach-Object {
+      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dest ($_.Directory.Name + '-' + $_.Name)) -Force
+    }
+  }
+  foreach ($name in @('NetSwitch','NetSwitchEngine')) { & sc.exe queryex $name }
+  Get-CimInstance Win32_Process -Filter "Name = 'netswitch.exe' OR Name = 'netswitch-engine.exe' OR Name = 'netswitchctl.exe' OR Name = 'netswitch-desktop.exe'" -ErrorAction SilentlyContinue |
+    Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | Format-List
 }
 
 function Wait-Until([string] $Description, [int] $Seconds, [scriptblock] $Condition) {
