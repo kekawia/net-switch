@@ -6,6 +6,16 @@ import (
 	js "github.com/kekawia/net-switch/internal/jsvalue"
 )
 
+// Native update extensions are separate from the frozen compatibility table.
+// They share HTTP's host, origin, token and body checks, and only exist when
+// the server actually supplies an installer backend.
+func (h *HTTP) knownUpdateRoute(method, path string) bool {
+	if method != "POST" || h.Core.op.Updater == nil {
+		return false
+	}
+	return path == "/api/update/apply" || path == "/api/update/status-dismiss"
+}
+
 func (c *Core) updateApplying() bool {
 	if c.op.Updater == nil {
 		return false

@@ -46,7 +46,7 @@ func ServiceCommand(name string, args []string) error {
 		return err
 	})
 }
-func Ctl(args []string) error {
+func Ctl(args []string) (resultErr error) {
 	if len(args) == 0 {
 		return errors.New("usage: netswitchctl status|enroll|start|stop|journal|install|cleanup|recover|uninstall|migration-check|migrate-profiles|migrate|restore-windows|cleanup-machine-data|whoami|version|update|update-keygen|update-issue-release-key|update-sign-manifest|update-verify-manifest|update-check-root")
 	}
@@ -81,6 +81,7 @@ func Ctl(args []string) error {
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
+	defer func() { WriteInstallerError(*errorOutPath, resultErr) }()
 	if *machineData != "" {
 		*data = *machineData
 	}
@@ -99,7 +100,7 @@ func Ctl(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
-	if runtime.GOOS == "windows" && (command == "enroll" || command == "enrol" || command == "uninstall" || command == "restore-windows") {
+	if runtime.GOOS == "windows" && (command == "enroll" || command == "enrol" || command == "uninstall") {
 		if resolved, err := ResolveStore(*data); err == nil && CheckDirectory(resolved) == nil {
 			release, err := (Lock{Data: resolved, Name: "update"}).Acquire(ctx)
 			if err != nil {

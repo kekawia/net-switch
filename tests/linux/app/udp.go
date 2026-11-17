@@ -567,8 +567,10 @@ type FloodResult struct {
 	RefusedSockets []int `json:"refusedSockets"`
 	// With --times, when each datagram went and each refusal arrived (Unix
 	// ms).
-	SentAt    []int64 `json:"sentAt,omitempty"`
-	RefusedAt []int64 `json:"refusedAt,omitempty"`
+	SentAt          []int64        `json:"sentAt,omitempty"`
+	RefusedAt       []int64        `json:"refusedAt,omitempty"`
+	KernelRefusedAt []int64        `json:"kernelRefusedAt,omitempty"`
+	TimestampErrors map[string]int `json:"timestampErrors,omitempty"`
 }
 
 // runUDPFlood opens many UDP sockets (each a new session to the engine), sends
@@ -592,7 +594,7 @@ func runUDPFlood(args []string) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	r := FloodResult{Token: token(), Sockets: *sockets, OpenErrors: map[string]int{}, SendErrors: map[string]int{}, RefusedSockets: []int{}}
+	r := FloodResult{Token: token(), Sockets: *sockets, OpenErrors: map[string]int{}, SendErrors: map[string]int{}, RefusedSockets: []int{}, TimestampErrors: map[string]int{}}
 	tok := r.Token
 	var conns []net.Conn
 	for i := range *sockets {
@@ -600,6 +602,13 @@ func runUDPFlood(args []string) (any, error) {
 		if err != nil {
 			r.OpenErrors[Code(err)]++
 			continue
+		}
+		if *times {
+			if err := enableRefusalTimestamps(c); err != nil {
+				c.Close()
+				r.OpenErrors["timestamp: "+err.Error()]++
+				continue
+			}
 		}
 		conns = append(conns, c)
 		r.Locals = append(r.Locals, c.LocalAddr().String())
@@ -638,6 +647,11 @@ func runUDPFlood(args []string) (any, error) {
 			buf := make([]byte, 2048)
 			_ = c.SetReadDeadline(deadline)
 			_, err := c.Read(buf)
+			var kernelTime int64
+			var timestampErr error
+			if *times && Code(err) == "ECONNREFUSED" {
+				kernelTime, timestampErr = refusalKernelTime(c)
+			}
 			mu.Lock()
 			defer mu.Unlock()
 			switch Code(err) {
@@ -648,6 +662,11 @@ func runUDPFlood(args []string) (any, error) {
 				r.RefusedSockets = append(r.RefusedSockets, i)
 				if *times {
 					r.RefusedAt = append(r.RefusedAt, nowMS())
+					if timestampErr != nil {
+						r.TimestampErrors[timestampErr.Error()]++
+					} else {
+						r.KernelRefusedAt = append(r.KernelRefusedAt, kernelTime)
+					}
 				}
 			default:
 				r.Silent++

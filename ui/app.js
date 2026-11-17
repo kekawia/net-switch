@@ -1215,6 +1215,13 @@ function applyUpdateButton(version, retry = false) {
     () => api('/api/update/apply', { version }));
 }
 
+function availableUpdateAction(offer) {
+  if (state.features?.signedUpdates) return applyUpdateButton(offer.version);
+  // The same UI is retained by the frozen 0.3.x reference server. It does not
+  // advertise the native installer capability, so preserve its manual flow.
+  return h('a', { class: 'button', href: offer.installer, target: '_blank', rel: 'noopener noreferrer', text: 'Download', 'data-focus': 'update-download' });
+}
+
 function updateNotice() {
   const status = state.updateStatus;
   const offer = state.update;
@@ -1261,8 +1268,12 @@ function updateNotice() {
       break;
     default:
       if (!offer) return null;
-      node = notice('update', `Net Switch ${offer.version} is out.${offer.packageManager ? ' Update with your package manager.' : ''}`, [
-        ...(!offer.packageManager ? [applyUpdateButton(offer.version)] : []),
+      const manual = !offer.packageManager && !state.features?.signedUpdates;
+      const message = manual
+        ? `Net Switch ${offer.version} is out (you have ${state.version}). Download it and run the installer: it updates this copy and keeps your settings.`
+        : `Net Switch ${offer.version} is out.${offer.packageManager ? ' Update with your package manager.' : ''}`;
+      node = notice('update', message, [
+        ...(!offer.packageManager ? [availableUpdateAction(offer)] : []),
         h('a', { class: 'button button-quiet', href: offer.page, target: '_blank', rel: 'noopener noreferrer', text: 'What’s new', 'data-focus': 'update-notes' }),
         actionButton('Not now', 'Hiding…', 'update-dismiss', () => api('/api/update/dismiss', { version: offer.version }), { quiet: true }),
       ]);
@@ -1270,7 +1281,7 @@ function updateNotice() {
   node.dataset.update = status?.phase ?? 'available';
   // Byte progress is updated in place below. It must not replace the buttons,
   // collapse Details or repeatedly announce an unchanged status sentence.
-  node.dataset.noticeKey = JSON.stringify([status?.phase, status?.operation, version, status?.previousVersion, status?.error, offer?.page, offer?.packageManager]);
+  node.dataset.noticeKey = JSON.stringify([status?.phase, status?.operation, version, status?.previousVersion, status?.error, offer?.page, offer?.packageManager, state.features?.signedUpdates]);
   if (node.dataset.kind !== 'error') node.querySelector('.notice-body p').setAttribute('role', 'status');
   return node;
 }
@@ -3211,7 +3222,7 @@ function updateCheckRow() {
   else if (found?.result === 'failed') text = 'Couldn’t reach GitHub. Check your connection and try again.';
   const update =
     !checking && !updateBusy() && state.update && !state.update.packageManager
-      ? applyUpdateButton(state.update.version)
+      ? availableUpdateAction(state.update)
       : null;
   return h(
     'div',

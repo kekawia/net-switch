@@ -209,7 +209,9 @@ try {
     $journal = Read-UpdateJournal
     if ($journal.runnerPid -ne $hit.pid) { throw 'Crash barrier did not identify the recorded updater.' }
     $crashing = Get-Process -Id $hit.pid
-    if ($crashing.Path -notlike '*\updates\runner\*\netswitchctl.exe') { throw 'Refusing to kill an unrelated process.' }
+    $expectedRunner = Join-Path $appDir "updates\runner\$($journal.status.operation)\netswitchctl.exe"
+    $createdTicks = [Int64][System.Numerics.BigInteger]::Divide([bigint]$journal.runnerCreated,100) + [DateTime]::UnixEpoch.Ticks
+    if ($crashing.Path -ne $expectedRunner -or $crashing.StartTime.ToUniversalTime().Ticks -ne $createdTicks) { throw 'Refusing to kill an unrelated or reused process.' }
     $crashing.Kill(); if (-not $crashing.WaitForExit(10000)) { throw 'Updater did not exit at crash barrier.' }
     # The owner desktop reconnects through the preserved Control registration.
     # No test helper invokes rollback or repairs the service paths for it.

@@ -347,10 +347,11 @@ func (c *Core) State() map[string]any {
 	if s.VPNFirewall != nil {
 		routingState["vpnFirewall"] = s.VPNFirewall
 	}
+	features := map[string]any{"reconnect": true, "combine": true, "lines": true, "installedApps": true}
 	state := map[string]any{
 		"mode": c.op.Mode, "elevated": c.elevated, "version": c.op.Version,
 		"update": offer, "updateChecks": updates,
-		"features": map[string]any{"reconnect": true, "combine": true, "lines": true, "installedApps": true},
+		"features": features,
 		"combine":  map[string]any{"on": s.Policy.Combine, "active": c.combineActiveLocked(s), "mode": c.values["combineMode"]},
 		"routing":  routingState,
 		"lines":    ll, "candidates": candidates, "apps": appRows,
@@ -369,6 +370,7 @@ func (c *Core) State() map[string]any {
 		state["usageError"] = c.usageIssue
 	}
 	if c.op.Updater != nil {
+		features["signedUpdates"] = true
 		if update := c.op.Updater.Status(); update != nil {
 			state["updateStatus"] = update
 		}

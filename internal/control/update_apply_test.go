@@ -92,6 +92,45 @@ func TestUpdateApplyHTTPAuthenticatesAndAcceptsOnlyTheOfferedVersion(t *testing.
 	}
 }
 
+func TestNativeUpdateRoutesKeepCompatibilityAndAuthorizationBoundaries(t *testing.T) {
+	c, _, _, _ := testCore(t, map[string]any{})
+	h := &HTTP{Core: c, Port: 9527, Token: "owner"}
+	if _, exists := js.Object(c.State()["features"])["signedUpdates"]; exists {
+		t.Fatal("compatibility state advertises an unavailable installer")
+	}
+	for _, path := range []string{"/api/update/apply", "/api/update/status-dismiss"} {
+		if knownRoute("POST", path) {
+			t.Fatal("native route entered the frozen compatibility table", path)
+		}
+		for _, test := range []struct {
+			method, token, origin string
+			backend               bool
+			status                int
+		}{
+			{"POST", "owner", "", false, 404},
+			{"POST", "wrong", "", true, 401},
+			{"POST", "owner", "https://example.com", true, 403},
+			{"GET", "owner", "", true, 404},
+		} {
+			c.op.Updater = nil
+			if test.backend {
+				c.op.Updater = &fakeUpdateBackend{}
+			}
+			if test.backend && js.Object(c.State()["features"])["signedUpdates"] != true {
+				t.Fatal("native installer capability missing")
+			}
+			r := httptest.NewRequest(test.method, "http://127.0.0.1:9527"+path, strings.NewReader("{}"))
+			r.Header.Set("X-Token", test.token)
+			r.Header.Set("Origin", test.origin)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != test.status {
+				t.Fatalf("%s %s: got %d, want %d", test.method, path, w.Code, test.status)
+			}
+		}
+	}
+}
+
 func TestUpdateServiceStopPreservesLatestOwnerRoutingChoice(t *testing.T) {
 	for _, explicitStop := range []bool{false, true} {
 		t.Run(map[bool]string{false: "still-on", true: "owner-stopped"}[explicitStop], func(t *testing.T) {

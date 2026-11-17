@@ -12,6 +12,7 @@
 //   --update-outcome=rolled-back  choose the result after clicking Update now
 //   --version=1.0.0 --update-version=1.1.0  match the approved design examples
 //   --linux         show package-manager updates
+//   --legacy-updates  preserve the old reference server's manual download flow
 //   --probe-file=<absolute path>  run the local layout/motion probe in this page
 //   --lines=N       start with 1 to 6 lines (3 by default)
 //   --no-apps       no app is using the internet
@@ -101,6 +102,7 @@ let demoOffer = { ...DEMO_UPDATE };
 let updateStatus = null;
 let updateStartedAt = 0;
 let updateOutcome = 'complete';
+let signedUpdates = true;
 
 let lines = [];
 let candidates = [];
@@ -131,6 +133,7 @@ function parseArgs(args) {
     else if (name === 'version') options.version = value;
     else if (name === 'update-version') options.updateVersion = value;
     else if (name === 'linux') options.linux = true;
+    else if (name === 'legacy-updates') options.legacyUpdates = true;
     else if (name === 'probe-file') options.probeFile = value;
   }
   return options;
@@ -188,6 +191,7 @@ function reset(options = {}) {
   if (options.updateState === 'reboot-required') demoVersion = demoOffer.version;
   updateStartedAt = 0;
   updateOutcome = options.updateOutcome ?? 'complete';
+  signedUpdates = !options.legacyUpdates;
   settings = { autostart: false, checkForUpdates: true, probeTargets: ['1.1.1.1:443', '8.8.8.8:443'] };
   setup = {
     cableNotDefault: Boolean(options.setup),
@@ -377,7 +381,7 @@ function state() {
     version: demoVersion,
     update: offerUpdate ? demoOffer : null,
     ...(updateStatus ? { updateStatus } : {}),
-    features: { reconnect: true, combine: true, lines: true, installedApps: true },
+    features: { reconnect: true, combine: true, lines: true, installedApps: true, ...(signedUpdates ? { signedUpdates: true } : {}) },
     combine: { on: combine.on, active: combineActive(), mode: combine.mode },
     routing: { status: routingOn ? 'on' : 'off', wanted: routingOn, error: null, measuring: routingOn, proxyPort: null, retryAt: null },
     lines: lineRows,

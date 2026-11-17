@@ -2122,11 +2122,16 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 	}
 
 	var wasRoutingOn, updateWanted bool
+	var existingStore string
 	if opts.UpdateOperation != "" {
 		dataDir, err = ResolveStore(dataDir)
 		if err != nil {
 			return err
 		}
+		if err := CheckDirectory(dataDir); err != nil {
+			return err
+		}
+		existingStore = dataDir
 		wasRoutingOn, updateWanted, err = updateInstallContext(dataDir, appDir, opts.UpdateOperation, version)
 		if err != nil {
 			return err
@@ -2138,6 +2143,7 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 				return err
 			}
 			defer release()
+			existingStore = resolved
 		}
 		wasRoutingOn = queryCurrentControlRoutingWanted(ctx)
 	}
@@ -2174,8 +2180,16 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 			return fmt.Errorf("keep recovery installer before install: %w", err)
 		}
 	}
-	storeDir, err := PrepareStore(dataDir)
-	if err != nil {
+	// A certified store is already protected. Preparing it again would need
+	// exclusive handles to update.lock, which this transaction deliberately
+	// holds (or the detached runner holds for a signed installation).
+	storeDir := existingStore
+	if storeDir == "" {
+		storeDir, err = PrepareStore(dataDir)
+		if err != nil {
+			return err
+		}
+	} else if err := CheckDirectory(storeDir); err != nil {
 		return err
 	}
 	if err := refuseStandInStore(storeDir); err != nil {

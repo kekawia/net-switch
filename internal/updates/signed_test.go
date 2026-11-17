@@ -85,6 +85,59 @@ func TestDevelopmentRootIsExplicitAndCannotShip(t *testing.T) {
 	}
 }
 
+func TestOfficialUnencryptedKeyWithoutChecksumStillChecksItsPublicHalf(t *testing.T) {
+	public, secret, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, err := minisignLines(secret, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(lines[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	clear(raw[126:])
+	keyText := func() string { return lines[0] + "\n" + base64.StdEncoding.EncodeToString(raw) + "\n" }
+	sig, err := SignMinisign(keyText(), []byte("official unencrypted format"), "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyMinisign(public, []byte("official unencrypted format"), sig); err != nil {
+		t.Fatal(err)
+	}
+	raw[70] ^= 1
+	if _, err := SignMinisign(keyText(), nil, "fixture"); err == nil {
+		t.Fatal("unchecked private seed/public key mismatch")
+	}
+	raw[70] ^= 1
+	raw[126] = 1
+	if _, err := SignMinisign(keyText(), nil, "fixture"); err == nil {
+		t.Fatal("invalid nonzero checksum accepted")
+	}
+}
+
+func TestProductionRootRefusesDevelopmentKeyWithAnyLabelOrID(t *testing.T) {
+	key, err := publicKeyBytes(DevelopmentRootPublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key[2] ^= 1
+	for _, text := range []string{DevelopmentRootPublicKey, untrustedPrefix + "another label\n" + DevelopmentRootPublicKey + "\n", base64.StdEncoding.EncodeToString(key)} {
+		if err := checkProductionRoot(text); err == nil {
+			t.Fatal("development private key accepted as production root")
+		}
+	}
+	public, _, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkProductionRoot(public); err != nil {
+		t.Fatal("independent root refused", err)
+	}
+}
+
 type signingFixture struct {
 	root, rootSecret, releaseSecret string
 	now                             time.Time

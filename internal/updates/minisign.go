@@ -118,7 +118,12 @@ func parseSigningKey(text string) (signingKey, error) {
 	if err != nil {
 		return signingKey{}, err
 	}
-	if !bytes.Equal(expected, key.private) || !bytes.Equal(checksum, b[126:]) {
+	// Official Minisign -G -W leaves the checksum zeroed: it computes that
+	// field only when encrypting a key. Converted or our own unencrypted keys
+	// may retain a checksum. Always verify seed/public consistency, and check
+	// any nonzero checksum rather than accepting arbitrary checksum bytes.
+	checksumPresent := !bytes.Equal(b[126:], make([]byte, 32))
+	if !bytes.Equal(expected, key.private) || (checksumPresent && !bytes.Equal(checksum, b[126:])) {
 		return signingKey{}, errors.New("Minisign secret key checksum or public key does not match")
 	}
 	return key, nil

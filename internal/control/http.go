@@ -121,7 +121,7 @@ func (h *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			sendJSON(w, 401, map[string]any{"error": "Open Net Switch from its shortcut."})
 			return
 		}
-		if !knownRoute(r.Method, path) {
+		if !knownRoute(r.Method, path) && !h.knownUpdateRoute(r.Method, path) {
 			sendJSON(w, 404, map[string]any{"error": "Not found"})
 			return
 		}
@@ -204,9 +204,6 @@ func knownRoute(method, path string) bool {
 	}
 	if method != "POST" {
 		return false
-	}
-	if path == "/api/update/apply" || path == "/api/update/status-dismiss" {
-		return true
 	}
 	switch path {
 	case "/api/routing", "/api/app-line", "/api/lines/add", "/api/lines/remove", "/api/lines/update", "/api/lines/order", "/api/reconnect", "/api/update/check", "/api/update/dismiss", "/api/combine", "/api/settings", "/api/setup/cable-default", "/api/setup/keep-both", "/api/setup/undo", "/api/quit":

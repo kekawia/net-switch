@@ -23,6 +23,8 @@ var updateFixtureRole = flag.String("update-fixture-role", "", "private test sub
 var updateFixtureRoot = flag.String("update-fixture-root", "", "private test directory")
 var updateFixtureHandle = flag.Uint64("update-fixture-handle", 0, "test sentinel handle")
 var updateFixtureIdentity = flag.String("update-fixture-identity", "", "test sentinel file identity")
+var updateFixtureService = flag.String("update-fixture-service", "", "hosted proof service identity")
+var updateProofFromService = flag.Bool("update-proof-from-service", false, "proof launched by the hosted SCM fixture")
 
 type updateProcessReport struct {
 	PID       uint32 `json:"pid"`
@@ -53,6 +55,10 @@ func TestUpdateProcessFixture(t *testing.T) {
 	}
 	if !filepath.IsAbs(*updateFixtureRoot) {
 		t.Fatal("fixture directory must be absolute")
+	}
+	if *updateFixtureRole == "service" {
+		runUpdateProofService(t)
+		return
 	}
 	if *updateFixtureRole == "parent" {
 		inside, membershipErr := winapi.ProcessInJob(windows.CurrentProcess(), 0)
@@ -110,6 +116,15 @@ func TestUpdateProcessFixture(t *testing.T) {
 }
 
 func TestDetachedUpdaterSurvivesWorkerJobAndParentExit(t *testing.T) {
+	if *updateProofFromService {
+		inside, err := winapi.ProcessInJob(windows.CurrentProcess(), 0)
+		if err != nil || inside {
+			t.Fatal("SCM proof did not start outside all jobs", inside, err)
+		}
+	} else if os.Getenv("GITHUB_ACTIONS") == "true" && os.Getenv("RUNNER_ENVIRONMENT") == "github-hosted" {
+		runHostedUpdateProof(t)
+		return
+	}
 	root := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
