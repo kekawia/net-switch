@@ -15,28 +15,67 @@ import (
 // StopForUpdate leaves both registrations available to the owner's desktop
 // after a power loss. Deleting them would remove the recovery entry point.
 func StopForUpdate(ctx context.Context) error {
-	if err := Stop(ctx, Control); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) {
+	if err := stopUpdateControl(ctx); err != nil {
 		return err
 	}
 	// Control requests a clean Engine shutdown; a lost Control connection also
 	// expires Engine's lease. Never replace a binary while either writer lives.
-	for _, name := range []string{Engine, Control} {
-		for {
-			status, err := Query(name)
-			if err != nil {
-				return err
-			}
-			if status.Stopped {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("%s is still stopping: %w", name, ctx.Err())
-			case <-time.After(50 * time.Millisecond):
-			}
+	for {
+		status, err := Query(Engine)
+		if err != nil {
+			return err
+		}
+		if status.Stopped {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s is still stopping: %w", Engine, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	return nil
+}
+
+// A desktop activation can be in StartPending while the update startup guard
+// exits. That guard has no writers and must not need to accept a Stop control
+// before exiting. Reconcile the observed SCM state instead of treating an
+// ordinary concurrent start/stop transition as an installer failure.
+func stopUpdateControl(ctx context.Context) error {
+	s, err := open(Control, windows.SERVICE_STOP|windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	for {
+		state, err := s.Query()
+		if err != nil {
+			return err
+		}
+		if state.State == svc.Stopped {
+			return nil
+		}
+		if state.State == svc.Running {
+			if _, err := s.Control(svc.Stop); err != nil && !errors.Is(err, windows.ERROR_SERVICE_NOT_ACTIVE) && !errors.Is(err, windows.ERROR_SERVICE_CANNOT_ACCEPT_CTRL) {
+				// A new StartPending instance does not yet accept controls.
+				// Only tolerate that race after observing the transition.
+				if !errors.Is(err, windows.ERROR_INVALID_SERVICE_CONTROL) {
+					return err
+				}
+				current, queryErr := s.Query()
+				if queryErr != nil {
+					return queryErr
+				}
+				if current.State == svc.Running {
+					return err
+				}
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%s did not stop for the update: %w", Control, ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 // UpdatePaths changes only image paths and Engine's matching recovery command.

@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kekawia/net-switch/internal/localipc"
 	"golang.org/x/sys/windows"
 )
 
@@ -68,37 +67,31 @@ func (u *controlUpdater) watchInterruptedUpdate() {
 	}
 }
 
-// The desktop may restart Control while Inno is between service-path and data
-// writes. Keep its registration responsive to Stop, but do not start any data
-// writers until the installer's matching health transaction is ready.
-func awaitControlUpdate(ctx context.Context, data string, ready func(), log func(string)) (bool, error) {
+// The desktop may activate Control while the updater is stopping services.
+// Start recovery if needed, then exit cleanly instead of reporting a running
+// service which waits for the updater: that would recreate the very service
+// the updater is waiting to stop. The installer starts Control explicitly once
+// its matching health transaction is ready; no data writer starts before it.
+func deferControlForUpdate(ctx context.Context, data string, log func(string)) (bool, error) {
 	resolved, err := ResolveStore(data)
 	if err != nil {
 		return false, err
 	}
-	for {
-		recoverPendingUpdate(ctx, resolved, log, false)
-		j, err := readUpdateJournal(resolved)
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		if err != nil {
-			return false, err
-		}
-		if !j.Captured || j.Status.Phase == "complete" || j.Status.Phase == "reboot-required" || j.Status.Phase == "rolled-back" {
-			return false, nil
-		}
-		if j.Status.Phase == "failed" {
-			return false, errors.New("update recovery failed; installation repair is required")
-		}
-		if updateHealthReady(j) {
-			return false, nil
-		}
-		ready()
-		if err := localipc.Pause(ctx, 200*time.Millisecond); err != nil {
-			return true, nil
-		}
+	recoverPendingUpdate(ctx, resolved, log, false)
+	j, err := readUpdateJournal(resolved)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
+	if err != nil {
+		return false, err
+	}
+	if !j.Captured || completedUpdate(j.Status.Phase) {
+		return false, nil
+	}
+	if j.Status.Phase == "failed" {
+		return false, errors.New("update recovery failed; installation repair is required")
+	}
+	return !updateHealthReady(j), nil
 }
 
 func updateHealthReady(j updateJournal) bool {

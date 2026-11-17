@@ -12,7 +12,7 @@ import (
 
 func newControlUpdater(context.Context, Config, func(string)) updates.Backend { return nil }
 func recoverPendingUpdate(context.Context, string, func(string))              {}
-func awaitControlUpdate(context.Context, string, func(), func(string)) (bool, error) {
+func deferControlForUpdate(context.Context, string, func(string)) (bool, error) {
 	return false, nil
 }
 func runUpdateHealthCheck(context.Context, Config, *control.Core, *Remote, func(string)) bool {

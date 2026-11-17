@@ -23,7 +23,7 @@ func ServiceCommand(name string, args []string) error {
 	}
 	return service.Run(name, func(ctx context.Context, ready func()) error {
 		if name == service.Control {
-			stopped, err := awaitControlUpdate(ctx, *data, ready, func(message string) { service.ReportError(name, errors.New(message)) })
+			stopped, err := deferControlForUpdate(ctx, *data, func(message string) { service.ReportError(name, errors.New(message)) })
 			if err != nil || stopped {
 				return err
 			}
