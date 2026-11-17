@@ -33,8 +33,13 @@ function Write-UpdateFixtureFile([string] $Name, [string] $Text) {
   if ($Name -notmatch '^[a-z0-9.-]+$') { throw 'Invalid protected fixture filename.' }
   $target = Join-Path $machineData $Name
   [IO.File]::WriteAllText($target,$Text,[Text.UTF8Encoding]::new($false))
-  & icacls.exe $target /setowner '*S-1-5-32-544' /inheritance:r /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Could not protect fixture $Name" }
+  # /setowner is a separate icacls operation, not a modifier of /grant.
+  & icacls.exe $target /setowner '*S-1-5-32-544' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Could not set fixture owner: $Name" }
+  & icacls.exe $target /inheritance:r | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Could not protect fixture inheritance: $Name" }
+  & icacls.exe $target /grant:r '*S-1-5-18:F' '*S-1-5-32-544:F' | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Could not grant fixture service permissions: $Name" }
 }
 
 function Get-SignedCtl {

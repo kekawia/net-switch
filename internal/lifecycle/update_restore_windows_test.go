@@ -2,7 +2,6 @@ package lifecycle
 
 import (
 	"context"
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +9,6 @@ import (
 	"time"
 
 	win "github.com/kekawia/net-switch/internal/platform/windows"
-	"golang.org/x/sys/windows"
 )
 
 func TestHostedUndoPreparationPrecedesUpdateLock(t *testing.T) {
@@ -21,19 +19,28 @@ func TestHostedUndoPreparationPrecedesUpdateLock(t *testing.T) {
 	if !filepath.IsAbs(proofParent) {
 		t.Fatal("hosted ProgramData path is not absolute")
 	}
-	requested := filepath.Join(proofParent, "NetSwitch-update-undo-proof-"+randomID()[:16])
-	if !strings.EqualFold(filepath.Dir(requested), proofParent) {
-		t.Fatal("proof store escaped its parent")
+	newStore := func() (string, string) {
+		t.Helper()
+		requested := filepath.Join(proofParent, "NetSwitch-update-undo-proof-"+randomID()[:16])
+		if !strings.EqualFold(filepath.Dir(requested), proofParent) {
+			t.Fatal("proof store escaped its parent")
+		}
+		data, err := PrepareStore(requested)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := CleanupMachineDataCommand(requested); err != nil {
+				t.Error(err)
+			}
+		})
+		return requested, data
 	}
-	data, err := PrepareStore(requested)
+	requested, data := newStore()
+	before, err := os.Stat(data)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := CleanupMachineDataCommand(requested); err != nil {
-			t.Error(err)
-		}
-	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	release, err := (Lock{Data: data, Name: "update"}).Acquire(ctx)
@@ -44,10 +51,28 @@ func TestHostedUndoPreparationPrecedesUpdateLock(t *testing.T) {
 	if err := release(); err != nil {
 		t.Fatal(err)
 	}
-	if !errors.Is(prepareErr, windows.ERROR_SHARING_VIOLATION) {
-		t.Fatalf("expected exclusive protection to refuse the held update lock, got %v", prepareErr)
+	// Protection may report either a sharing failure or the subsequent refused
+	// quarantine rename. The contract is refusal without replacing the live tree.
+	if prepareErr == nil {
+		t.Fatal("exclusive preparation accepted a held update lock")
 	}
-	if err := Ctl([]string{"restore-windows", "--data", requested}); err != nil {
+	after, err := os.Stat(data)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("held live folder was replaced", err)
+	}
+	// The deliberately failed protection attempt can leave a certified stage.
+	// Test the corrected CLI order on a fresh store with an existing closed lock.
+	fresh, freshData := newStore()
+	freshCtx, stopFresh := context.WithTimeout(context.Background(), time.Second)
+	defer stopFresh()
+	release, err = (Lock{Data: freshData, Name: "update"}).Acquire(freshCtx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	if err := Ctl([]string{"restore-windows", "--data", fresh}); err != nil {
 		t.Fatal("restore failed with correct preparation/lock ordering", err)
 	}
 }
