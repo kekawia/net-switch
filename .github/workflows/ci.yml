@@ -506,6 +506,7 @@ jobs:
           sudo apt-get install -y minisign
           minisign -v
           go test -v -count=1 -timeout=2m -run '^TestUpdateSigningMinisignInteroperability$' ./internal/lifecycle
+          go test -v -count=1 -timeout=2m -tags=lifecycle_test ./internal/updates
       - name: Held hostile engine ownership folder through startup and recovery
         if: runner.os == 'Windows'
         env:
