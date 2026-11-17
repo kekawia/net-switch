@@ -6,16 +6,18 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 )
 
 const LatestReleaseAPIURL = "https://api.github.com/repositories/1418987447/releases/latest"
 
-// Check retrieves the existing update offer by numeric repository ID.
+// Check discovers an update from the numeric repository. Windows offers only
+// installers whose manifest and rotating signing key verify against the root.
 func Check(ctx context.Context, version, architecture string) (*Offer, error) {
-	return checkURL(ctx, LatestReleaseAPIURL, http.DefaultClient, version, architecture)
+	return (&Client{Platform: runtime.GOOS}).Check(ctx, version, architecture)
 }
 
-func checkURL(ctx context.Context, url string, client *http.Client, version, architecture string) (*Offer, error) {
+func fetchRelease(ctx context.Context, url string, client *http.Client, version string) (map[string]any, error) {
 	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -34,9 +36,16 @@ func checkURL(ctx context.Context, url string, client *http.Client, version, arc
 	if response.StatusCode != 200 {
 		return nil, fmt.Errorf("GitHub answered %d", response.StatusCode)
 	}
-	var release map[string]any
-	if err := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&release); err != nil {
+	raw, err := io.ReadAll(io.LimitReader(response.Body, (2<<20)+1))
+	if err != nil {
 		return nil, err
 	}
-	return OfferFrom(release, version, architecture), nil
+	if len(raw) > 2<<20 {
+		return nil, fmt.Errorf("release metadata exceeds its size limit")
+	}
+	var release map[string]any
+	if err := json.Unmarshal(raw, &release); err != nil {
+		return nil, err
+	}
+	return release, nil
 }

@@ -368,5 +368,10 @@ func (c *Core) State() map[string]any {
 	if c.usageIssue != "" {
 		state["usageError"] = c.usageIssue
 	}
+	if c.op.Updater != nil {
+		if update := c.op.Updater.Status(); update != nil {
+			state["updateStatus"] = update
+		}
+	}
 	return state
 }

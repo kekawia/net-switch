@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 export const candidate = 'CREATE_BREAKAWAY_FROM_JOB|0[xX][0-9a-fA-F_]+|1_?6_?7_?7_?7_?2_?1_?6|0[bBoO][0-9_]+|01[0_]+|1[[:space:]]*<<[[:space:]]*24';
 export function breakawayProblems(lines) {
   const named = [], problems = [];
+  const allowed = new Set(['internal/wintun/registrar_windows.go', 'internal/lifecycle/updater_launch_windows.go']);
   for (const line of lines) {
     const match = /^([^:]+):\d+:(.*)$/.exec(line);
     if (!match) continue;
@@ -15,7 +16,7 @@ export function breakawayProblems(lines) {
     const code = raw.replace(/\/\/.*$/, '');
     if (code.includes('CREATE_BREAKAWAY_FROM_JOB')) {
       named.push(line);
-      if (path !== 'internal/wintun/registrar_windows.go' || !/^\s*flags \|= windows\.CREATE_BREAKAWAY_FROM_JOB\s*$/.test(code)) problems.push(line);
+      if (!allowed.has(path) || !/^\s*flags \|= windows\.CREATE_BREAKAWAY_FROM_JOB\s*$/.test(code)) problems.push(line);
     }
     for (const value of code.match(/\b(?:0[xX][0-9a-fA-F_]+|0[bBoO][0-9_]+|[0-9][0-9_]*)\b/g) ?? []) {
       let token = value.replaceAll('_', '');
@@ -24,11 +25,13 @@ export function breakawayProblems(lines) {
     }
     if (/\b1\s*<<\s*24\b/.test(code)) problems.push(line);
   }
-  if (named.length !== 1) problems.push(`expected one registrar breakaway site, got ${named.length}`);
+  for (const path of allowed) {
+    if (named.filter(line => line.startsWith(`${path}:`)).length !== 1) problems.push(`expected exactly one breakaway site in ${path}`);
+  }
   return problems;
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const output = execFileSync('git', ['grep', '--no-color', '-n', '-E', candidate, '--', '*.go', ':!vendor/**', ':!third_party/**', ':!*_test.go'], {encoding:'utf8', maxBuffer:8<<20});
   assert.deepEqual(breakawayProblems(output.trim().split('\n')), [], 'unexpected breakaway use');
-  console.log('Only the atomic registrar launch requests breakaway; whole Go tree and numeric masks checked.');
+  console.log('Only the registrar and detached updater launches request breakaway; whole Go tree and numeric masks checked.');
 }

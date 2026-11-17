@@ -21,6 +21,7 @@ type UICallbacks struct {
 	ToggleCombine  func(wantOn bool)
 	SetAppLine     func(appPath string, line *string)
 	DismissUpdate  func(version string)
+	ApplyUpdate    func(version string)
 	Quit           func()
 	FallbackStatus func(text string) error
 }
@@ -93,9 +94,19 @@ var trayStatuses = map[string]string{
 // UpdateOffer returns [version, installerURL] when state offers a verified
 // Net Switch release installer URL, or nil otherwise.
 func UpdateOffer(state map[string]any) *[2]string {
+	if phase := textVal(childMap(state, "updateStatus"), "phase"); phase != "" && phase != "complete" {
+		return nil
+	}
 	update := childMap(state, "update")
 	version := textVal(update, "version")
 	installer := textVal(update, "installer")
+	if update["packageManager"] == true {
+		page := textVal(update, "page")
+		if version != "" && page == "https://github.com/kekawia/net-switch/releases/tag/v"+version {
+			return &[2]string{version, page}
+		}
+		return nil
+	}
 	if version == "" || installer == "" {
 		return nil
 	}

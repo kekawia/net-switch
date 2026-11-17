@@ -96,7 +96,7 @@ func (d *DesktopBridge) Complete(id, key string, value any, message string) {
 }
 func (d *DesktopBridge) Call(ctx context.Context, op string, args map[string]any) (any, error) {
 	switch op {
-	case "app-info", "installed-apps", "autostart", "autostart-set", "autostart-upgrade":
+	case "app-info", "installed-apps", "autostart", "autostart-set", "autostart-upgrade", "restart-self":
 		d.mu.Lock()
 		var session *desktopEndpoint
 		for _, candidate := range d.sessions {

@@ -254,9 +254,9 @@ An installed copy uses three places:
 
 | Folder | What's in it |
 | --- | --- |
-| `C:\Program Files\Net Switch` | The program, with its own Node.js and sing-box |
-| `%LOCALAPPDATA%\Net Switch` | Your settings (`settings.json` and a backup, and the tray's `tray-settings.json`), the data each line used (`usage.json`), `server.log`, `tray.log`, `launch.log` |
-| `%ProgramData%\Net Switch` | The Windows undo record and the engine's files and log (administrators only) |
+| `C:\Program Files\Net Switch` | The installed versions, desktop launcher and protected update files |
+| `%LOCALAPPDATA%\Net Switch` | Your tray preferences (`tray-settings.json`) and settings retained from older installations |
+| `%ProgramData%\Net Switch` | Routing settings, usage, Windows undo records, service logs and update recovery records (administrators only) |
 
 Settings from older versions, with a cable and a second connection, become two
 lines the first time a newer version starts, with every app keeping its line.
@@ -264,18 +264,14 @@ lines the first time a newer version starts, with every app keeping its line.
 If `settings.json` is damaged, Net Switch keeps a copy as
 `settings.json.corrupt-…` and starts from the backup, or from the defaults if
 the backup is damaged too. A single setting with an impossible value goes back
-to its default on its own. Either way, `server.log` says what happened.
+to its default on its own.
 
-Logs stay small. `server.log` and the engine log start over in a `.1` file past
-2 MB and 5 MB, `launch.log` past 1 MB, and `tray.log` is cleared at startup
-once it passes 512 KB.
-
-Uninstalling removes the program folder and the tasks that start Net Switch
+Uninstalling removes the program folder and the entry that starts Net Switch
 with Windows. It removes `%ProgramData%\Net Switch` only once the Windows
 changes are undone, or if you tell it to drop the undo record; if undoing
-fails, the record stays so a reinstall can try again. Your settings and logs in
-`%LOCALAPPDATA%\Net Switch` always stay, so a reinstall picks up where you left
-off. Delete that folder if you don't want them.
+fails, the record stays so a reinstall can try again. The current routing
+settings are removed with that machine store. Your per-user files in
+`%LOCALAPPDATA%\Net Switch` stay. Delete that folder if you don't want them.
 
 ## Updates
 
@@ -283,21 +279,27 @@ A minute after it starts, and then twice a day, Net Switch asks GitHub whether
 a newer version is out. If one is, the window shows a notice with three
 buttons:
 
-- **Download** downloads the new installer in your browser. Run it: it closes
-  Net Switch, updates it and keeps your settings. Open Net Switch again
-  afterwards.
+- **Update now** downloads and checks the signed installer, then installs it
+  and reopens Net Switch with your settings. Routing reconnects during the
+  installation. If you turn routing off, it stays off.
 - **What's new** opens the release notes.
 - **Not now** hides that version. You'll hear about the next one.
 
-The tray icon's right-click menu offers the same download.
+The Windows tray icon's right-click menu offers the same update. On Linux,
+use your package manager; the notice links to the release notes.
+
+An installer that fails its signature check is never run. If installation
+fails, Net Switch tries to restore the previous version and your saved
+settings, and tells you whether that worked. If Windows needs a restart,
+you can restart it when convenient.
 
 To check right away, press **Check now** in the window's **Settings**. It works
 even with the automatic checks turned off, and it also brings back a version
 you said **Not now** to.
 
-Net Switch never downloads or installs anything by itself: its server runs as
-administrator, and installing should always be your decision. To stop the
-checks, turn off **Check for updates** in the window's **Settings**.
+Net Switch downloads and installs an update only when you choose **Update
+now**. To stop the automatic checks, turn off **Check for updates** in the
+window's **Settings**.
 
 ## Limitations
 

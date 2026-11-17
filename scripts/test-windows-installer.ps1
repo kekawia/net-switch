@@ -56,6 +56,7 @@ function Save-SuiteDiagnostics([string] $Label) {
   New-Item -ItemType Directory -Force -Path $dest | Out-Null
   foreach ($src in @(
     (Join-Path $machineData 'migration-journal.json'),
+    (Join-Path $machineData 'update-journal.json'),
     (Join-Path $machineData 'netswitch.log'),
     (Join-Path $machineData 'netswitch-engine.log'),
     (Join-Path $machineData 'settings.json'),
@@ -724,6 +725,7 @@ setInterval(() => {}, 60000);
     throw "Expected 4 passed installer cases, got $passedCases"
   }
   Write-Host "INSTALLER SUITE SUMMARY ($Arch): $passedCases/4 cases passed"
+  . (Join-Path $PSScriptRoot 'test-signed-updates.ps1')
 } catch {
   Save-SuiteDiagnostics 'failure'
   throw

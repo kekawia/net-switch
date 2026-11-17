@@ -61,10 +61,11 @@ func TestCheckUsesNumericRepositoryIDAndHeaders(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	offer, err := checkURL(context.Background(), srv.URL, srv.Client(), "1.0.0", "arm64")
+	release, err := fetchRelease(context.Background(), srv.URL, srv.Client(), "1.0.0")
 	if err != nil {
-		t.Fatalf("checkURL failed: %v", err)
+		t.Fatalf("fetchRelease failed: %v", err)
 	}
+	offer := OfferFrom(release, "1.0.0", "arm64")
 	if offer == nil || offer.Version != "1.1.0" {
 		t.Fatalf("offer = %+v, want 1.1.0", offer)
 	}

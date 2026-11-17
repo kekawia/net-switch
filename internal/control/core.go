@@ -62,6 +62,7 @@ type Options struct {
 	ProbeBackground        func(string, func())
 	AutostartAllowed       bool
 	CheckUpdate            func(context.Context) (*updates.Offer, error)
+	Updater                updates.Backend
 	Tracker                AppTracker
 	PathRules              *apppath.Rules
 	Crash                  *crashnet.Net
@@ -925,6 +926,9 @@ func (c *Core) Start(ctx context.Context) error {
 	})
 }
 func (c *Core) Routing(ctx context.Context, on bool) error {
+	if on && c.updateApplying() {
+		return bad("Wait for the update to finish, then turn routing on.")
+	}
 	ctx = c.ctx
 	// Turning routing on is a fresh intent with a full retry budget.
 	next := routingIntent{wanted: on, fresh: on}
@@ -1313,6 +1317,16 @@ func (c *Core) SaveUsage() error {
 	return c.saveUsage(false)
 }
 func (c *Core) Shutdown(ctx context.Context) error {
+	return c.shutdown(ctx, false)
+}
+
+// ShutdownForService preserves only the update's durable routing choice. Quit
+// still commits an explicit stop through Shutdown, even during an update.
+func (c *Core) ShutdownForService(ctx context.Context) error {
+	return c.shutdown(ctx, true)
+}
+
+func (c *Core) shutdown(ctx context.Context, preserveUpdate bool) error {
 	// quitting holds off new starts while the stop intent is written. It is
 	// not intent: a refused write puts it back and leaves wanted untouched.
 	c.mu.Lock()
@@ -1321,7 +1335,7 @@ func (c *Core) Shutdown(ctx context.Context) error {
 	c.mu.Unlock()
 	if c.op.ServiceMode {
 		c.applyMu.Lock()
-		err := c.commitIntent(routingIntent{wanted: false})
+		err := c.commitIntent(routingIntent{wanted: false, preserveUpdate: preserveUpdate})
 		c.applyMu.Unlock()
 		if err != nil {
 			c.mu.Lock()

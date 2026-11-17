@@ -80,6 +80,13 @@ var
   DeleteMachineData: Boolean;
   UninstallCtlPath: String;
 
+#ifdef UpdateTestFixture
+function NeedRestart: Boolean;
+begin
+  Result := ExpandConstant('{param:NSUPDATEREBOOT|0}') = '1';
+end;
+#endif
+
 function ReadFirstTrimmedLine(const FilePath: String): String;
 var
   Lines: TArrayOfString;
@@ -204,6 +211,7 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   CtlExe, AppPath, ErrFile, CallerSID, ChosenProfile, SubCmd, Params, ErrMsg: String;
+  UpdateOperation, MachineData: String;
   ExitCode: Integer;
 begin
   Result := '';
@@ -240,6 +248,14 @@ begin
   end;
   if CallerSID <> '' then
     Params := Params + ' --owner "' + CallerSID + '"';
+
+  Params := Params + ' --installer "' + ExpandConstant('{srcexe}') + '"';
+  UpdateOperation := Trim(ExpandConstant('{param:UPDATEOP|}'));
+  MachineData := Trim(ExpandConstant('{param:DATA|}'));
+  if UpdateOperation <> '' then
+    Params := Params + ' --update-operation "' + UpdateOperation + '"';
+  if MachineData <> '' then
+    Params := Params + ' --data "' + MachineData + '"';
 
   ExitCode := -1;
   if not Exec(CtlExe, Params, ExpandConstant('{tmp}\stage'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then begin

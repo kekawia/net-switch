@@ -79,7 +79,7 @@ type TrayCallbacks struct {
 	FlyoutDismissInfo    func() (time.Time, int32, int32)
 	OnOpenWindow         func(appKey string)
 	OnToggleNotices      func()
-	OnOpenUpdate         func(url string)
+	OnApplyUpdate        func(version string)
 	OnRemoveIcon         func()
 	OnQuit               func()
 }
@@ -343,7 +343,7 @@ func (t *TrayIcon) showContextMenu(anchor winPoint) {
 	if t.cb.UpdateOffer != nil {
 		if offer := t.cb.UpdateOffer(); offer != nil {
 			t.lastOffer = offer
-			appendMenu(mfString, cmdTrayUpdate, "Download Net Switch "+offer[0])
+			appendMenu(mfString, cmdTrayUpdate, "Update to Net Switch "+offer[0])
 		}
 	}
 	_, _, _ = procAppendMenuW.Call(menu, mfSeparator, 0, 0)
@@ -391,8 +391,8 @@ func (t *TrayIcon) handleCommand(id uint16) {
 			t.cb.OnOpenWindow("")
 		}
 	case cmdTrayUpdate:
-		if t.lastOffer != nil && t.cb.OnOpenUpdate != nil {
-			t.cb.OnOpenUpdate(t.lastOffer[1])
+		if t.lastOffer != nil && t.cb.OnApplyUpdate != nil {
+			t.cb.OnApplyUpdate(t.lastOffer[0])
 		}
 	case cmdTrayLineNotices:
 		if t.cb.OnToggleNotices != nil {

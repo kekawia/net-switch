@@ -32,6 +32,12 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 	// Once a command is accepted, Node keeps processing it after the browser
 	// disconnects. Queues, worker calls and policy applies share that lifetime.
 	ctx = c.ctx
+	if c.updateApplying() && path != "/api/quit" && path != "/api/update/apply" && !(path == "/api/routing" && !js.Truth(b["on"])) {
+		return nil, bad("Wait for the update to finish, then try again.")
+	}
+	if strings.HasPrefix(path, "/api/update/") {
+		return c.updateAction(ctx, path, b)
+	}
 	var err error
 	switch path {
 	case "/api/routing":
@@ -98,29 +104,6 @@ func (c *Core) Action(ctx context.Context, method, path string, b map[string]any
 		}
 	case "/api/settings":
 		err = c.changeSettings(ctx, b)
-	case "/api/update/dismiss":
-		if js.Text(b["version"]) == "" {
-			err = bad("Choose which update to skip, then try again.")
-		} else {
-			err = c.save(map[string]any{"skippedUpdate": b["version"]})
-		}
-	case "/api/update/check":
-		if c.op.Mode == "proxy" {
-			return nil, bad("Test mode doesn’t check for updates.")
-		}
-		result, e := c.CheckUpdate(ctx, true)
-		if e != nil {
-			c.log("could not check for updates: %v", e)
-		}
-		state := c.State()
-		var version any
-		c.mu.Lock()
-		if c.offer != nil {
-			version = c.offer.Version
-		}
-		c.mu.Unlock()
-		state["check"] = map[string]any{"result": result, "version": version}
-		return state, nil
 	case "/api/setup/cable-default", "/api/setup/keep-both", "/api/setup/undo":
 		err = c.setupQueue.Do(ctx, func() error { return c.setup(ctx, path) })
 	case "/api/quit":

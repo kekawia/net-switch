@@ -282,7 +282,7 @@ func (s *Shell) Update(view desktop.TrayView, flyout desktop.FlyoutView) {
 	}
 	if s.mUpdate != nil && s.cb.UpdateOffer != nil {
 		if offer := s.cb.UpdateOffer(); offer != nil {
-			s.mUpdate.SetTitle(fmt.Sprintf("Download Net Switch v%s", offer[0]))
+			s.mUpdate.SetTitle(fmt.Sprintf("Net Switch %s is out (package manager)", offer[0]))
 			s.mUpdate.Show()
 		} else {
 			s.mUpdate.Hide()

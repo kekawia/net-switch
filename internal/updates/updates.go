@@ -35,9 +35,11 @@ func IsNewer(a, b string) bool {
 }
 
 type Offer struct {
-	Version   string `json:"version"`
-	Page      string `json:"page"`
-	Installer string `json:"installer"`
+	Version        string  `json:"version"`
+	Page           string  `json:"page"`
+	Installer      string  `json:"installer"`
+	PackageManager bool    `json:"packageManager,omitempty"`
+	Bundle         *Bundle `json:"-"`
 }
 
 const ReleaseBase = "https://github.com/kekawia/net-switch/releases/"
@@ -72,7 +74,7 @@ func OfferFromBase(release map[string]any, current, arch, base string) *Offer {
 		if installer != base+"download/v"+version+"/"+name {
 			return nil
 		}
-		return &Offer{version, page, installer}
+		return &Offer{Version: version, Page: page, Installer: installer}
 	}
 	return nil
 }

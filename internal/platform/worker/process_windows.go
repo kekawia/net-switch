@@ -202,7 +202,7 @@ func startWithToken(executable string, args []string, desktop *uint16, creationF
 	if len(policies) > 0 {
 		policy = policies[0]
 	}
-	job, err := windows.CreateJobObject(nil, nil)
+	job, err := winapi.NewWorkerJob(uiLimits)
 	if err != nil {
 		return nil, err
 	}
@@ -212,20 +212,6 @@ func startWithToken(executable string, args []string, desktop *uint16, creationF
 			windows.CloseHandle(job)
 		}
 	}()
-	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
-		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
-			LimitFlags:         windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS | windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY,
-			ActiveProcessLimit: 1,
-		},
-		ProcessMemoryLimit: 256 * 1024 * 1024,
-	}
-	if err = winapi.SetJobInformation(job, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
-		return nil, err
-	}
-	ui := windows.JOBOBJECT_BASIC_UI_RESTRICTIONS{UIRestrictionsClass: uiLimits}
-	if err := winapi.SetJobInformation(job, windows.JobObjectBasicUIRestrictions, &ui); err != nil {
-		return nil, fmt.Errorf("limit worker UI access: %w", err)
-	}
 	var token windows.Token
 	if err = windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_DUPLICATE|windows.TOKEN_ASSIGN_PRIMARY|windows.TOKEN_QUERY|windows.TOKEN_ADJUST_DEFAULT, &token); err != nil {
 		return nil, err

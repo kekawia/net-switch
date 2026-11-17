@@ -171,6 +171,16 @@ func (w *WebView2Window) Open(focusApp string) error {
 	})
 }
 
+// Visible reads window visibility on the owning UI thread.
+func (w *WebView2Window) Visible() bool {
+	if w == nil || w.loop == nil {
+		return false
+	}
+	visible := false
+	_ = w.loop.Do(func() error { visible = w.visible && !w.closed; return nil })
+	return visible
+}
+
 // Hide hides the window while keeping routing and tray alive.
 func (w *WebView2Window) Hide() {
 	if w == nil || w.loop == nil {

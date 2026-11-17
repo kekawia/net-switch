@@ -8,6 +8,11 @@
 // changes them. Options, to see other situations:
 //
 //   --update        also offer a newer release
+//   --update-state=downloading  hold any signed-update state for visual checks
+//   --update-outcome=rolled-back  choose the result after clicking Update now
+//   --version=1.0.0 --update-version=1.1.0  match the approved design examples
+//   --linux         show package-manager updates
+//   --probe-file=<absolute path>  run the local layout/motion probe in this page
 //   --lines=N       start with 1 to 6 lines (3 by default)
 //   --no-apps       no app is using the internet
 //   --over-cap      the phone has used up its data cap
@@ -91,6 +96,11 @@ const DEMO_UPDATE = {
 const startOptions = parseArgs(process.argv.slice(2));
 const PORT = startOptions.port ?? 47841;
 let offerUpdate = Boolean(startOptions.update);
+let demoVersion = VERSION;
+let demoOffer = { ...DEMO_UPDATE };
+let updateStatus = null;
+let updateStartedAt = 0;
+let updateOutcome = 'complete';
 
 let lines = [];
 let candidates = [];
@@ -116,6 +126,12 @@ function parseArgs(args) {
     else if (name === 'long') options.long = true;
     else if (name === 'setup') options.setup = true;
     else if (name === 'update') options.update = true;
+    else if (name === 'update-state') options.updateState = value;
+    else if (name === 'update-outcome') options.updateOutcome = value;
+    else if (name === 'version') options.version = value;
+    else if (name === 'update-version') options.updateVersion = value;
+    else if (name === 'linux') options.linux = true;
+    else if (name === 'probe-file') options.probeFile = value;
   }
   return options;
 }
@@ -166,6 +182,12 @@ function reset(options = {}) {
         }));
   routingOn = true;
   if (options.update !== undefined) offerUpdate = Boolean(options.update);
+  demoVersion = options.version ?? VERSION;
+  demoOffer = { ...DEMO_UPDATE, version: options.updateVersion ?? DEMO_UPDATE.version, ...(options.linux ? { packageManager: true } : {}) };
+  updateStatus = options.updateState ? makeUpdateStatus(options.updateState) : null;
+  if (options.updateState === 'reboot-required') demoVersion = demoOffer.version;
+  updateStartedAt = 0;
+  updateOutcome = options.updateOutcome ?? 'complete';
   settings = { autostart: false, checkForUpdates: true, probeTargets: ['1.1.1.1:443', '8.8.8.8:443'] };
   setup = {
     cableNotDefault: Boolean(options.setup),
@@ -181,6 +203,33 @@ function reset(options = {}) {
   }
   if (phone && exhausted(phone)) addEvent('exhausted', phone, `The ${phone.label} has used its data cap.`);
   lastTick = Date.now();
+}
+
+function makeUpdateStatus(phase) {
+  return { operation: 'demo-update', phase, version: demoOffer.version, previousVersion: demoVersion,
+    size: Math.round(18.4 * MB), downloaded: Math.round(11.8 * MB),
+    ...(phase === 'failed' ? { error: 'Demo recovery failure: the kept installer could not be opened.' } : {}) };
+}
+
+function advanceDemoUpdate() {
+  if (!updateStartedAt) return;
+  const elapsed = Date.now() - updateStartedAt;
+  if (elapsed < 6000) {
+    updateStatus.phase = 'downloading';
+    updateStatus.downloaded = Math.round(updateStatus.size * elapsed / 6000);
+  } else if (elapsed < 9000) {
+    updateStatus.phase = 'verifying';
+    updateStatus.downloaded = updateStatus.size;
+  } else if (elapsed < 13000) updateStatus.phase = 'applying';
+  else {
+    updateStatus.phase = updateOutcome;
+    updateStartedAt = 0;
+    if (updateOutcome === 'complete' || updateOutcome === 'reboot-required') {
+      demoVersion = demoOffer.version;
+      offerUpdate = false;
+    }
+    if (updateOutcome === 'complete') updateStatus = null;
+  }
 }
 
 function addEvent(kind, line, text, at = Date.now()) {
@@ -250,6 +299,7 @@ function shares() {
 }
 
 function state() {
+  advanceDemoUpdate();
   const now = Date.now();
   const seconds = Math.min(5, (now - lastTick) / 1000);
   lastTick = now;
@@ -324,8 +374,9 @@ function state() {
   return {
     mode: 'tun',
     elevated: true,
-    version: VERSION,
-    update: offerUpdate ? DEMO_UPDATE : null,
+    version: demoVersion,
+    update: offerUpdate ? demoOffer : null,
+    ...(updateStatus ? { updateStatus } : {}),
     features: { reconnect: true, combine: true, lines: true, installedApps: true },
     combine: { on: combine.on, active: combineActive(), mode: combine.mode },
     routing: { status: routingOn ? 'on' : 'off', wanted: routingOn, error: null, measuring: routingOn, proxyPort: null, retryAt: null },
@@ -486,12 +537,34 @@ const actions = {
     offerUpdate = false;
     return state();
   },
+  'POST /api/update/apply': async ({ version }) => {
+    if (version !== demoOffer.version || demoOffer.packageManager) throw clientError('This update is not available.');
+    if (!updateStartedAt) {
+      updateStatus = makeUpdateStatus('downloading');
+      updateStartedAt = Date.now();
+    }
+    return state();
+  },
+  'POST /api/update/status-dismiss': async ({ operation }) => {
+    if (operation !== updateStatus?.operation || updateStartedAt) throw clientError('The update is still running or has changed.');
+    updateStatus = null;
+    offerUpdate = false;
+    return state();
+  },
+  'POST /api/demo/update': async ({ phase, linux = false, outcome = 'complete' }) => {
+    updateStartedAt = 0;
+    demoOffer.packageManager = linux;
+    updateStatus = phase && phase !== 'available' ? makeUpdateStatus(phase) : null;
+    offerUpdate = Boolean(phase);
+    updateOutcome = outcome;
+    return state();
+  },
   // Check now: finds the demo release when started with --update.
   'POST /api/update/check': async () => {
     await sleep(QUICK_MS);
-    const found = Boolean(startOptions.update);
+    const found = Boolean(startOptions.update) && demoVersion !== demoOffer.version;
     if (found) offerUpdate = true;
-    return { ...state(), check: { result: found ? 'available' : 'latest', version: found ? DEMO_UPDATE.version : null } };
+    return { ...state(), check: { result: found ? 'available' : 'latest', version: found ? demoOffer.version : null } };
   },
   'POST /api/setup/cable-default': async () => {
     await sleep(RESTART_MS);
@@ -545,6 +618,13 @@ createServer(async (request, response) => {
     }
     return;
   }
+  if (startOptions.probeFile && ['/__demo/probe.js', '/__demo/probe-run.js'].includes(url.pathname)) {
+    if (!path.isAbsolute(startOptions.probeFile)) { response.writeHead(400).end(); return; }
+    const source = url.pathname === '/__demo/probe.js' ? startOptions.probeFile : fileURLToPath(new URL('./demo-probe.js', import.meta.url));
+    response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-store' });
+    response.end(await readFile(source));
+    return;
+  }
   const file = FILES[url.pathname];
   if (!file) {
     response.writeHead(404).end();
@@ -557,7 +637,11 @@ createServer(async (request, response) => {
     'Content-Security-Policy':
       "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'",
   });
-  response.end(await readFile(path.join(UI_DIR, file[0])));
+  let bytes = await readFile(path.join(UI_DIR, file[0]));
+  if (startOptions.probeFile && url.pathname === '/') {
+    bytes = bytes.toString().replace('</body>', '<script src="/__demo/probe.js"></script><script src="/__demo/probe-run.js"></script></body>');
+  }
+  response.end(bytes);
 }).listen(PORT, '127.0.0.1', () => {
   console.log(`Demo window: http://127.0.0.1:${PORT}/#token=demo`);
 });

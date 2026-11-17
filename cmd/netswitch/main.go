@@ -9,6 +9,8 @@ import (
 	"github.com/kekawia/net-switch/internal/lifecycle"
 	win "github.com/kekawia/net-switch/internal/platform/windows"
 	"github.com/kekawia/net-switch/internal/service"
+	// The routing engine does not import the signed-update hash implementation.
+	_ "golang.org/x/crypto/blake2b"
 )
 
 func main() {

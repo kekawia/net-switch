@@ -6,12 +6,16 @@ param(
   [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64',
   [string] $Version = '',
   [switch] $SkipInstaller,
-  [switch] $AllowLocalCompilerInstall
+  [switch] $AllowLocalCompilerInstall,
+  [switch] $UpdateTestFixture
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
+if ($UpdateTestFixture -and ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:GITHUB_REF -like 'refs/tags/*')) {
+  throw 'Update fault installers are only for disposable hosted CI and can never be tag artifacts.'
+}
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 . (Join-Path $PSScriptRoot 'build-common.ps1')
@@ -140,18 +144,26 @@ try {
 
   $baseLdflags = "-s -w -buildid= -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
   $guiLdflags = "-s -w -buildid= -H=windowsgui -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
+  $buildTags = @()
+  if ($UpdateTestFixture) { $buildTags = @('-tags=lifecycle_test') }
 
-  & $go build -C $repoRoot -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitch.exe') ./cmd/netswitch
+  & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitch.exe') ./cmd/netswitch
   if ($LASTEXITCODE -ne 0) { throw "Building netswitch.exe failed (exit $LASTEXITCODE)." }
 
-  & $go build -C $repoRoot -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitch-engine.exe') ./cmd/netswitch-engine
+  & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitch-engine.exe') ./cmd/netswitch-engine
   if ($LASTEXITCODE -ne 0) { throw "Building netswitch-engine.exe failed (exit $LASTEXITCODE)." }
 
-  & $go build -C $repoRoot -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitchctl.exe') ./cmd/netswitchctl
+  & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitchctl.exe') ./cmd/netswitchctl
   if ($LASTEXITCODE -ne 0) { throw "Building netswitchctl.exe failed (exit $LASTEXITCODE)." }
 
-  & $go build -C $repoRoot -trimpath -buildvcs=false -ldflags $guiLdflags -o (Join-Path $stage 'netswitch-desktop.exe') ./cmd/netswitch-desktop
+  & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $guiLdflags -o (Join-Path $stage 'netswitch-desktop.exe') ./cmd/netswitch-desktop
   if ($LASTEXITCODE -ne 0) { throw "Building netswitch-desktop.exe failed (exit $LASTEXITCODE)." }
+  foreach ($file in @('netswitch.exe','netswitch-engine.exe','netswitchctl.exe','netswitch-desktop.exe')) {
+    $metadata = & $go version -m (Join-Path $stage $file)
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect $file build metadata." }
+    $hasFaults = ($metadata -join "`n") -match 'lifecycle_test'
+    if ($hasFaults -ne [bool]$UpdateTestFixture) { throw "Unexpected update fault instrumentation in $file." }
+  }
 } finally {
   foreach ($name in $savedEnv.Keys) {
     [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process')
@@ -243,7 +255,9 @@ if (Test-Path -LiteralPath $installer) {
   Assert-NoLink $installer
   Remove-Item -LiteralPath $installer -Force
 }
-& $iscc --no-ide-signtools "/DAppVersion=$Version" "/DAppArch=$Arch" "/DStageDir=$stage" "/DOutputDir=$dist" (Join-Path $repoRoot 'packaging/NetSwitch.iss')
+$testDefines = @()
+if ($UpdateTestFixture) { $testDefines = @('/DUpdateTestFixture=1') }
+& $iscc --no-ide-signtools @testDefines "/DAppVersion=$Version" "/DAppArch=$Arch" "/DStageDir=$stage" "/DOutputDir=$dist" (Join-Path $repoRoot 'packaging/NetSwitch.iss')
 if ($LASTEXITCODE -ne 0) {
   throw "ISCC failed (exit $LASTEXITCODE)."
 }

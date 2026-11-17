@@ -19,6 +19,7 @@
 package winapi
 
 import (
+	"fmt"
 	"syscall"
 	"unsafe"
 
@@ -30,6 +31,7 @@ var (
 	procWaitMultiple = kernel32.NewProc("WaitForMultipleObjects")
 	procSetJob       = kernel32.NewProc("SetInformationJobObject")
 	procQueryJob     = kernel32.NewProc("QueryInformationJobObject")
+	procProcessInJob = kernel32.NewProc("IsProcessInJob")
 )
 
 // WaitForMultipleObjects waits on handles like the Win32 function. It
@@ -92,4 +94,58 @@ func errno(e syscall.Errno) error {
 		return syscall.EINVAL
 	}
 	return e
+}
+
+func ProcessInJob(process, job windows.Handle) (bool, error) {
+	addr, err := address(procProcessInJob)
+	if err != nil {
+		return false, err
+	}
+	var result uint32
+	r, _, e := syscall.SyscallN(addr, uintptr(process), uintptr(job), uintptr(unsafe.Pointer(&result)))
+	if r == 0 {
+		return false, errno(e)
+	}
+	return result != 0, nil
+}
+
+// NewKillOnCloseJob is shared by workers and the updater's installer children.
+// Callers add their own limits before assigning a suspended child.
+func NewKillOnCloseJob() (windows.Handle, error) {
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return 0, err
+	}
+	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{}
+	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if err := SetJobInformation(job, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
+		windows.CloseHandle(job)
+		return 0, err
+	}
+	return job, nil
+}
+
+// NewWorkerJob is the production worker lifetime/resource policy. It is also
+// usable by unprivileged lifetime tests without creating a token or WFP rule.
+func NewWorkerJob(uiLimits uint32) (windows.Handle, error) {
+	job, err := NewKillOnCloseJob()
+	if err != nil {
+		return 0, err
+	}
+	limits := windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION{
+		BasicLimitInformation: windows.JOBOBJECT_BASIC_LIMIT_INFORMATION{
+			LimitFlags:         windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | windows.JOB_OBJECT_LIMIT_ACTIVE_PROCESS | windows.JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+			ActiveProcessLimit: 1,
+		}, ProcessMemoryLimit: 256 * 1024 * 1024,
+	}
+	if err := SetJobInformation(job, windows.JobObjectExtendedLimitInformation, &limits); err != nil {
+		windows.CloseHandle(job)
+		return 0, err
+	}
+	ui := windows.JOBOBJECT_BASIC_UI_RESTRICTIONS{UIRestrictionsClass: uiLimits}
+	if err := SetJobInformation(job, windows.JobObjectBasicUIRestrictions, &ui); err != nil {
+		windows.CloseHandle(job)
+		return 0, fmt.Errorf("limit worker UI access: %w", err)
+	}
+	return job, nil
 }

@@ -205,6 +205,9 @@ func knownRoute(method, path string) bool {
 	if method != "POST" {
 		return false
 	}
+	if path == "/api/update/apply" || path == "/api/update/status-dismiss" {
+		return true
+	}
 	switch path {
 	case "/api/routing", "/api/app-line", "/api/lines/add", "/api/lines/remove", "/api/lines/update", "/api/lines/order", "/api/reconnect", "/api/update/check", "/api/update/dismiss", "/api/combine", "/api/settings", "/api/setup/cable-default", "/api/setup/keep-both", "/api/setup/undo", "/api/quit":
 		return true
