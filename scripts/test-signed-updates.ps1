@@ -130,6 +130,7 @@ function Start-SignedBase([bool] $RoutingOn) {
     Invoke-UpdateCtl -Arguments @('start') | Out-Null
     Wait-Until 'base routing turns on' 30 { (Read-SignedStatus).routing -eq 'on' } | Out-Null
     Assert-RoutedEcho "signed base $signedPassed"
+    Assert-RoutedEcho "signed base $signedPassed pinned curl" -Isp $secondaryIsp -ViaCurl
   }
   return $before
 }
@@ -157,7 +158,10 @@ function Assert-SignedResult([string] $Version, [bool] $RoutingOn, [uint32] $Old
     $servicePath = $servicePaths[$entry[0]]
     if (-not $servicePath -or $servicePath -notlike "*app-$Version\$($entry[1])*--data*") { throw "Wrong service path for $($entry[0]): $servicePath" }
   }
-  if ($RoutingOn) { Assert-RoutedEcho "signed result $signedPassed" }
+  if ($RoutingOn) {
+    Assert-RoutedEcho "signed result $signedPassed"
+    Assert-RoutedEcho "signed result $signedPassed pinned curl" -Isp $secondaryIsp -ViaCurl
+  }
   Wait-Until 'updater exits after desktop handoff' 25 {
     $journal = Read-UpdateJournal
     if (-not $journal.desktopRestarted) { return $false }

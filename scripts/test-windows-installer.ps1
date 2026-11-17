@@ -334,26 +334,32 @@ setInterval(() => {}, 60000);
   Invoke-RestMethod -Method POST -Uri "$($primaryIsp.control)/targets" -Headers $ispHeaders -ContentType 'application/json' -Body $targetsBody -TimeoutSec 5 | Out-Null
   Invoke-RestMethod -Method POST -Uri "$($secondaryIsp.control)/targets" -Headers $ispHeaders -ContentType 'application/json' -Body $targetsBody -TimeoutSec 5 | Out-Null
 
-  function Assert-RoutedEcho([string] $Tag) {
-    $beforeStats = Invoke-RestMethod -Method GET -Uri "$($primaryIsp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
+  function Assert-RoutedEcho([string] $Tag, $Isp=$primaryIsp, [switch] $ViaCurl) {
+    $beforeStats = Invoke-RestMethod -Method GET -Uri "$($Isp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
     $beforeCount = 0
     if ($beforeStats.destinations -and $beforeStats.destinations.PSObject.Properties[$echoTarget]) {
       $beforeCount = [int64]$beforeStats.destinations.PSObject.Properties[$echoTarget].Value
     }
     $nonce = [Guid]::NewGuid().ToString('N')
-    $reply = Invoke-RestMethod -Method GET -Uri "http://${echoTarget}/echo?nonce=${nonce}" -TimeoutSec 10
+    if ($ViaCurl) {
+      $replyText = & (Join-Path $env:SystemRoot 'System32\curl.exe') --silent --show-error --fail --noproxy '*' --max-time 10 "http://${echoTarget}/echo?nonce=${nonce}"
+      if ($LASTEXITCODE -ne 0) { throw "[$Tag] Pinned curl echo failed with exit $LASTEXITCODE" }
+      $reply = ($replyText -join "`n") | ConvertFrom-Json
+    } else {
+      $reply = Invoke-RestMethod -Method GET -Uri "http://${echoTarget}/echo?nonce=${nonce}" -TimeoutSec 10
+    }
     if ($reply.nonce -ne $nonce) {
       throw "[$Tag] Routed HTTP echo nonce mismatch: expected '$nonce', got '$($reply.nonce)'."
     }
-    $afterStats = Invoke-RestMethod -Method GET -Uri "$($primaryIsp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
+    $afterStats = Invoke-RestMethod -Method GET -Uri "$($Isp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
     $afterCount = 0
     if ($afterStats.destinations -and $afterStats.destinations.PSObject.Properties[$echoTarget]) {
       $afterCount = [int64]$afterStats.destinations.PSObject.Properties[$echoTarget].Value
     }
     if ($afterCount -le $beforeCount) {
-      throw "[$Tag] Primary TestISP destination counter for $echoTarget did not advance ($beforeCount -> $afterCount)."
+      throw "[$Tag] $($Isp.alias) destination counter for $echoTarget did not advance ($beforeCount -> $afterCount)."
     }
-    Write-Host "[$Tag] Verified live routed HTTP traffic via $($primaryIsp.alias) ($beforeCount -> $afterCount)"
+    Write-Host "[$Tag] Verified live routed HTTP traffic via $($Isp.alias) ($beforeCount -> $afterCount)"
   }
 
   $passedCases = 0

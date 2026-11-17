@@ -1,6 +1,7 @@
 package lifecycle
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -81,7 +82,8 @@ func TestHostedUndoPreparationPrecedesUpdateLock(t *testing.T) {
 	}
 }
 
-func TestHostedPendingUpdateStartupExitsBeforeRecoveryWait(t *testing.T) {
+func newHostedUpdateJournal(t *testing.T) updateJournal {
+	t.Helper()
 	_, data := newHostedUpdateStore(t)
 	architecture, err := expectedBinaryArchitecture()
 	if err != nil {
@@ -108,6 +110,12 @@ func TestHostedPendingUpdateStartupExitsBeforeRecoveryWait(t *testing.T) {
 	for name, file := range map[string]string{service.Control: "netswitch.exe", service.Engine: "netswitch-engine.exe"} {
 		j.ServicePaths[name] = windows.ComposeCommandLine([]string{filepath.Join(j.Previous.Directory, file), "service", "--data", data})
 	}
+	return j
+}
+
+func TestHostedPendingUpdateStartupExitsBeforeRecoveryWait(t *testing.T) {
+	j := newHostedUpdateJournal(t)
+	data := j.Data
 	if err := saveUpdateJournal(&j); err != nil {
 		t.Fatal(err)
 	}
@@ -124,4 +132,77 @@ func TestHostedPendingUpdateStartupExitsBeforeRecoveryWait(t *testing.T) {
 	if err != nil || after.RecoveryAttempts != 0 || after.Status.Phase != j.Status.Phase {
 		t.Fatalf("startup changed the live updater's transaction: %+v, %v", after, err)
 	}
+}
+
+func TestHostedUpdateSnapshotRestoresChangedDataAndAbsence(t *testing.T) {
+	j := newHostedUpdateJournal(t)
+	write := func(path string, value any) {
+		t.Helper()
+		if err := Save(path, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(path string) []byte {
+		t.Helper()
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	settingsPath := filepath.Join(j.Data, "settings.json")
+	journalPath := filepath.Join(j.Data, "control-journal.json")
+	enginePath := filepath.Join(j.Data, "engine-state.json")
+	original := map[string]any{"lines": []any{map[string]any{"id": "aa11", "label": "Before update"}}, "appLines": map[string]any{`C:\Apps\before.exe`: "aa11"}}
+	write(settingsPath, original)
+	write(journalPath, map[string]any{"settings": original, "wanted": false, "revision": 42})
+	write(enginePath, map[string]any{"instance": "before"})
+	before := map[string][]byte{}
+	for _, path := range []string{settingsPath, settingsPath + ".bak", journalPath, journalPath + ".bak"} {
+		before[path] = read(path)
+	}
+	if err := captureUpdateData(&j); err != nil {
+		t.Fatal(err)
+	}
+	// Reload the durable manifest as a replacement updater would.
+	var err error
+	j, err = readUpdateJournal(j.Data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(settingsPath, map[string]any{"lines": []any{}, "appLines": map[string]any{}})
+	write(journalPath, map[string]any{"settings": map[string]any{}, "wanted": true, "revision": 99})
+	created := filepath.Join(j.Data, "proxy-secrets.json")
+	write(created, map[string]any{})
+	write(enginePath, map[string]any{"instance": "after"})
+	engineAfter := read(enginePath)
+	if err := restoreUpdateData(j); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range before {
+		if !bytes.Equal(read(path), want) {
+			t.Fatalf("modified state was not restored: %s", filepath.Base(path))
+		}
+	}
+	for _, path := range []string{created, created + ".bak"} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("recorded absence was not restored: %s, %v", filepath.Base(path), err)
+		}
+	}
+	if !bytes.Equal(read(enginePath), engineAfter) {
+		t.Fatal("rollback restored stale engine ownership")
+	}
+	// Corrupt a later snapshot entry: validation must finish before even the
+	// earlier, valid settings snapshot can overwrite live data.
+	write(settingsPath, map[string]any{"marker": "must remain untouched"})
+	untouched := read(settingsPath)
+	write(filepath.Join(j.snapshotDir(), "control-journal.json"), map[string]any{"corrupted": true})
+	if err := restoreUpdateData(j); err == nil || !bytes.Equal(read(settingsPath), untouched) {
+		t.Fatalf("bad later snapshot caused partial restoration: %v", err)
+	}
+	j.SnapshotComplete = false
+	if err := restoreUpdateData(j); err != nil || !bytes.Equal(read(settingsPath), untouched) {
+		t.Fatalf("incomplete snapshot was used for restoration: %v", err)
+	}
+	t.Log("UPDATE_SNAPSHOT_PROOF changed_files=4 absent_files=2 engine_identity_preserved=true corruption_refused_before_write=true incomplete_snapshot_ignored=true")
 }
