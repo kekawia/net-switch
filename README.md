@@ -124,7 +124,7 @@ from older versions. You can also just download the latest installer from the
 run it over your current copy.
 
 > **Updating from 0.3.x:** Because the GitHub repository moved to
-> `kekawia/net-switch`, copies up to 0.3.1 won't show later releases on their
+> `kekawia/net-switch`, copies up to 0.3.2 won't show later releases on their
 > own. Download the latest installer once from the
 > [releases page](https://github.com/kekawia/net-switch/releases/latest) and run
 > it over your existing copy — your lines, app rules and usage carry over.

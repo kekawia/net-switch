@@ -21,6 +21,10 @@ func TestBridgeBurstCost(t *testing.T) {
 	for _, limit := range []int{1, 8, 32} {
 		t.Run(fmt.Sprintf("N%d", limit), func(t *testing.T) {
 			f := newBridgeFixture(t, false)
+			// The fresh, empty TUN has one reader, as in production after draining.
+			if err := f.b.ConfirmSingleReaderPostDrain(); err != nil {
+				t.Fatal(err)
+			}
 			f.r.Measure = true
 			var sockets [2]int
 			var cookies [2]uint64
