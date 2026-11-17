@@ -6,9 +6,8 @@ import (
 )
 
 // DevelopmentRootPublicKey has a deliberately public test seed. Release builds
-// must replace RootPublicKey with the owner's offline root public key first.
+// must replace RootPublicKey in root_product.go with the offline public key first.
 const DevelopmentRootPublicKey = "RWT0UwsSU16NqzRAK3Xc8jcwt5D4sjx9KWlcL6NG6glo9+8l6OYqSGBR"
-const RootPublicKey = DevelopmentRootPublicKey
 
 func CheckProductionRoot() error {
 	return checkProductionRoot(RootPublicKey)
