@@ -78,22 +78,29 @@ func stopUpdateControl(ctx context.Context) error {
 	}
 }
 
+// ActivateAfterUpdate waits out a deferred startup before asking SCM to launch
+// the configured version. Its clean exit must not be mistaken for a failure of
+// the new instance, whose matching health record is now ready.
+func ActivateAfterUpdate(ctx context.Context) error {
+	return startService(ctx, Control, true)
+}
+
 // UpdatePaths changes only image paths and Engine's matching recovery command.
 // Account, privileges, owner ACLs, failure actions and start policy are retained.
 // A partial change is recovered by the enclosing signed-update journal.
-func UpdatePaths(c Config) error {
+func UpdatePaths(ctx context.Context, c Config) error {
 	if err := CheckInstallation(c.Directory); err != nil {
 		return err
 	}
 	for _, entry := range []struct{ name, file string }{{Engine, "netswitch-engine.exe"}, {Control, "netswitch.exe"}} {
-		if err := updateServicePath(c, entry.name, entry.file); err != nil {
+		if err := updateServicePath(ctx, c, entry.name, entry.file); err != nil {
 			return err
 		}
 	}
 	return SetOwner(c.Owner)
 }
 
-func updateServicePath(c Config, name, file string) error {
+func updateServicePath(ctx context.Context, c Config, name, file string) error {
 	s, err := open(name, windows.SERVICE_CHANGE_CONFIG|windows.SERVICE_QUERY_CONFIG|windows.SERVICE_QUERY_STATUS)
 	if err != nil {
 		return err
@@ -104,7 +111,15 @@ func updateServicePath(c Config, name, file string) error {
 		return err
 	}
 	if status.State != svc.Stopped {
-		return fmt.Errorf("%s must be stopped before replacing its path", name)
+		if name != Control {
+			return fmt.Errorf("%s must be stopped before replacing its path", name)
+		}
+		// The desktop can activate the no-writer startup guard after the
+		// transaction's earlier stop. Settle that activation at the actual
+		// path-change boundary; the guard exits while health is not ready.
+		if err := stopUpdateControl(ctx); err != nil {
+			return err
+		}
 	}
 	config, err := s.Config()
 	if err != nil {

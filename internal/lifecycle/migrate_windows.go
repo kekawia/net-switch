@@ -2253,7 +2253,7 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 	}
 	serviceConfig := service.Config{Directory: versionDir, Data: storeDir, Owner: owner.User, Native: true}
 	if opts.UpdateOperation != "" {
-		err = service.UpdatePaths(serviceConfig)
+		err = service.UpdatePaths(ctx, serviceConfig)
 	} else {
 		err = service.InstallOrReplace(ctx, serviceConfig)
 	}
@@ -2282,7 +2282,11 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 			UpdateOperation: opts.UpdateOperation,
 			UpdateWanted:    updateWanted,
 		})
-		if err := service.Activate(ctx); err != nil {
+		activate := service.Activate
+		if opts.UpdateOperation != "" {
+			activate = service.ActivateAfterUpdate
+		}
+		if err := activate(ctx); err != nil {
 			return rollbackToPrev(err)
 		}
 		if err := waitForMigrationHealth(ctx, storeDir, owner.User, healthID); err != nil {

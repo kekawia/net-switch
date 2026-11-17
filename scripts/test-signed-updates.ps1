@@ -81,6 +81,7 @@ function Wait-UpdateTerminal([string] $Expected) {
       }
       if ($phase -in @('complete','reboot-required','rolled-back','failed','download-error','signature-error')) {
         $detail = if ($journal.PSObject.Properties['lastError']) { $journal.lastError } else { '' }
+        if (-not $detail -and $journal.status.PSObject.Properties['error']) { $detail = $journal.status.error }
         if ($phase -ne $Expected) { throw "Expected $Expected, got $phase : $detail" }
         return $journal
       }

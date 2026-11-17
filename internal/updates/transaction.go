@@ -52,6 +52,7 @@ func RunTransaction(ctx context.Context, status Status, ops TransactionOps) (Sta
 	code, err := ops.Install(ctx)
 	if errors.Is(err, ErrInstallerStillRunning) {
 		status.Phase = "failed"
+		status.Error = err.Error()
 		return status, errors.Join(err, ops.Save(status))
 	}
 	if err != nil {
@@ -88,9 +89,13 @@ func rollbackTransaction(status Status, ops TransactionOps, cause error) (Status
 	defer cancel()
 	if err := ops.Rollback(ctx); err != nil {
 		status.Phase = "failed"
-		return status, errors.Join(cause, journalErr, fmt.Errorf("rollback failed: %w", err), ops.Save(status))
+		failure := errors.Join(cause, journalErr, fmt.Errorf("rollback failed: %w", err))
+		status.Error = failure.Error()
+		return status, errors.Join(failure, ops.Save(status))
 	}
 	status.Phase = "rolled-back"
 	status.RebootRequired = false
-	return status, errors.Join(cause, journalErr, ops.Save(status))
+	failure := errors.Join(cause, journalErr)
+	status.Error = failure.Error()
+	return status, errors.Join(failure, ops.Save(status))
 }

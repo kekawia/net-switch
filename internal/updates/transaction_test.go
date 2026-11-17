@@ -3,6 +3,7 @@ package updates
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -135,5 +136,44 @@ func TestUpdateNeverRestoresDataWhileAnInstallerChildIsAlive(t *testing.T) {
 	status, err := RunTransaction(context.Background(), f.status, ops)
 	if !errors.Is(err, ErrInstallerStillRunning) || status.Phase != "failed" || f.restores != 0 {
 		t.Fatal("unsafe concurrent rollback", status, err)
+	}
+}
+
+func TestTerminalUpdateFailureDetailSurvivesExitAtCommit(t *testing.T) {
+	for _, failure := range []string{"health", "rollback", "installer-alive"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newTransactionFixture()
+			f.failure = failure
+			ops := f.ops()
+			want := "health failure"
+			if failure == "rollback" {
+				f.code, want = 5, "rollback failed: old installer unavailable"
+			}
+			if failure == "installer-alive" {
+				ops.Install = func(context.Context) (uint32, error) { return 0, ErrInstallerStillRunning }
+				want = ErrInstallerStillRunning.Error()
+			}
+			save := ops.Save
+			ops.Save = func(status Status) error {
+				if err := save(status); err != nil {
+					return err
+				}
+				if status.Phase == "failed" || status.Phase == "rolled-back" {
+					panic("exit after terminal commit")
+				}
+				return nil
+			}
+			func() {
+				defer func() {
+					if recover() != "exit after terminal commit" {
+						t.Fatal("terminal exit barrier did not fire")
+					}
+				}()
+				_, _ = RunTransaction(context.Background(), f.status, ops)
+			}()
+			if !strings.Contains(f.status.Error, want) {
+				t.Fatalf("terminal journal lost failure detail before the caller could decorate it: %+v", f.status)
+			}
+		})
 	}
 }
