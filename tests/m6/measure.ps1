@@ -4,6 +4,8 @@ function Start-M6Client([string]$ModeName,[string]$ResultPath) {
   $info.UseShellExecute=$false
   $info.CreateNoWindow=$true
   $info.RedirectStandardError=$true
+  $info.Environment['M6_TCP_READER']=$m6Reader
+  $info.Environment['M6_TCP_UPLINK']=[string]$uplink.address
   foreach($value in @('--max-old-space-size=2048',$m6Driver,$ModeName,'198.19.128.2',"$m6Port",$ResultPath)) {
     $info.ArgumentList.Add($value)
   }
@@ -40,6 +42,23 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $inputData=Join-Path $out 'input.json'
   $usage=Join-Path $out 'cpu.json'
   $memory=[Collections.Generic.List[object]]::new()
+  # Give both installs the same 64-entry gateway history, then let Windows
+  # retire this test target's rows naturally before starting either trace.
+  $primeFile=Join-Path $out 'prime.json'
+  $initialCount=Get-M6Count
+  $prime=Start-M6Client prime $primeFile
+  if (!$prime.Process.WaitForExit(120000)) {
+    $prime.Process.Kill()
+    $prime.Process.WaitForExit()
+    throw 'Gateway priming client did not finish'
+  }
+  if ($prime.Process.ExitCode -ne 0) {throw $prime.Errors.Result}
+  $primed=Get-Content -Raw -LiteralPath $primeFile | ConvertFrom-Json
+  if ($primed.connections -ne 64 -or (Get-M6Count)-$initialCount -ne 64) {throw 'Gateway priming connection count differs'}
+  & $m6Reader settle $m6Port $uplink.address (Join-Path $out 'initial-table.json')
+  if ($LASTEXITCODE -ne 0) {throw 'Could not establish matched initial socket state'}
+  $table=@(Get-Content -Raw -LiteralPath (Join-Path $out 'initial-table.json') | ConvertFrom-Json)
+  if (!$table.Count -or $table[-1].TargetRows -ne 0) {throw 'Incomplete initial socket observation'}
   $before=Get-M6Count
   & wpr.exe -start "$m6Profile!NetSwitchCPU.Light" -filemode
   if ($LASTEXITCODE -ne 0) { throw "WPR start failed ($LASTEXITCODE)" }
@@ -84,5 +103,6 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   & $m6Reader $trace $inputData $usage
   if ($LASTEXITCODE -ne 0) { throw 'CPU trace analysis failed' }
   $report=@{arch=$Arch;runner=$env:COMPUTERNAME;commit=$env:GITHUB_SHA;release=$release;installerHash=(Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant();images=$images;gatewayConnections=$connections;traffic=$t;memory=$memory.ToArray();accounting=(Get-Content -Raw $usage|ConvertFrom-Json)}
+  $report.precondition=@{verifiedConnections=$primed.connections;before=$table[0];after=$table[-1]}
   $report | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM (Join-Path $out 'report.json')
 }
