@@ -1,7 +1,6 @@
 package tcp
 
 import (
-	"math/bits"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,7 +19,6 @@ type connection struct {
 	ticket           flowapi.Ticket
 	forward          *Forwarder
 	up, down         atomic.Uint64
-	resizeMu         sync.Mutex
 	lastUp, lastDown uint64
 	last             time.Time
 	clock            tcpip.Clock
@@ -121,8 +119,6 @@ func (c *connection) resize(now time.Time) {
 	if !ok {
 		return
 	}
-	c.resizeMu.Lock()
-	defer c.resizeMu.Unlock()
 	u, d := c.up.Load(), c.down.Load()
 	rx, tx := c.ticket.Buffers()
 	if u == c.lastUp && d == c.lastDown {
@@ -152,22 +148,5 @@ func (c *connection) resize(now time.Time) {
 	if (nextRX != rx || nextTX != tx) && b.Grow(nextRX, nextTX) {
 		c.ep.SocketOptions().SetReceiveBufferSize(int64(nextRX), true)
 		c.ep.SocketOptions().SetSendBufferSize(int64(nextTX), true)
-	}
-}
-
-// A short bulk transfer can finish within one maintenance interval. Recheck
-// the same budget at powers of two while the initial window is growing.
-// The periodic sweep still handles later traffic and idle reclamation.
-func (c *connection) countTransfer(up bool, n uint64) {
-	var total uint64
-	if up {
-		total = c.up.Add(n)
-		c.ticket.Add(n, 0)
-	} else {
-		total = c.down.Add(n)
-		c.ticket.Add(0, n)
-	}
-	if total >= MinimumBuffer && total-n < 8<<20 && bits.Len64(total) != bits.Len64(total-n) && c.clock != nil {
-		c.resize(c.clock.Now())
 	}
 }
