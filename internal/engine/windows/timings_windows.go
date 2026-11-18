@@ -9,7 +9,6 @@ import (
 	"os"
 	"runtime"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/kekawia/net-switch/internal/journal"
@@ -147,10 +146,7 @@ func (s *measuredTun) ReadPacket(ctx context.Context, packet []byte) (int, error
 }
 
 func (s *measuredTun) WriteBatch(packets [][]byte) (int, error) {
-	var since time.Duration
-	if m6WriteCalls.Add(1)%64==0 {since=winclock.Now()}
 	n, err := s.Session.WriteBatch(packets)
-	if since!=0 {m6WriteSamples.Add(1);m6WriteNS.Add(uint64(winclock.Since(since)))}
 	if s.trace != nil {
 		for _, packet := range packets {
 			s.trace.record("to-app", packet, n, len(packets), err)
@@ -158,8 +154,6 @@ func (s *measuredTun) WriteBatch(packets [][]byte) (int, error) {
 	}
 	return n, err
 }
-
-var m6WriteCalls, m6WriteSamples, m6WriteNS atomic.Uint64
 
 func (s *measuredTun) Close() error {
 	err := s.Session.Close()

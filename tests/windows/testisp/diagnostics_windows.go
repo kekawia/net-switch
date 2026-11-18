@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"reflect"
@@ -18,12 +19,34 @@ import (
 )
 
 type diagnosticEvent struct {
-	At         int64             `json:"at"`
-	Kind       string            `json:"kind"`
-	Connection uint64            `json:"connection,omitempty"`
-	Tuple      string            `json:"tuple,omitempty"`
-	Detail     string            `json:"detail,omitempty"`
-	Counters   map[string]uint64 `json:"counters"`
+	At         int64         `json:"at"`
+	Kind       string        `json:"kind"`
+	Connection uint64        `json:"connection,omitempty"`
+	Tuple      string        `json:"tuple,omitempty"`
+	Detail     string        `json:"detail,omitempty"`
+	Counters   eventCounters `json:"counters"`
+	packet     bool
+	fields     packetFields
+}
+
+type eventCounters struct {
+	Retransmits       uint64 `json:"retransmits"`
+	Timeouts          uint64 `json:"timeouts"`
+	Dropped           uint64 `json:"dropped"`
+	Invalid           uint64 `json:"invalid"`
+	SendErrors        uint64 `json:"sendErrors"`
+	SessionWriteDrops uint64 `json:"sessionWriteDrops"`
+}
+
+// Only the retained tail is formatted when a diagnostic client reads it.
+func (e diagnosticEvent) MarshalJSON() ([]byte, error) {
+	if e.packet {
+		p := e.fields
+		e.Tuple = fmt.Sprintf("%d -> %d", p.Source, p.Target)
+		e.Detail = fmt.Sprintf("flags=%02x seq=%d ack=%d bytes=%d ipOK=%t tcpOK=%t window=%d", p.Flags, p.Sequence, p.Ack, p.Payload, p.IPChecksumOK, p.TCPChecksumOK, p.Window)
+	}
+	type wire diagnosticEvent
+	return json.Marshal(wire(e))
 }
 
 type heartbeatGap struct {
@@ -64,11 +87,15 @@ func (g *gateway) tcpCounters() map[string]uint64 {
 }
 
 func (g *gateway) event(kind string, id uint64, tuple, detail string) {
+	g.captureEvent(diagnosticEvent{Kind: kind, Connection: id, Tuple: tuple, Detail: detail})
+}
+
+func (g *gateway) captureEvent(e diagnosticEvent) {
 	stats := g.stack.Stats()
-	e := diagnosticEvent{At: time.Now().UnixMicro(), Kind: kind, Connection: id, Tuple: tuple, Detail: detail,
-		Counters: map[string]uint64{"retransmits": stats.TCP.Retransmits.Value(), "timeouts": stats.TCP.Timeouts.Value(),
-			"dropped": stats.DroppedPackets.Value(), "invalid": stats.TCP.InvalidSegmentsReceived.Value(),
-			"sendErrors": stats.TCP.SegmentSendErrors.Value(), "sessionWriteDrops": g.device.writeDrops.Load()}}
+	e.At = time.Now().UnixMicro()
+	e.Counters = eventCounters{Retransmits: stats.TCP.Retransmits.Value(), Timeouts: stats.TCP.Timeouts.Value(),
+		Dropped: stats.DroppedPackets.Value(), Invalid: stats.TCP.InvalidSegmentsReceived.Value(),
+		SendErrors: stats.TCP.SegmentSendErrors.Value(), SessionWriteDrops: g.device.writeDrops.Load()}
 	g.diag.Lock()
 	g.diag.events[g.diag.next%uint64(len(g.diag.events))] = e
 	g.diag.next++

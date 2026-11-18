@@ -59,12 +59,7 @@ try {
   } | Out-Null
   Assert-RoutedEcho 'M6 installed candidate'
   if ($Qualification -eq 'compare') {
-    $observe=Join-Path $machineData 'm6-observe'
-    [IO.File]::WriteAllText($observe,'measure')
-    try { Measure-M6Product 'candidate' $candidateVersion $setup100 } finally { Remove-Item -LiteralPath $observe }
-    $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch 'M6_RELAY ')
-    if (!$samples.Count) {throw 'Missing output timing observations'}
-    $samples.Line | Set-Content -LiteralPath "$diagDir/m6-output-observations.txt"
+    Measure-M6Product 'candidate' $candidateVersion $setup100
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {

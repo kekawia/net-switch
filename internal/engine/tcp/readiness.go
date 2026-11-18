@@ -11,7 +11,6 @@ import (
 
 	"github.com/kekawia/net-switch/internal/engine/platform"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	gtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -372,30 +371,6 @@ func (r *readyRelay) write(up bool, b []byte, scratch *relayScratch) (int, error
 	return int(n), stackError(err)
 }
 
-// transfer keeps source and destination errors separate so readiness is armed
-// on the side that blocked. All I/O is synchronous within the current loans.
-func (r *readyRelay) transfer(up bool, b []byte, scratch *relayScratch) (int, error, error) {
-	if !up && runtime.GOOS == "windows" {
-		n, readErr, writeErr := r.c.ep.(*gtcp.Endpoint).WriteFromNonblocking(r.remote, b)
-		return n, readErr, stackError(writeErr)
-	}
-	peeked, readErr := r.read(up, b, scratch)
-	if peeked < 0 || peeked > len(b) {
-		return 0, io.ErrShortBuffer, nil
-	}
-	if peeked == 0 {
-		return 0, readErr, nil
-	}
-	n, writeErr := r.write(up, b[:peeked], scratch)
-	if n < 0 || n > peeked {
-		return 0, nil, io.ErrShortWrite
-	}
-	if err := r.discard(up, b[:n], scratch); err != nil {
-		return 0, err, nil
-	}
-	return n, nil, writeErr
-}
-
 func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch) (bool, error) {
 	if d.finished {
 		return false, nil
@@ -420,28 +395,47 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			b = scratch.bulk[:loans*RelayBuffer]
 		}
 		b = b[:min(len(b), (256<<10)-moved)]
-		n, readErr, writeErr := r.transfer(up, b, scratch)
-		r.workers.giveBack(r, loans)
-		if n > 0 {
-			moved += n
-			if up {
-				r.c.up.Add(uint64(n))
-				r.c.ticket.Add(uint64(n), 0)
-			} else {
-				r.c.down.Add(uint64(n))
-				r.c.ticket.Add(0, uint64(n))
+		peeked, readErr := r.read(up, b, scratch)
+		if peeked < 0 || peeked > len(b) {
+			r.workers.giveBack(r, loans)
+			return false, io.ErrShortBuffer
+		}
+		if peeked > 0 {
+			n, err := r.write(up, b[:peeked], scratch)
+			if n < 0 || n > peeked {
+				r.workers.giveBack(r, loans)
+				return false, io.ErrShortWrite
 			}
-		}
-		if errors.Is(writeErr, platform.ErrWouldBlock) {
-			d.blocked = true
-			return false, nil
-		}
-		if writeErr != nil {
-			return false, writeErr
-		}
-		if n > 0 && readErr == nil {
+			if consumeErr := r.discard(up, b[:n], scratch); consumeErr != nil {
+				r.workers.giveBack(r, loans)
+				return false, consumeErr
+			}
+			r.workers.giveBack(r, loans)
+			if n > 0 {
+				moved += n
+				if up {
+					r.c.up.Add(uint64(n))
+					r.c.ticket.Add(uint64(n), 0)
+				} else {
+					r.c.down.Add(uint64(n))
+					r.c.ticket.Add(0, uint64(n))
+				}
+			}
+			if errors.Is(err, platform.ErrWouldBlock) {
+				d.blocked = true
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			if n == 0 {
+				return false, io.ErrNoProgress
+			}
+			// Re-peek even after a short successful write. EOF is propagated
+			// only once every byte before it has actually been consumed.
 			continue
 		}
+		r.workers.giveBack(r, loans)
 		if errors.Is(readErr, platform.ErrWouldBlock) {
 			return false, nil
 		}

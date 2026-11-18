@@ -27,7 +27,7 @@ type readyPeer struct {
 	mu                     sync.Mutex
 	download, upload       bytes.Buffer
 	eof, blocked, detached bool
-	maxReadRequest         int
+	maxPeek                int
 	wake                   func()
 	writeClosed, closed    chan struct{}
 	watching               chan struct{}
@@ -171,7 +171,6 @@ func (p *readyPeer) Arm(read, write bool) error {
 func (p *readyPeer) TryRead(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.maxReadRequest = max(p.maxReadRequest, len(b))
 	if p.download.Len() > 0 {
 		return p.download.Read(b)
 	}
@@ -183,7 +182,7 @@ func (p *readyPeer) TryRead(b []byte) (int, error) {
 func (p *readyPeer) TryPeek(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.maxReadRequest = max(p.maxReadRequest, len(b))
+	p.maxPeek = max(p.maxPeek, len(b))
 	if p.download.Len() > 0 {
 		return copy(b, p.download.Bytes()), nil
 	}
@@ -268,10 +267,8 @@ func TestReadyRelayBackpressureShortWritesAndHalfClose(t *testing.T) {
 	}
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
-	// The fake ticket stays at MinimumBuffer. A multi-loan read can exceed
-	// one loan, but must never ask for more than that endpoint could accept.
-	if runtime.GOOS == "windows" && (peer.maxReadRequest <= RelayBuffer || peer.maxReadRequest > MinimumBuffer) {
-		t.Fatalf("bulk read requested %d bytes with a %d-byte destination", peer.maxReadRequest, MinimumBuffer)
+	if runtime.GOOS == "windows" && peer.maxPeek != 4*RelayBuffer {
+		t.Fatalf("bulk transfer requested only %d bytes per peek", peer.maxPeek)
 	}
 }
 

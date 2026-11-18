@@ -73,7 +73,7 @@ for (const patch of patches) test(`${patch} regenerates byte for byte under cust
 });
 
 test('diff mode requires one named patch instead of silently combining patches', () => {
-  assert.deepEqual(patches, ['gvisor-local-close.patch', 'gvisor-provenance.patch', 'gvisor-relay-write.patch', 'gvisor-rto-recovery.patch', 'gvisor-sack-cache.patch', 'gvisor-tcp-retry-limit.patch', 'gvisor-tlp-recovery.patch']);
+  assert.deepEqual(patches, ['gvisor-local-close.patch', 'gvisor-provenance.patch', 'gvisor-rto-recovery.patch', 'gvisor-sack-cache.patch', 'gvisor-tcp-retry-limit.patch', 'gvisor-tlp-recovery.patch']);
   for (const args of [['--diff'], ['--diff', '../gvisor-local-close.patch'], ['--diff', 'missing.patch']]) {
     const result = spawnSync(process.execPath, ['scripts/generate-gvisor.mjs', ...args], {
       cwd: root, encoding: 'utf8', windowsHide: true,
