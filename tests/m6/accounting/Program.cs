@@ -59,25 +59,52 @@ trace.Process();
 var roots = new HashSet<IProcess>();
 var from = input.RootsFrom ?? input.RootsAt;
 if (from > input.RootsAt) throw new InvalidDataException("Invalid process inventory interval.");
-foreach (var root in input.Roots) {
-    var lifetimes = processes.Result.Processes.Where(p => p.Id == root.Pid).ToArray();
+var byPid = processes.Result.Processes.ToLookup(p => p.Id);
+IProcess Resolve(Root root, DateTimeOffset start, DateTimeOffset end) {
+    var lifetimes = byPid[root.Pid];
     var overlaps = lifetimes.Where(p =>
         String.Equals(Path.GetFileName(p.ImageName), Path.GetFileName(root.Image), StringComparison.OrdinalIgnoreCase) &&
-        (p.CreateTime is null || p.CreateTime.Value.DateTimeOffset <= input.RootsAt) &&
-        (p.ExitTime is null || p.ExitTime.Value.DateTimeOffset >= from)).ToArray();
+        (p.CreateTime is null || p.CreateTime.Value.DateTimeOffset <= end) &&
+        (p.ExitTime is null || p.ExitTime.Value.DateTimeOffset >= start)).ToArray();
     if (overlaps.Length != 1) {
         var seen = String.Join(", ", lifetimes.Select(p =>
             $"{p.ImageName} [{p.CreateTime?.DateTimeOffset:O}, {p.ExitTime?.DateTimeOffset:O}]"));
-        throw new InvalidDataException($"Expected one lifetime for PID {root.Pid} {root.Image} created {root.CreatedAt:O}, observed [{from:O}, {input.RootsAt:O}]. Trace: {seen}");
+        throw new InvalidDataException($"Expected one lifetime for PID {root.Pid} {root.Image} created {root.CreatedAt:O}, observed [{start:O}, {end:O}]. Trace: {seen}");
     }
-    roots.Add(overlaps[0]);
+    return overlaps[0];
 }
+foreach (var root in input.Roots) roots.Add(Resolve(root, from, input.RootsAt));
 bool Included(IProcess? p) {
     while (p is not null) {
         if (roots.Contains(p)) return true;
         p = p.Parent;
     }
     return false;
+}
+var initialTree = processes.Result.Processes.Where(Included).ToHashSet();
+var observed = new HashSet<IProcess>();
+if (input.Inventories is { } receipts) {
+    if (receipts.Length == 0 || String.IsNullOrEmpty(input.InstallDirectory))
+        throw new InvalidDataException("Empty product inventory.");
+    var prefix = Path.TrimEndingDirectorySeparator(input.InstallDirectory!) + Path.DirectorySeparatorChar;
+    foreach (var receipt in receipts) {
+        if (receipt.From > receipt.At || receipt.Processes.Length == 0)
+            throw new InvalidDataException("Invalid process observation.");
+        var parents = receipt.Processes.ToDictionary(p => p.Pid);
+        foreach (var entry in receipt.Processes) {
+            var ancestor = entry;
+            var visited = new HashSet<int>();
+            while (!ancestor.Image.StartsWith(prefix,StringComparison.OrdinalIgnoreCase)) {
+                if (!visited.Add(ancestor.Pid) || !parents.TryGetValue(ancestor.ParentPid,out var parent) ||
+                    parent.CreatedAt > ancestor.CreatedAt)
+                    throw new InvalidDataException($"Unverified product ancestry for PID {entry.Pid}.");
+                ancestor = parent;
+            }
+            if (entry.CreatedAt > receipt.At) throw new InvalidDataException("Process created after observation.");
+            observed.Add(Resolve(new Root(entry.Pid,entry.Image,entry.CreatedAt),receipt.From,receipt.At));
+        }
+    }
+    roots.UnionWith(observed);
 }
 var members = processes.Result.Processes.Where(Included).ToHashSet();
 if (input.InstallDirectory is string install) {
@@ -92,6 +119,7 @@ if (input.InstallDirectory is string install) {
     }
 }
 var cpu = new long[input.Samples.Length];
+var perProcess = new Dictionary<IProcess,long[]>();
 var counted = new HashSet<IProcess>();
 long calibrationTicks = 0;
 foreach (var slice in usage.Result.CpuTimeSlices) {
@@ -103,6 +131,11 @@ foreach (var slice in usage.Result.CpuTimeSlices) {
         var ticks = Math.Min(hi,window.EndUtc.UtcTicks) - Math.Max(lo,window.StartUtc.UtcTicks);
         if (ticks <= 0) continue;
         cpu[i] += ticks;
+        if (!perProcess.TryGetValue(slice.Process, out var times)) {
+            times = new long[cpu.Length];
+            perProcess.Add(slice.Process,times);
+        }
+        times[i] += ticks;
         if (slice.Process.Id == input.CalibrationChild) calibrationTicks += ticks;
         counted.Add(slice.Process);
     }
@@ -116,6 +149,11 @@ if (input.CalibrationChild is int childId) {
 }
 File.WriteAllText(args[2],JsonSerializer.Serialize(new {
     members = members.Count,
+    inventoryReceipts = input.Inventories?.Length,
+    observedMembers = observed.Count,
+    reconciled = observed.Except(initialTree).Select(p=>new {pid=p.Id,image=p.ImageName}),
+    processCpu = members.Select(p=>new {pid=p.Id,image=p.ImageName,observed=observed.Contains(p),
+        seconds=(perProcess.TryGetValue(p,out var times)?times:new long[cpu.Length]).Select(n=>TimeSpan.FromTicks(n).TotalSeconds)}),
     scheduled = counted.Count,
     exited = counted.Count(p=>p.ExitTime.HasValue),
     windows = input.Samples.Select((s,i)=>new { s.Streams, s.Pass, s.Bytes, cpuSeconds=TimeSpan.FromTicks(cpu[i]).TotalSeconds })
@@ -135,4 +173,6 @@ static TableObservation ReadTable(int port, IPAddress uplink) {
 record TableObservation(DateTimeOffset Utc,int TotalRows,int AllTimeWait,int TargetRows,int TargetTimeWait);
 record Root(int Pid,string Image,DateTimeOffset? CreatedAt=null);
 record Window(int Streams,int Pass,long Bytes,DateTimeOffset StartUtc,DateTimeOffset EndUtc);
-record Measurement(DateTimeOffset RootsAt,Root[] Roots,Window[] Samples,int? CalibrationChild,double ExpectedChildSeconds,string? InstallDirectory,DateTimeOffset? RootsFrom=null);
+record ObservedProcess(int Pid,int ParentPid,string Image,DateTimeOffset CreatedAt);
+record InventoryReceipt(DateTimeOffset From,DateTimeOffset At,ObservedProcess[] Processes);
+record Measurement(DateTimeOffset RootsAt,Root[] Roots,Window[] Samples,int? CalibrationChild,double ExpectedChildSeconds,string? InstallDirectory,DateTimeOffset? RootsFrom=null,InventoryReceipt[]? Inventories=null);

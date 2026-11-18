@@ -34,6 +34,19 @@ function Get-M6Count {
   $record = $stats.destinations.PSObject.Properties[$m6Target]
   if ($null -eq $record) { return [long]0 }; return [long]$record.Value
 }
+function Add-M6Inventory($receipts,$known,$members,[string]$from,[string]$at) {
+  $changed=$false
+  foreach ($member in $members) {
+    $key=[string]$member.ProcessId+'|'+$member.CreationDate.ToFileTimeUtc()
+    if (!$known.ContainsKey($key)) { $known[$key]=$true; $changed=$true }
+  }
+  if (!$changed) {return}
+  $rows=@($members|ForEach-Object {
+    $image=if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name }
+    @{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;image=$image;createdAt=$_.CreationDate.ToUniversalTime().ToString('o')}
+  })
+  $receipts.Add(@{from=$from;at=$at;processes=$rows})
+}
 function Get-M6MemoryObservation($members) {
   $at=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
   $rows=@($members | ForEach-Object {
@@ -43,19 +56,21 @@ function Get-M6MemoryObservation($members) {
 }
 function Save-M6PrivateObservation([string]$file) {
   $members=@(Get-M6ProductProcesses)
-  $perf=@{}
-  foreach ($row in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -Property Name,IDProcess,WorkingSetPrivate,WorkingSet,PrivateBytes)) {
-    $perf[[int]$row.IDProcess]=$row
-  }
   $result=Get-M6MemoryObservation $members
-  foreach ($member in $result.processes) {
-    $counter=$perf[$member.pid]
-    if ($null -ne $counter) {
-      $member.privateWorkingSet=[long]$counter.WorkingSetPrivate
-      $member.counterWorkingSet=[long]$counter.WorkingSet
-      $member.privateCommitted=[long]$counter.PrivateBytes
+  try {
+    $perf=@{}
+    foreach ($row in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -Property IDProcess,WorkingSetPrivate,WorkingSet,PrivateBytes -ErrorAction Stop)) {
+      $perf[[int]$row.IDProcess]=$row
     }
-  }
+    foreach ($member in $result.processes) {
+      $counter=$perf[$member.pid]
+      if ($null -ne $counter) {
+        $member.privateWorkingSet=[long]$counter.WorkingSetPrivate
+        $member.counterWorkingSet=[long]$counter.WorkingSet
+        $member.privateCommitted=[long]$counter.PrivateBytes
+      }
+    }
+  } catch { $result.counterError=$_.Exception.Message }
   $result|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $file
 }
 function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
@@ -66,6 +81,8 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $inputData=Join-Path $out 'input.json'
   $usage=Join-Path $out 'cpu.json'
   $memory=[Collections.Generic.List[object]]::new()
+  $inventories=[Collections.Generic.List[object]]::new()
+  $known=@{}
   # Give both installs the same 64-entry gateway history, then let Windows
   # retire this test target's rows naturally before starting either trace.
   $primeFile=Join-Path $out 'prime.json'
@@ -92,11 +109,12 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
     $rootsFrom=[DateTimeOffset]::UtcNow.ToString('o')
     $members=@(Get-M6ProductProcesses)
     $rootsAt=[DateTimeOffset]::UtcNow.ToString('o')
+    Add-M6Inventory $inventories $known $members $rootsFrom $rootsAt
     $roots=@($members | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith(($appDir.TrimEnd('\')+'\'),[StringComparison]::OrdinalIgnoreCase) } |
       ForEach-Object { @{pid=[int]$_.ProcessId; image=$_.ExecutablePath; createdAt=$_.CreationDate.ToUniversalTime().ToString('o')} })
     $paths=@($members.ExecutablePath | Where-Object {$_} | Sort-Object -Unique)
     $images=@($paths | ForEach-Object { @{name=[IO.Path]::GetFileName($_);hash=(Get-FileHash -LiteralPath $_).Hash.ToLowerInvariant()} })
-    if ($release -eq '0.3.2') {
+    if ($label -eq 'baseline') {
       $enginePid=[int](Get-Content -Raw -LiteralPath (Join-Path $machineData 'engine.pid'))
       if ('node.exe' -notin $images.name -or 'NetSwitchTray.exe' -notin $images.name -or $enginePid -notin $roots.pid) {
         throw 'Missing installed legacy Control, engine or desktop'
@@ -110,7 +128,9 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
     $timer=[Diagnostics.Stopwatch]::StartNew()
     while (!$worker.HasExited) {
       if ($timer.Elapsed.TotalMinutes -gt 8) { $worker.Kill(); throw 'Measurement did not finish in eight minutes' }
+      $sampleFrom=[DateTimeOffset]::UtcNow.ToString('o')
       $sample=@(Get-M6ProductProcesses)
+      Add-M6Inventory $inventories $known $sample $sampleFrom ([DateTimeOffset]::UtcNow.ToString('o'))
       $memory.Add((Get-M6MemoryObservation $sample))
       $null=$worker.WaitForExit(300)
     }
@@ -125,9 +145,12 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   Save-M6PrivateObservation (Join-Path $out 'post-traffic-memory.json')
   $connections=(Get-M6Count)-$before
   if ($connections -ne $t.connections) { throw "TestISP saw $connections benchmark connections, expected $($t.connections)" }
-  @{rootsFrom=$rootsFrom;rootsAt=$rootsAt;roots=$roots;installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
+  @{rootsFrom=$rootsFrom;rootsAt=$rootsAt;roots=$roots;inventories=$inventories.ToArray();installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
   & $m6Reader $trace $inputData $usage
-  if ($LASTEXITCODE -ne 0) { throw 'CPU trace analysis failed' }
+  if ($LASTEXITCODE -ne 0) {
+    $memory.ToArray() | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $out 'memory-before-accounting-failure.json')
+    throw 'CPU trace analysis failed'
+  }
   $report=@{arch=$Arch;runner=$env:COMPUTERNAME;commit=$env:GITHUB_SHA;release=$release;installerHash=(Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant();images=$images;gatewayConnections=$connections;traffic=$t;memory=$memory.ToArray();accounting=(Get-Content -Raw $usage|ConvertFrom-Json)}
   $report.precondition=@{verifiedConnections=$primed.connections;before=$table[0];after=$table[-1]}
   $report.gatewayHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $ispExe).Hash.ToLowerInvariant()
