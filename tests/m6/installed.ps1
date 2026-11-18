@@ -59,7 +59,21 @@ try {
   } | Out-Null
   Assert-RoutedEcho 'M6 installed candidate'
   if ($Qualification -eq 'compare') {
-    Measure-M6Product 'candidate' $candidateVersion $setup100
+    $request=Join-Path $machineData 'm6-cpu.start'
+    if ($env:NETSWITCH_M6_PROFILE -eq '1') {
+      [IO.File]::WriteAllText($request,'collect')
+      Wait-Until 'native profiler attached' 10 { Test-Path (Join-Path $machineData 'm6-cpu.ready') } | Out-Null
+    }
+    try { Measure-M6Product 'candidate' $candidateVersion $setup100 } finally {
+      if ($env:NETSWITCH_M6_PROFILE -eq '1') {
+        Remove-Item -LiteralPath $request
+        Wait-Until 'native CPU profile saved' 10 { Test-Path (Join-Path $machineData 'm6-cpu.done') } | Out-Null
+        $cpu=Join-Path $machineData 'm6-engine.pprof'
+        Copy-Item $cpu (Join-Path $diagDir 'm6-engine.pprof')
+        & $goExe tool pprof -top -nodecount=50 $cpu
+        & $goExe tool pprof -top -cum -nodecount=50 $cpu
+      }
+    }
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {

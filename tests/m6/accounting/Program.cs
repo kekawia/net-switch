@@ -63,6 +63,7 @@ if (input.InstallDirectory is string install) {
 }
 var cpu = new long[input.Samples.Length];
 var counted = new HashSet<IProcess>();
+var byImage = new Dictionary<string,long>();
 long calibrationTicks = 0;
 foreach (var slice in usage.Result.CpuTimeSlices) {
     if (!members.Contains(slice.Process)) continue;
@@ -73,6 +74,8 @@ foreach (var slice in usage.Result.CpuTimeSlices) {
         var ticks = Math.Min(hi,window.EndUtc.UtcTicks) - Math.Max(lo,window.StartUtc.UtcTicks);
         if (ticks <= 0) continue;
         cpu[i] += ticks;
+        var name = slice.Process.ImageName + "/" + slice.Process.Id;
+        byImage[name] = byImage.GetValueOrDefault(name) + ticks;
         if (slice.Process.Id == input.CalibrationChild) calibrationTicks += ticks;
         counted.Add(slice.Process);
     }
@@ -85,6 +88,7 @@ if (input.CalibrationChild is int childId) {
         throw new InvalidDataException("Trace missed CPU from the short-lived calibration child.");
 }
 File.WriteAllText(args[2],JsonSerializer.Serialize(new {
+    byImageSeconds = byImage.ToDictionary(p=>p.Key,p=>TimeSpan.FromTicks(p.Value).TotalSeconds),
     members = members.Count,
     scheduled = counted.Count,
     exited = counted.Count(p=>p.ExitTime.HasValue),
