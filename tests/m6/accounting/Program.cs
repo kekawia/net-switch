@@ -20,6 +20,8 @@ if (args is ["settle", var settlePort, var settleUplink, var settleOutput]) {
     while (true) {
         var sample = ReadTable(port, uplink);
         observations.Add(sample);
+        if (observations.Count == 1 || observations.Count % 15 == 0 || sample.TargetRows == 0)
+            Console.WriteLine($"M6 initial TCP table at {timer.Elapsed.TotalSeconds:F1}s: target={sample.TargetRows}, TIME_WAIT={sample.TargetTimeWait}, machine={sample.TotalRows}");
         if (sample.TargetRows == 0 || timer.Elapsed >= TimeSpan.FromMinutes(8)) break;
         Thread.Sleep(TimeSpan.FromSeconds(2));
     }

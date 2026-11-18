@@ -13,7 +13,7 @@ function Start-M6Client([string]$ModeName,[string]$ResultPath) {
   return [pscustomobject]@{Process=$proc;Errors=$proc.StandardError.ReadToEndAsync()}
 }
 function Get-M6ProductProcesses {
-  $all = @(Get-CimInstance Win32_Process -Property ExecutablePath,ProcessId,ParentProcessId,WorkingSetSize,CreationDate)
+  $all = @(Get-CimInstance Win32_Process -Property Name,ExecutablePath,ProcessId,ParentProcessId,WorkingSetSize,CreationDate)
   $included = @{}
   foreach ($p in $all) {
     if ($p.ExecutablePath -and $p.ExecutablePath.StartsWith(($appDir.TrimEnd('\')+'\'),[StringComparison]::OrdinalIgnoreCase)) {
@@ -33,6 +33,30 @@ function Get-M6Count {
   $stats = Invoke-RestMethod -Uri "$($primaryIsp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
   $record = $stats.destinations.PSObject.Properties[$m6Target]
   if ($null -eq $record) { return [long]0 }; return [long]$record.Value
+}
+function Get-M6MemoryObservation($members) {
+  $at=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+  $rows=@($members | ForEach-Object {
+    @{pid=[int]$_.ProcessId;parent=[int]$_.ParentProcessId;name=$_.Name;created=$_.CreationDate.ToUniversalTime().ToString('o');workingSet=[long]$_.WorkingSetSize}
+  })
+  return @{utc=$at;workingSetBytes=[long](($members|Measure-Object WorkingSetSize -Sum).Sum);processes=$rows}
+}
+function Save-M6PrivateObservation([string]$file) {
+  $members=@(Get-M6ProductProcesses)
+  $perf=@{}
+  foreach ($row in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -Property Name,IDProcess,WorkingSetPrivate,WorkingSet,PrivateBytes)) {
+    $perf[[int]$row.IDProcess]=$row
+  }
+  $result=Get-M6MemoryObservation $members
+  foreach ($member in $result.processes) {
+    $counter=$perf[$member.pid]
+    if ($null -ne $counter) {
+      $member.privateWorkingSet=[long]$counter.WorkingSetPrivate
+      $member.counterWorkingSet=[long]$counter.WorkingSet
+      $member.privateCommitted=[long]$counter.PrivateBytes
+    }
+  }
+  $result|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $file
 }
 function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $out = Join-Path $diagDir "m6-$label"
@@ -59,6 +83,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   if ($LASTEXITCODE -ne 0) {throw 'Could not establish matched initial socket state'}
   $table=@(Get-Content -Raw -LiteralPath (Join-Path $out 'initial-table.json') | ConvertFrom-Json)
   if (!$table.Count -or $table[-1].TargetRows -ne 0) {throw 'Incomplete initial socket observation'}
+  Save-M6PrivateObservation (Join-Path $out 'settled-memory.json')
   $before=Get-M6Count
   & wpr.exe -start "$m6Profile!NetSwitchCPU.Light" -filemode
   if ($LASTEXITCODE -ne 0) { throw "WPR start failed ($LASTEXITCODE)" }
@@ -71,7 +96,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
       ForEach-Object { @{pid=[int]$_.ProcessId; image=$_.ExecutablePath; createdAt=$_.CreationDate.ToUniversalTime().ToString('o')} })
     $paths=@($members.ExecutablePath | Where-Object {$_} | Sort-Object -Unique)
     $images=@($paths | ForEach-Object { @{name=[IO.Path]::GetFileName($_);hash=(Get-FileHash -LiteralPath $_).Hash.ToLowerInvariant()} })
-    if ($label -eq 'baseline') {
+    if ($release -eq '0.3.2') {
       $enginePid=[int](Get-Content -Raw -LiteralPath (Join-Path $machineData 'engine.pid'))
       if ('node.exe' -notin $images.name -or 'NetSwitchTray.exe' -notin $images.name -or $enginePid -notin $roots.pid) {
         throw 'Missing installed legacy Control, engine or desktop'
@@ -86,7 +111,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
     while (!$worker.HasExited) {
       if ($timer.Elapsed.TotalMinutes -gt 8) { $worker.Kill(); throw 'Measurement did not finish in eight minutes' }
       $sample=@(Get-M6ProductProcesses)
-      $memory.Add(@{utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ');workingSetBytes=[long](($sample | Measure-Object WorkingSetSize -Sum).Sum)})
+      $memory.Add((Get-M6MemoryObservation $sample))
       $null=$worker.WaitForExit(300)
     }
     $worker.WaitForExit()
@@ -97,6 +122,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
     else { & wpr.exe -cancel }
   }
   $t=Get-Content -Raw -LiteralPath $traffic | ConvertFrom-Json
+  Save-M6PrivateObservation (Join-Path $out 'post-traffic-memory.json')
   $connections=(Get-M6Count)-$before
   if ($connections -ne $t.connections) { throw "TestISP saw $connections benchmark connections, expected $($t.connections)" }
   @{rootsFrom=$rootsFrom;rootsAt=$rootsAt;roots=$roots;installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
@@ -104,5 +130,6 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   if ($LASTEXITCODE -ne 0) { throw 'CPU trace analysis failed' }
   $report=@{arch=$Arch;runner=$env:COMPUTERNAME;commit=$env:GITHUB_SHA;release=$release;installerHash=(Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant();images=$images;gatewayConnections=$connections;traffic=$t;memory=$memory.ToArray();accounting=(Get-Content -Raw $usage|ConvertFrom-Json)}
   $report.precondition=@{verifiedConnections=$primed.connections;before=$table[0];after=$table[-1]}
+  $report.gatewayHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $ispExe).Hash.ToLowerInvariant()
   $report | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM (Join-Path $out 'report.json')
 }

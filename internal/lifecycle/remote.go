@@ -392,8 +392,6 @@ func (r *Remote) pollStats(rpc *RPC) {
 			cancel()
 			if err != nil {
 				r.log("engine stats unavailable (lease renewal remains independent): " + err.Error())
-			} else {
-				r.dumpM6OpenRows()
 			}
 		}
 	}
