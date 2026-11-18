@@ -13,7 +13,7 @@ function Start-M6Client([string]$ModeName,[string]$ResultPath) {
   return [pscustomobject]@{Process=$proc;Errors=$proc.StandardError.ReadToEndAsync()}
 }
 function Get-M6ProductProcesses {
-  $all = @(Get-CimInstance Win32_Process -Property ExecutablePath,ProcessId,ParentProcessId,WorkingSetSize,CreationDate)
+  $all = @(Get-CimInstance Win32_Process -Property Name,ExecutablePath,ProcessId,ParentProcessId,WorkingSetSize,CreationDate)
   $included = @{}
   foreach ($p in $all) {
     if ($p.ExecutablePath -and $p.ExecutablePath.StartsWith(($appDir.TrimEnd('\')+'\'),[StringComparison]::OrdinalIgnoreCase)) {
@@ -34,6 +34,19 @@ function Get-M6Count {
   $record = $stats.destinations.PSObject.Properties[$m6Target]
   if ($null -eq $record) { return [long]0 }; return [long]$record.Value
 }
+function Add-M6Inventory($receipts,$known,$members,[string]$from,[string]$at) {
+  $changed=$false
+  foreach ($member in $members) {
+    $key=[string]$member.ProcessId+'|'+$member.CreationDate.ToFileTimeUtc()
+    if (!$known.ContainsKey($key)) { $known[$key]=$true; $changed=$true }
+  }
+  if (!$changed) {return}
+  $rows=@($members|ForEach-Object {
+    $image=if ($_.ExecutablePath) { $_.ExecutablePath } else { $_.Name }
+    @{pid=[int]$_.ProcessId;parentPid=[int]$_.ParentProcessId;image=$image;createdAt=$_.CreationDate.ToUniversalTime().ToString('o')}
+  })
+  $receipts.Add(@{from=$from;at=$at;processes=$rows})
+}
 function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $out = Join-Path $diagDir "m6-$label"
   $null=New-Item -ItemType Directory -Path $out -Force
@@ -42,6 +55,8 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $inputData=Join-Path $out 'input.json'
   $usage=Join-Path $out 'cpu.json'
   $memory=[Collections.Generic.List[object]]::new()
+  $inventories=[Collections.Generic.List[object]]::new()
+  $known=@{}
   # Give both installs the same 64-entry gateway history, then let Windows
   # retire this test target's rows naturally before starting either trace.
   $primeFile=Join-Path $out 'prime.json'
@@ -67,6 +82,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
     $rootsFrom=[DateTimeOffset]::UtcNow.ToString('o')
     $members=@(Get-M6ProductProcesses)
     $rootsAt=[DateTimeOffset]::UtcNow.ToString('o')
+    Add-M6Inventory $inventories $known $members $rootsFrom $rootsAt
     $roots=@($members | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith(($appDir.TrimEnd('\')+'\'),[StringComparison]::OrdinalIgnoreCase) } |
       ForEach-Object { @{pid=[int]$_.ProcessId; image=$_.ExecutablePath; createdAt=$_.CreationDate.ToUniversalTime().ToString('o')} })
     $paths=@($members.ExecutablePath | Where-Object {$_} | Sort-Object -Unique)
@@ -85,7 +101,9 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
     $timer=[Diagnostics.Stopwatch]::StartNew()
     while (!$worker.HasExited) {
       if ($timer.Elapsed.TotalMinutes -gt 8) { $worker.Kill(); throw 'Measurement did not finish in eight minutes' }
+      $sampleFrom=[DateTimeOffset]::UtcNow.ToString('o')
       $sample=@(Get-M6ProductProcesses)
+      Add-M6Inventory $inventories $known $sample $sampleFrom ([DateTimeOffset]::UtcNow.ToString('o'))
       $memory.Add(@{utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ');workingSetBytes=[long](($sample | Measure-Object WorkingSetSize -Sum).Sum)})
       $null=$worker.WaitForExit(300)
     }
@@ -99,7 +117,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $t=Get-Content -Raw -LiteralPath $traffic | ConvertFrom-Json
   $connections=(Get-M6Count)-$before
   if ($connections -ne $t.connections) { throw "TestISP saw $connections benchmark connections, expected $($t.connections)" }
-  @{rootsFrom=$rootsFrom;rootsAt=$rootsAt;roots=$roots;installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
+  @{rootsFrom=$rootsFrom;rootsAt=$rootsAt;roots=$roots;inventories=$inventories.ToArray();installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
   & $m6Reader $trace $inputData $usage
   if ($LASTEXITCODE -ne 0) { throw 'CPU trace analysis failed' }
   $report=@{arch=$Arch;runner=$env:COMPUTERNAME;commit=$env:GITHUB_SHA;release=$release;installerHash=(Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant();images=$images;gatewayConnections=$connections;traffic=$t;memory=$memory.ToArray();accounting=(Get-Content -Raw $usage|ConvertFrom-Json)}
