@@ -45,10 +45,11 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   if ($LASTEXITCODE -ne 0) { throw "WPR start failed ($LASTEXITCODE)" }
   $finished=$false
   try {
+    $rootsFrom=[DateTimeOffset]::UtcNow.ToString('o')
     $members=@(Get-M6ProductProcesses)
     $rootsAt=[DateTimeOffset]::UtcNow.ToString('o')
     $roots=@($members | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith(($appDir.TrimEnd('\')+'\'),[StringComparison]::OrdinalIgnoreCase) } |
-      ForEach-Object { @{pid=[int]$_.ProcessId; image=$_.ExecutablePath} })
+      ForEach-Object { @{pid=[int]$_.ProcessId; image=$_.ExecutablePath; createdAt=$_.CreationDate.ToUniversalTime().ToString('o')} })
     $paths=@($members.ExecutablePath | Where-Object {$_} | Sort-Object -Unique)
     $images=@($paths | ForEach-Object { @{name=[IO.Path]::GetFileName($_);hash=(Get-FileHash -LiteralPath $_).Hash.ToLowerInvariant()} })
     if ($label -eq 'baseline') {
@@ -79,7 +80,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $t=Get-Content -Raw -LiteralPath $traffic | ConvertFrom-Json
   $connections=(Get-M6Count)-$before
   if ($connections -ne $t.connections) { throw "TestISP saw $connections benchmark connections, expected $($t.connections)" }
-  @{rootsAt=$rootsAt;roots=$roots;installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
+  @{rootsFrom=$rootsFrom;rootsAt=$rootsAt;roots=$roots;installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
   & $m6Reader $trace $inputData $usage
   if ($LASTEXITCODE -ne 0) { throw 'CPU trace analysis failed' }
   $report=@{arch=$Arch;runner=$env:COMPUTERNAME;commit=$env:GITHUB_SHA;release=$release;installerHash=(Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant();images=$images;gatewayConnections=$connections;traffic=$t;memory=$memory.ToArray();accounting=(Get-Content -Raw $usage|ConvertFrom-Json)}
