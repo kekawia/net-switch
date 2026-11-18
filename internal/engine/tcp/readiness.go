@@ -11,6 +11,7 @@ import (
 
 	"github.com/kekawia/net-switch/internal/engine/platform"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	gtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -189,20 +190,17 @@ func (r *readyRelay) notify() {
 		return
 	}
 	r.scheduled = true
-	w.appendLocked(r, true)
+	w.appendLocked(r)
 	w.mu.Unlock()
 }
 
-func (w *relayWorkers) appendLocked(r *readyRelay, signal bool) {
+func (w *relayWorkers) appendLocked(r *readyRelay) {
 	if w.tail == nil {
 		w.head = r
 	} else {
 		w.tail.next = r
 	}
 	w.tail = r
-	if !signal {
-		return
-	}
 	select {
 	case w.wake <- struct{}{}:
 	default:
@@ -217,7 +215,7 @@ func (w *relayWorkers) run() {
 			return
 		case <-w.wake:
 		}
-		for turns := 1; ; turns++ {
+		for {
 			w.mu.Lock()
 			r := w.head
 			if r != nil {
@@ -231,23 +229,18 @@ func (w *relayWorkers) run() {
 			if r == nil {
 				break
 			}
-			exhausted := r.step(scratch)
-			groupTurns := platform.M6Trial == "worker"
+			r.step(scratch)
 			w.mu.Lock()
 			if r.again && !r.closed.Load() {
-				w.appendLocked(r, !groupTurns)
+				w.appendLocked(r)
 			} else {
 				r.scheduled = false
 			}
-			more := w.head != nil
 			w.mu.Unlock()
 			// A continuously readable connection must not keep every P until
 			// Go's preemption interval (longer than the owner lookup budget).
 			// Yield between bounded I/O quanta so admission and TUN ingress run.
-			if !groupTurns || (more && (exhausted || turns >= 4)) {
-				runtime.Gosched()
-				turns = 0
-			}
+			runtime.Gosched()
 		}
 	}
 }
@@ -374,9 +367,33 @@ func (r *readyRelay) write(up bool, b []byte, scratch *relayScratch) (int, error
 		return r.remote.TryWrite(b)
 	}
 	scratch.send.Reset(b)
-	n, err := r.c.ep.Write(&scratch.send, tcpip.WriteOptions{Atomic: platform.M6Trial == "worker"})
+	n, err := r.c.ep.Write(&scratch.send, tcpip.WriteOptions{})
 	scratch.send.Reset(nil)
 	return int(n), stackError(err)
+}
+
+// transfer keeps source and destination errors separate so readiness is armed
+// on the side that blocked. All I/O is synchronous within the current loans.
+func (r *readyRelay) transfer(up bool, b []byte, scratch *relayScratch) (int, error, error) {
+	if !up && runtime.GOOS == "windows" {
+		n, readErr, writeErr := r.c.ep.(*gtcp.Endpoint).WriteFromNonblocking(r.remote, b)
+		return n, readErr, stackError(writeErr)
+	}
+	peeked, readErr := r.read(up, b, scratch)
+	if peeked < 0 || peeked > len(b) {
+		return 0, io.ErrShortBuffer, nil
+	}
+	if peeked == 0 {
+		return 0, readErr, nil
+	}
+	n, writeErr := r.write(up, b[:peeked], scratch)
+	if n < 0 || n > peeked {
+		return 0, nil, io.ErrShortWrite
+	}
+	if err := r.discard(up, b[:n], scratch); err != nil {
+		return 0, err, nil
+	}
+	return n, nil, writeErr
 }
 
 func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch) (bool, error) {
@@ -403,47 +420,28 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			b = scratch.bulk[:loans*RelayBuffer]
 		}
 		b = b[:min(len(b), (256<<10)-moved)]
-		peeked, readErr := r.read(up, b, scratch)
-		if peeked < 0 || peeked > len(b) {
-			r.workers.giveBack(r, loans)
-			return false, io.ErrShortBuffer
+		n, readErr, writeErr := r.transfer(up, b, scratch)
+		r.workers.giveBack(r, loans)
+		if n > 0 {
+			moved += n
+			if up {
+				r.c.up.Add(uint64(n))
+				r.c.ticket.Add(uint64(n), 0)
+			} else {
+				r.c.down.Add(uint64(n))
+				r.c.ticket.Add(0, uint64(n))
+			}
 		}
-		if peeked > 0 {
-			n, err := r.write(up, b[:peeked], scratch)
-			if n < 0 || n > peeked {
-				r.workers.giveBack(r, loans)
-				return false, io.ErrShortWrite
-			}
-			if consumeErr := r.discard(up, b[:n], scratch); consumeErr != nil {
-				r.workers.giveBack(r, loans)
-				return false, consumeErr
-			}
-			r.workers.giveBack(r, loans)
-			if n > 0 {
-				moved += n
-				if up {
-					r.c.up.Add(uint64(n))
-					r.c.ticket.Add(uint64(n), 0)
-				} else {
-					r.c.down.Add(uint64(n))
-					r.c.ticket.Add(0, uint64(n))
-				}
-			}
-			if errors.Is(err, platform.ErrWouldBlock) {
-				d.blocked = true
-				return false, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			if n == 0 {
-				return false, io.ErrNoProgress
-			}
-			// Re-peek even after a short successful write. EOF is propagated
-			// only once every byte before it has actually been consumed.
+		if errors.Is(writeErr, platform.ErrWouldBlock) {
+			d.blocked = true
+			return false, nil
+		}
+		if writeErr != nil {
+			return false, writeErr
+		}
+		if n > 0 && readErr == nil {
 			continue
 		}
-		r.workers.giveBack(r, loans)
 		if errors.Is(readErr, platform.ErrWouldBlock) {
 			return false, nil
 		}
@@ -475,32 +473,31 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 	return true, nil
 }
 
-func (r *readyRelay) step(scratch *relayScratch) bool {
+func (r *readyRelay) step(scratch *relayScratch) {
 	r.waitBuffer = false
 	if r.cancelled.Load() || r.ctx.Err() != nil {
 		r.close(true)
-		return false
+		return
 	}
 	up, err := r.direction(&r.up, true, scratch)
 	if err != nil {
 		r.close(true)
-		return false
+		return
 	}
 	down, err := r.direction(&r.down, false, scratch)
 	if err != nil {
 		r.close(true)
-		return false
+		return
 	}
 	if r.up.finished && r.down.finished {
 		r.close(false)
-		return false
+		return
 	}
 	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && !r.down.blocked, r.up.blocked); err != nil {
 		r.close(true)
-		return false
+		return
 	}
 	if up || down {
 		r.notify()
 	}
-	return up || down
 }

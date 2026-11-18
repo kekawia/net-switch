@@ -548,7 +548,6 @@ type readySocket struct {
 	closed        bool
 	readWindow    time.Duration // readWindow and windowBytes are protected by mu
 	windowBytes   int
-	m6Sized       bool
 }
 
 func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
@@ -633,16 +632,6 @@ func (c *readySocket) noteRead(now time.Duration, n int) {
 	}
 	c.windowBytes += n
 	if c.windowBytes >= 64<<10 && n < 16<<10 {
-		if platform.M6Trial == "native-window" && !c.m6Sized && !c.handle.IsZero() {
-			c.m6Sized = true
-			h := c.handle.Handle("experiment bulk receive window")
-			old, err := windows.GetsockoptInt(h, windows.SOL_SOCKET, windows.SO_RCVBUF)
-			if err == nil && old < 256<<10 {
-				if err := windows.SetsockoptInt(h, windows.SOL_SOCKET, windows.SO_RCVBUF, 256<<10); err != nil {
-					panic(err)
-				}
-			}
-		}
 		c.watch.bulkUntil.Store(int64(now + bulkReadWindow))
 	}
 }

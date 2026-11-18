@@ -1685,13 +1685,46 @@ func (e *Endpoint) queueSegment(p tcpip.Payloader, opts tcpip.WriteOptions) (*se
 		}
 	}
 
-	// Add data to the send queue.
+	s, size := e.appendSendBufferLocked(buf)
+	return s, size, nil
+}
+
+// +checklocks:e.mu
+// +checklocks:e.sndQueueInfo.sndQueueMu
+func (e *Endpoint) appendSendBufferLocked(buf buffer.Buffer) (*segment, int) {
 	size := int(buf.Size())
 	s := newOutgoingSegment(e.TransportEndpointInfo.ID, e.stack.Clock(), buf, e.ops.GetMark())
 	e.sndQueueInfo.SndBufUsed += size
 	e.snd.writeList.PushBack(s)
+	return s, size
+}
 
-	return s, size, nil
+// WriteFromNonblocking queues only bytes that fit the current TCP send buffer.
+// The Net Switch relay is the source's exclusive reader. TryRead must return
+// immediately and must never enter this stack or wait for relay workers.
+// A source error and an endpoint error have distinct readiness owners.
+func (e *Endpoint) WriteFromNonblocking(src interface{ TryRead([]byte) (int, error) }, scratch []byte) (int, error, tcpip.Error) {
+	e.LockUser()
+	defer e.UnlockUser()
+	e.sndQueueInfo.sndQueueMu.Lock()
+	avail, err := e.isEndpointWritableLocked()
+	if err != nil {
+		e.sndQueueInfo.sndQueueMu.Unlock()
+		return 0, nil, err
+	}
+	room := min(len(scratch), avail)
+	n, readErr := src.TryRead(scratch[:room])
+	if n <= 0 || n > room {
+		e.sndQueueInfo.sndQueueMu.Unlock()
+		if n < 0 || n > room {
+			return 0, io.ErrShortBuffer, nil
+		}
+		return 0, readErr, nil
+	}
+	s, _ := e.appendSendBufferLocked(buffer.MakeWithData(scratch[:n]))
+	e.sndQueueInfo.sndQueueMu.Unlock()
+	e.sendData(s)
+	return n, readErr, nil
 }
 
 // Write writes data to the endpoint's peer.
