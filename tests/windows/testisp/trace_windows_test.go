@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"reflect"
 	"testing"
 
@@ -123,5 +124,28 @@ func BenchmarkGatewayPacketTrace(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		g.trace(p, traceRequest)
+	}
+}
+
+func TestBenchmarkGatewayBatchRequiresCompletePublication(t *testing.T) {
+	g, p := traceFixture(t)
+	g.stats.BenchmarkOutput = &benchmarkOutput{}
+	setTraceSequence(p, 1)
+	first := append([]byte(nil), p...)
+	setTraceSequence(p, 2)
+	frames := [][]byte{first, p}
+	if err := g.writeOutput(frames, func(batch [][]byte) error {
+		if len(batch) != 2 || binary.BigEndian.Uint32(batch[0][24:]) != 1 || binary.BigEndian.Uint32(batch[1][24:]) != 2 {
+			t.Fatal("misordered batch")
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.writeOutput(frames, func([][]byte) error { return io.ErrShortWrite }); err != io.ErrShortWrite {
+		t.Fatal(err)
+	}
+	if g.stats.TCPTrace.next != 2 || g.stats.TestISP.PacketsOut != 2 || g.stats.BenchmarkOutput.Failures != 1 {
+		t.Fatal("an incomplete batch was credited as delivered")
 	}
 }

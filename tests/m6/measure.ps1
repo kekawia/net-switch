@@ -154,5 +154,8 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $report=@{arch=$Arch;runner=$env:COMPUTERNAME;commit=$env:GITHUB_SHA;release=$release;installerHash=(Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant();images=$images;gatewayConnections=$connections;traffic=$t;memory=$memory.ToArray();accounting=(Get-Content -Raw $usage|ConvertFrom-Json)}
   $report.precondition=@{verifiedConnections=$primed.connections;before=$table[0];after=$table[-1]}
   $report.gatewayHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $ispExe).Hash.ToLowerInvariant()
+  $gateway=(Invoke-RestMethod -Uri "$($primaryIsp.control)/stats" -Headers $ispHeaders -TimeoutSec 5).benchmarkOutput
+  if (!$gateway -or $gateway.writes -lt 1 -or $gateway.failures -ne 0) {throw 'TestISP packet publication evidence incomplete'}
+  $report.gatewayOutput=$gateway
   $report | ConvertTo-Json -Depth 10 | Set-Content -Encoding utf8NoBOM (Join-Path $out 'report.json')
 }

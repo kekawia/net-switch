@@ -27,6 +27,96 @@ import (
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
+// Benchmark mode drains only frames already available. A partial write
+// invalidates that run, since individual delivery cannot be inferred.
+func (g *gateway) forwardOutput(link *channel.Endpoint) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-g.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	const maxBatch = 64
+	var packets [maxBatch]*stack.PacketBuffer
+	var views [maxBatch]*buffer.View
+	var frames [maxBatch][]byte
+	for {
+		packets[0] = link.ReadContext(ctx)
+		if packets[0] == nil {
+			return
+		}
+		n := 1
+		if g.stats.BenchmarkOutput != nil {
+			for n < maxBatch {
+				next := link.Read()
+				if next == nil {
+					break
+				}
+				packets[n] = next
+				n++
+			}
+		}
+		var writeErr error
+		if g.mode.Load() == 0 {
+			for i := range n {
+				views[i] = packets[i].ToView()
+				frames[i] = views[i].AsSlice()
+				g.trace(frames[i], traceReply)
+			}
+			writeErr = g.writeOutput(frames[:n], g.device.writeBatch)
+		}
+		for i := range n {
+			if views[i] != nil {
+				views[i].Release()
+				views[i] = nil
+			}
+			frames[i] = nil
+			packets[i].DecRef()
+			packets[i] = nil
+		}
+		if writeErr != nil && (g.stats.BenchmarkOutput != nil || errors.Is(writeErr, wintun.ErrAdapterRemoved)) {
+			g.close()
+			return
+		}
+	}
+}
+
+func (g *gateway) writeOutput(frames [][]byte, publish func([][]byte) error) error {
+	err := publish(frames)
+	var bytes uint64
+	if err == nil {
+		for _, frame := range frames {
+			g.trace(frame, traceDelivered)
+			bytes += uint64(len(frame))
+		}
+	} else {
+		g.event("wintun-write-error", 0, "", err.Error())
+		if g.stats.BenchmarkOutput == nil && errors.Is(err, wintun.ErrAdapterRemoved) {
+			return err
+		}
+	}
+	g.stats.Lock()
+	defer g.stats.Unlock()
+	if b := g.stats.BenchmarkOutput; b != nil {
+		b.Writes++
+		b.Frames += uint64(len(frames))
+		b.Largest = max(b.Largest, len(frames))
+		if err != nil {
+			b.Failures++
+		}
+	}
+	if err != nil {
+		g.stats.TestISP.Errors++
+	} else {
+		g.stats.TestISP.PacketsOut += uint64(len(frames))
+		g.stats.TestISP.BytesOut += bytes
+	}
+	return err
+}
+
 func (g *gateway) startStack() (*stack.Stack, error) {
 	s := stack.New(stack.Options{NetworkProtocols: []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol}, TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol4, icmp.NewProtocol6}})
 	g.stack = s
@@ -128,44 +218,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 	})
 	s.SetTransportProtocolHandler(tcp.ProtocolNumber, handle)
 	s.SetTransportProtocolHandler(udp.ProtocolNumber, g.udpHandler(link))
-	go func() {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		go func() { <-g.done; cancel() }()
-		for {
-			packet := link.ReadContext(ctx)
-			if packet == nil {
-				return
-			}
-			view := packet.ToView()
-			data := view.AsSlice()
-			if g.mode.Load() == 0 {
-				g.trace(data, traceReply)
-				err := g.device.Write(data)
-				if err != nil {
-					g.event("wintun-write-error", 0, "", err.Error())
-					if errors.Is(err, wintun.ErrAdapterRemoved) {
-						view.Release()
-						packet.DecRef()
-						g.close()
-						return
-					}
-				} else {
-					g.trace(data, traceDelivered)
-				}
-				g.stats.Lock()
-				if err != nil {
-					g.stats.TestISP.Errors++
-				} else {
-					g.stats.TestISP.PacketsOut++
-					g.stats.TestISP.BytesOut += uint64(len(data))
-				}
-				g.stats.Unlock()
-			}
-			view.Release()
-			packet.DecRef()
-		}
-	}()
+	go g.forwardOutput(link)
 	go func() {
 		packet := make([]byte, 65535)
 		for {

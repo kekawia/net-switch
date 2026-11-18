@@ -79,12 +79,13 @@ type counters struct {
 
 type observations struct {
 	sync.Mutex
-	TestISP      counters          `json:"testisp"`
-	Uplink       counters          `json:"uplink"`
-	Destinations map[string]uint64 `json:"destinations"`
-	UDPReplies   map[string]uint64 `json:"udpReplies"`
-	EchoRequests map[string]uint64 `json:"echoRequests"`
-	TCPTrace     tcpTraceTail      `json:"tcpTrace"`
+	BenchmarkOutput *benchmarkOutput  `json:"benchmarkOutput,omitempty"`
+	TestISP         counters          `json:"testisp"`
+	Uplink          counters          `json:"uplink"`
+	Destinations    map[string]uint64 `json:"destinations"`
+	UDPReplies      map[string]uint64 `json:"udpReplies"`
+	EchoRequests    map[string]uint64 `json:"echoRequests"`
+	TCPTrace        tcpTraceTail      `json:"tcpTrace"`
 }
 
 type gateway struct {
@@ -104,6 +105,13 @@ type gateway struct {
 	stop         sync.Once
 }
 
+type benchmarkOutput struct {
+	Writes   uint64 `json:"writes"`
+	Frames   uint64 `json:"frames"`
+	Largest  int    `json:"largest"`
+	Failures uint64 `json:"failures"`
+}
+
 func (g *gateway) close() { g.stop.Do(func() { close(g.done); g.device.Close() }) }
 
 func serve(args []string) error {
@@ -112,6 +120,7 @@ func serve(args []string) error {
 	ip := f.String("uplink-ip", "", "real uplink IPv4 address")
 	state := f.String("state", "", "write ready state and final counters here")
 	role := f.String("role", "secondary", "secondary or primary installed-test path")
+	batch := f.Bool("benchmark-output", false, "publish already-queued packets as a batch for installed performance comparisons")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
@@ -150,6 +159,9 @@ func serve(args []string) error {
 		return err
 	}
 	g := &gateway{device: device, index: *index, uplinkIP: net.ParseIP(*ip), done: make(chan struct{}), stats: observations{Destinations: make(map[string]uint64)}}
+	if *batch {
+		g.stats.BenchmarkOutput = &benchmarkOutput{}
+	}
 	defer g.close()
 	stack, err := g.startStack()
 	if err != nil {

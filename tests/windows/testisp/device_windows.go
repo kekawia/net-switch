@@ -59,12 +59,12 @@ func (d *observedDevice) Read(buf []byte) (int, error) {
 	return n, err
 }
 
-func (d *observedDevice) Write(data []byte) error {
-	n, err := d.session.WriteBatch([][]byte{data})
+func (d *observedDevice) writeBatch(frames [][]byte) error {
+	n, err := d.session.WriteBatch(frames)
 	if err != nil {
 		d.writeErrors.Add(1)
-	} else if n != 1 {
-		d.writeDrops.Add(1)
+	} else if n != len(frames) {
+		d.writeDrops.Add(uint64(len(frames)-n))
 		return io.ErrShortWrite
 	}
 	return err

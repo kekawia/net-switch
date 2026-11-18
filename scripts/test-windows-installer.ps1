@@ -277,7 +277,9 @@ try {
   $primaryStatePath = Join-Path $tempRoot 'isp-primary.json'
   $secondaryStatePath = Join-Path $tempRoot 'isp-secondary.json'
 
-  $pPrimary = Start-Process -FilePath $ispExe -ArgumentList @('serve', '--uplink-index', "$($uplink.index)", '--uplink-ip', "$($uplink.address)", '--state', "`"$primaryStatePath`"", '--role', 'primary') -WindowStyle Hidden -PassThru
+  $primaryArgs=@('serve', '--uplink-index', "$($uplink.index)", '--uplink-ip', "$($uplink.address)", '--state', "`"$primaryStatePath`"", '--role', 'primary')
+  if ($Qualification -eq 'compare') { $primaryArgs += '--benchmark-output' }
+  $pPrimary = Start-Process -FilePath $ispExe -ArgumentList $primaryArgs -WindowStyle Hidden -PassThru
   $ispProcs += $pPrimary
   $primaryIsp = Wait-Until 'primary TestISP ready' 30 {
     if (-not (Test-Path -LiteralPath $primaryStatePath -PathType Leaf)) { return $null }
