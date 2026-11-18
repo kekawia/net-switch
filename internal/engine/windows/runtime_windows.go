@@ -18,7 +18,6 @@ import (
 	"github.com/kekawia/net-switch/internal/engine/platform"
 	"github.com/kekawia/net-switch/internal/engine/policy"
 	"github.com/kekawia/net-switch/internal/engine/protocol"
-	flowtcp "github.com/kekawia/net-switch/internal/engine/tcp"
 	"github.com/kekawia/net-switch/internal/journal"
 	"github.com/kekawia/net-switch/internal/winclock"
 	"github.com/kekawia/net-switch/internal/winhandle"
@@ -48,15 +47,6 @@ func (r *Runtime) SaveEpoch(epoch uint64) error {
 func (r *Runtime) Stats() any {
 	stats := r.Engine.Stats().(map[string]any)
 	stats["ownerLookup"] = r.owners.Stats()
-	var active []map[string]any
-	if records, ok := stats["tcpFlows"].([]flowtcp.Diagnostic); ok {
-		for _, d := range records {
-			if d.Down > 64<<10 && !d.RelayClosed && len(active) < 8 {
-				active = append(active, map[string]any{"down":d.Down, "sendGrant":d.SendGrant, "sendUsed":d.SendBytes, "rttNs":d.RTT, "cwnd":d.CongestionWindow, "retransmits":d.Retransmits})
-			}
-		}
-	}
-	stats["m6Relay"] = map[string]any{"variant":m6BulkVariant, "flows":active, "tunDropped":stats["tunDropped"], "tunPeakQueued":stats["tunPeakQueued"]}
 	stats["socketResources"] = r.dialer.ports.stats()
 	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()
 	// Refused automatic port choices, per protocol (SYSTEM-DESIGN 5.9): first

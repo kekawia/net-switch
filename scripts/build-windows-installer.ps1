@@ -145,11 +145,6 @@ try {
   $baseLdflags = "-s -w -buildid= -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
   $guiLdflags = "-s -w -buildid= -H=windowsgui -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
   $buildTags = @()
-  if ($env:NETSWITCH_M6_VARIANT) {
-    if ($env:GITHUB_REF -ne 'refs/heads/codex/m6-cpu-diagnostic' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:NETSWITCH_M6_VARIANT -notin @('wide','wide-long')) {throw 'Invalid hosted bulk trial'}
-    $baseLdflags += " -X github.com/kekawia/net-switch/internal/engine/windows.m6BulkVariant=$env:NETSWITCH_M6_VARIANT"
-    $baseLdflags += " -X github.com/kekawia/net-switch/internal/engine/tcp.m6ReadGroup=$env:NETSWITCH_M6_VARIANT"
-  }
   if ($UpdateTestFixture) { $buildTags = @('-tags=lifecycle_test') }
 
   & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitch.exe') ./cmd/netswitch
