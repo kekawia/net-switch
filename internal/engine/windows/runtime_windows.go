@@ -52,6 +52,7 @@ func (r *Runtime) Stats() any {
 			"bytes": p.readBytes.Load(), "reads": p.readCount.Load(), "small": p.smallReads.Load(), "emptyReads": p.emptyReads.Load(),
 			"batches": p.batchCount.Load(), "batchUS": p.batchUS.Load(), "lateBatches": p.lateBatches.Load(),
 			"fullWake": p.fullWake.Load(), "emptyWake": p.emptyWake.Load(), "pending": p.submitted.Load(),
+			"variant": m6BulkVariant, "initialBuffer": p.nativeInitial.Load(), "finalBuffer": p.nativeFinal.Load(),
 			"owners": stats["ownerLookup"].(LookupHistogram).Buckets, "tunDropped": stats["tunDropped"], "tunPeakQueued": stats["tunPeakQueued"],
 		}
 	}

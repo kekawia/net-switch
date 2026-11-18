@@ -63,6 +63,25 @@ try {
     $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch 'M6_RELAY')
     if (!$samples.Count) {throw 'Installed relay samples missing'}
     $samples.Line | Set-Content -LiteralPath "$diagDir/m6-relay-observations.txt"
+    foreach ($trial in @(@{name='native-window';version='1.0.1'},@{name='long-batch';version='1.0.2'})) {
+      $env:NETSWITCH_M6_VARIANT=$trial.name
+      try { & (Join-Path $PSScriptRoot '../../scripts/build-windows-installer.ps1') -Arch $Arch -Version $trial.version } finally { Remove-Item Env:NETSWITCH_M6_VARIANT }
+      $setup=Join-Path $dist "NetSwitch-Setup-$($trial.version)-$Arch.exe"
+      Invoke-SilentInstaller -ExePath $setup -LogName "m6-$($trial.name).log" | Out-Null
+      $trialCtl=Join-Path $appDir "app-$($trial.version)/netswitchctl.exe"
+      & $trialCtl start
+      if ($LASTEXITCODE -ne 0) {throw 'Bulk trial could not start'}
+      Start-Process (Join-Path $appDir 'netswitch-desktop.exe') -ArgumentList @('--resume','--background') -WindowStyle Hidden
+      Wait-Until 'installed bulk trial ready' 45 {
+        $s=(& $trialCtl status | ConvertFrom-Json)
+        return ($s.routing -eq 'on' -and $s.desktopPID -gt 0)
+      } | Out-Null
+      Assert-RoutedEcho "M6 $($trial.name) trial"
+      Measure-M6Product $trial.name $trial.version $setup
+      $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch ('"variant":"'+$trial.name+'"'))
+      if (!$samples.Count) {throw "Missing runtime proof of variant $($trial.name)"}
+      $samples.Line | Set-Content -LiteralPath "$diagDir/m6-$($trial.name)-observations.txt"
+    }
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {
