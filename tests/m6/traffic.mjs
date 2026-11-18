@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { performance } from 'node:perf_hooks';
 import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { blockCount, blockSize, latencySummary } from './latency.mjs';
 
 const block = Buffer.alloc(64 * 1024);
 for (let offset = 0; offset < block.length; offset++) block[offset] = (offset * 29 + (offset >>> 7)) & 255;
@@ -89,10 +90,17 @@ export async function measure(host, port) {
       samples.push({streams,pass,bytes,connections,seconds,startUtc,endUtc:new Date().toISOString(),mbps:bytes*8/seconds/1e6});
     }
   }
-  const connect = [];
-  for (let i=0; i<400; i++) connect.push((await transfer(host,port,'ping')).connectMs);
-  connect.sort((a,b)=>a-b);
-  return {samples, connectCount:connect.length, p95ms:connect[Math.ceil(connect.length*.95)-1], p99ms:connect[Math.ceil(connect.length*.99)-1], connections:401+samples.reduce((n,r)=>n+r.connections,0)};
+  const connectBlocks = [];
+  for (let block = 0; block < blockCount; block++) {
+    const measurements = [];
+    for (let i = 0; i < blockSize; i++) {
+      measurements.push((await transfer(host, port, 'ping')).connectMs);
+    }
+    connectBlocks.push(measurements);
+  }
+  const latency = latencySummary(connectBlocks);
+  return {samples, connectBlocks, connectCount:latency.count, p95ms:latency.p95ms, p99ms:latency.p99ms,
+    connections:1+latency.count+samples.reduce((n,r)=>n+r.connections,0)};
 }
 
 export async function soak(host, port, checkpoint) {

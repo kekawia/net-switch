@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { compare } from '../../tests/m6/compare.mjs';
 import { validateNight } from '../../tests/m6/night-gate.mjs';
+import { latencySummary } from '../../tests/m6/latency.mjs';
 
 function report(baseline) {
   const samples = [], windows = [], memory = [];
@@ -17,6 +18,30 @@ function report(baseline) {
     images:[{hash:'a'.repeat(64)},{hash:'b'.repeat(64)}],gatewayConnections:1000,
     traffic:{connectCount:400,connections:1000,p95ms:2,p99ms:3,samples},accounting:{windows},memory};
 }
+
+test('the first 400 and all 2400 connection times are independently verified', () => {
+  function extended(baseline) {
+    const r = report(baseline);
+    r.traffic.connectBlocks = Array.from({length:6}, () => Array(400).fill(2));
+    for (const sample of r.traffic.samples) sample.connections = sample.streams;
+    r.traffic.connections = 1 + 2400 + r.traffic.samples.reduce((n,s) => n+s.connections, 0);
+    r.gatewayConnections = r.traffic.connections;
+    r.traffic.connectCount = 2400;
+    r.traffic.p95ms = r.traffic.p99ms = 2;
+    return r;
+  }
+  const old = extended(true), current = extended(false);
+  assert.deepEqual(compare(old,current).failures, []);
+  current.traffic.connectBlocks[0].fill(3,395);
+  assert.equal(latencySummary(current.traffic.connectBlocks).p99ms,2);
+  assert.deepEqual(compare(old,current).failures.map(r => r.metric), ['p99msFirst400']);
+  current.traffic.p99ms = 0.1;
+  assert.throws(() => compare(old,current));
+  current.traffic.p99ms = 2;
+  current.traffic.connectBlocks[1].pop();
+  assert.throws(() => compare(old,current));
+  assert.throws(() => compare(report(true),extended(false)));
+});
 test('M6 compares measured rates in the right direction and requires matched coverage',()=>{
   const old=report(true),fresh=report(false);
   assert.equal(compare(old,fresh).results.length,8);
