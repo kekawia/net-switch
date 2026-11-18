@@ -68,6 +68,7 @@ jobs:
           if ($r.commit -ne $env:GITHUB_SHA -or $r.arch -ne $env:PRODUCT_ARCH) {throw 'Wrong measurement identity'}
           if ($env:MODE -eq 'soak' -and (!$r.exposure.complete -or $r.exposure.seconds -lt 7200)) {throw 'Two hours not proved'}
           if ($env:MODE -eq 'compare' -and ($r.failures.Count -ne 0 -or $r.results.Count -ne 8 -or $r.latency.count -ne 2400 -or $r.latency.first400.Count -ne 2)) {throw 'Performance gate incomplete'}
+          if ($env:MODE -eq 'compare' -and ($r.gatewayHash -notmatch '^[a-f0-9]{64}$' -or $r.initialTables.baseline.after.TargetRows -ne 0 -or $r.initialTables.candidate.after.TargetRows -ne 0)) {throw 'Benchmark input state differs'}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:

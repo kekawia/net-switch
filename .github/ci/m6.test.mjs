@@ -32,6 +32,19 @@ test('the first 400 and all 2400 connection times are independently verified', (
   }
   const old = extended(true), current = extended(false);
   assert.deepEqual(compare(old,current).failures, []);
+  const row={Utc:'2026-01-01T00:00:00Z',TotalRows:20,AllTimeWait:8,TargetRows:0,TargetTimeWait:0};
+  for (const r of [old,current]) {
+    r.gatewayHash='b'.repeat(64);
+    r.precondition={verifiedConnections:64,before:{...row,TargetRows:4,TargetTimeWait:4},after:{...row}};
+    r.traffic.tableAtBlocks=Array.from({length:6},()=>({...row}));
+  }
+  assert.deepEqual(compare(old,current).failures, []);
+  current.precondition.after.TargetRows=1;
+  assert.throws(()=>compare(old,current));
+  current.precondition.after.TargetRows=0;
+  current.gatewayHash='c'.repeat(64);
+  assert.throws(()=>compare(old,current));
+  current.gatewayHash=old.gatewayHash;
   current.traffic.connectBlocks[0].fill(3,395);
   assert.equal(latencySummary(current.traffic.connectBlocks).p99ms,2);
   assert.deepEqual(compare(old,current).failures.map(r => r.metric), ['p99msFirst400']);

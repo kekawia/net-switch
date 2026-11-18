@@ -7,6 +7,21 @@ import { blockSize, latencySummary } from './latency.mjs';
 
 const read = p => JSON.parse(fs.readFileSync(p,'utf8').replace(/^\uFEFF/,''));
 const median = xs => [...xs].sort((a,b)=>a-b)[Math.floor(xs.length/2)];
+function initialState(report) {
+  if (!report.precondition && !report.traffic.tableAtBlocks) return;
+  assert.equal(report.precondition.verifiedConnections, 64);
+  assert.equal(report.precondition.after.TargetRows, 0);
+  assert.equal(report.traffic.tableAtBlocks.length, report.traffic.connectBlocks.length);
+  const {before, after} = report.precondition;
+  for (const row of [before, after, ...report.traffic.tableAtBlocks]) {
+    assert(Number.isFinite(Date.parse(row.Utc)));
+    assert([row.TotalRows,row.AllTimeWait,row.TargetRows,row.TargetTimeWait].every(n => Number.isSafeInteger(n) && n >= 0));
+    assert(row.TargetRows <= row.TotalRows && row.AllTimeWait <= row.TotalRows);
+    assert(row.TargetTimeWait <= row.TargetRows && row.TargetTimeWait <= row.AllTimeWait);
+  }
+  assert(Date.parse(before.Utc) <= Date.parse(after.Utc));
+  return report.precondition;
+}
 function metrics(x) {
   if (x.traffic.connectBlocks) {
     const latency = latencySummary(x.traffic.connectBlocks);
@@ -47,6 +62,12 @@ export function compare(old,candidate) {
   assert.equal(old.runner,candidate.runner);
   assert.equal(old.arch,candidate.arch);
   assert.equal(Boolean(old.traffic.connectBlocks), Boolean(candidate.traffic.connectBlocks));
+  const oldState = initialState(old), newState = initialState(candidate);
+  assert.equal(Boolean(oldState), Boolean(newState));
+  if (old.gatewayHash || candidate.gatewayHash) {
+    assert(/^[a-f0-9]{64}$/.test(old.gatewayHash));
+    assert.equal(candidate.gatewayHash, old.gatewayHash);
+  }
   assert.equal(old.release,'0.3.2');
   const pinned = {x64:'0193582d10fcede15f3119b3ec72a20dfad7ad94b87f8465b5e90e835865791b',arm64:'32ee2fb156e76392cca550a9078684f1b2ee1440c15487a41967c96da92d7b11'}[old.arch];
   assert(pinned && old.installerHash === pinned);
@@ -69,7 +90,8 @@ export function compare(old,candidate) {
     failures.push(...first400.filter(r => r.regressionPercent > 10));
     latency = {count:current.count, baselineBlocks:baseline.blocks, candidateBlocks:current.blocks, first400};
   }
-  return {arch:old.arch,runner:old.runner,commit:candidate.commit,results,failures,latency};
+  const initialTables = oldState && {baseline:oldState, candidate:newState};
+  return {arch:old.arch,runner:old.runner,commit:candidate.commit,results,failures,latency,initialTables,gatewayHash:old.gatewayHash};
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [oldFile,newFile,output]=process.argv.slice(2);
