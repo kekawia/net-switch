@@ -58,12 +58,6 @@ type readiness struct {
 	completed   atomic.Uint64
 	connects    atomic.Uint64
 	pendingConn atomic.Uint64
-	m6Calls     atomic.Uint64
-	m6Request   atomic.Uint64
-	m6Bytes     atomic.Uint64
-	m6Small     atomic.Uint64
-	m6Blocked   atomic.Uint64
-	m6RecvNanos atomic.Uint64
 }
 
 type providerFailure struct {
@@ -580,20 +574,7 @@ func socketIOFlags(h winhandle.Owner, name string, b []byte, flags uint32) (int,
 	return int(n), nil
 }
 func (c *readySocket) TryRead(b []byte) (int, error) {
-	start := time.Now()
-	n, err := c.tryReceive(b, 0)
-	p := c.pool
-	p.m6RecvNanos.Add(uint64(time.Since(start)))
-	p.m6Calls.Add(1)
-	p.m6Request.Add(uint64(len(b)))
-	p.m6Bytes.Add(uint64(n))
-	if n > 0 && n <= 1500 {
-		p.m6Small.Add(1)
-	}
-	if errors.Is(err, platform.ErrWouldBlock) {
-		p.m6Blocked.Add(1)
-	}
-	return n, err
+	return c.tryReceive(b, 0)
 }
 
 func (c *readySocket) TryPeek(b []byte) (int, error) {
