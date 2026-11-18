@@ -140,7 +140,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			view := packet.ToView()
 			data := view.AsSlice()
 			if g.mode.Load() == 0 {
-				g.trace(data, "reply")
+				g.trace(data, traceReply)
 				err := g.device.Write(data)
 				if err != nil {
 					g.event("wintun-write-error", 0, "", err.Error())
@@ -151,7 +151,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 						return
 					}
 				} else {
-					g.trace(data, "delivered")
+					g.trace(data, traceDelivered)
 				}
 				g.stats.Lock()
 				if err != nil {
@@ -199,7 +199,7 @@ func (g *gateway) startStack() (*stack.Stack, error) {
 			if drop || n == 0 {
 				continue
 			}
-			g.trace(packet[:n], "request")
+			g.trace(packet[:n], traceRequest)
 			echo := ""
 			if n >= 28 && packet[0]>>4 == 4 && packet[9] == 1 && int(packet[0]&15)*4 < n && packet[int(packet[0]&15)*4] == 8 {
 				echo = net.IP(packet[16:20]).String()
