@@ -405,7 +405,7 @@ func TestUploadDiscardConsumesWithoutCopying(t *testing.T) {
 	scratch := new(relayScratch)
 	sentinel := bytes.Repeat([]byte{0xa5}, 300)
 	copy(scratch.buffer[:], sentinel)
-	if err := r.discard(true, scratch.buffer[:300], scratch); err != nil {
+	if err := r.discardUpload(300, scratch); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(scratch.buffer[:300], sentinel) {
@@ -416,7 +416,7 @@ func TestUploadDiscardConsumesWithoutCopying(t *testing.T) {
 	}
 	if allocs := testing.AllocsPerRun(100, func() {
 		ep.data = data
-		if err := r.discard(true, scratch.buffer[:300], scratch); err != nil {
+		if err := r.discardUpload(300, scratch); err != nil {
 			t.Fatal(err)
 		}
 	}); allocs != 0 {

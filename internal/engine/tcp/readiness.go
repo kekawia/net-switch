@@ -1,7 +1,6 @@
 package tcp
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/kekawia/net-switch/internal/engine/platform"
 	"gvisor.dev/gvisor/pkg/tcpip"
+	gtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -47,7 +47,6 @@ type relayDirection struct {
 type relayScratch struct {
 	receive tcpip.SliceWriter
 	discard discardWriter
-	send    bytes.Reader
 	buffer  [RelayBuffer]byte
 }
 
@@ -318,52 +317,51 @@ func stackError(err tcpip.Error) error {
 	}
 }
 
-func (r *readyRelay) read(up bool, b []byte, scratch *relayScratch) (int, error) {
-	if !up {
-		return r.remote.TryPeek(b)
-	}
-	scratch.receive = tcpip.SliceWriter(b)
-	result, err := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{Peek: true})
-	scratch.receive = nil
-	return result.Count, stackError(err)
-}
-
-func (r *readyRelay) discard(up bool, b []byte, scratch *relayScratch) error {
-	for len(b) > 0 {
-		var n int
-		var err error
-		if up {
-			scratch.discard = discardWriter{n: len(b)}
-			result, e := r.c.ep.Read(&scratch.discard, tcpip.ReadOptions{})
-			n, err = result.Count, stackError(e)
-		} else {
-			n, err = r.remote.TryDiscard(b)
-		}
-		if n < 0 || n > len(b) {
+func (r *readyRelay) discardUpload(n int, scratch *relayScratch) error {
+	for n > 0 {
+		scratch.discard = discardWriter{n: n}
+		result, err := r.c.ep.Read(&scratch.discard, tcpip.ReadOptions{})
+		if result.Count < 0 || result.Count > n {
 			return io.ErrShortBuffer
 		}
-		b = b[n:]
-		if len(b) == 0 {
+		n -= result.Count
+		if n == 0 {
 			return nil
 		}
 		if err != nil {
-			return err
+			return stackError(err)
 		}
-		if n == 0 {
+		if result.Count == 0 {
 			return io.ErrNoProgress
 		}
 	}
 	return nil
 }
 
-func (r *readyRelay) write(up bool, b []byte, scratch *relayScratch) (int, error) {
-	if up {
-		return r.remote.TryWrite(b)
+// transfer returns source and destination errors separately so the relay waits
+// on the side that actually stalled. Its caller holds one transient loan.
+func (r *readyRelay) transfer(up bool, scratch *relayScratch) (int, error, error) {
+	if !up {
+		n, readErr, writeErr := r.c.ep.(*gtcp.Endpoint).WriteFromNonblocking(r.remote, scratch.buffer[:])
+		return n, readErr, stackError(writeErr)
 	}
-	scratch.send.Reset(b)
-	n, err := r.c.ep.Write(&scratch.send, tcpip.WriteOptions{})
-	scratch.send.Reset(nil)
-	return int(n), stackError(err)
+	scratch.receive = tcpip.SliceWriter(scratch.buffer[:])
+	result, readErr := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{Peek: true})
+	scratch.receive = nil
+	if result.Count < 0 || result.Count > len(scratch.buffer) {
+		return 0, io.ErrShortBuffer, nil
+	}
+	if result.Count == 0 {
+		return 0, stackError(readErr), nil
+	}
+	n, writeErr := r.remote.TryWrite(scratch.buffer[:result.Count])
+	if n < 0 || n > result.Count {
+		return 0, nil, io.ErrShortWrite
+	}
+	if err := r.discardUpload(n, scratch); err != nil {
+		return 0, err, nil
+	}
+	return n, nil, writeErr
 }
 
 func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch) (bool, error) {
@@ -371,53 +369,30 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 		return false, nil
 	}
 	d.blocked = false
-	// A busy flow yields after a bounded amount of work, so it cannot starve
-	// other readiness events, the ordered TUN reader, or process lookups.
+	// Yield at a fixed quantum even if both endpoints stay ready.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
 		if !r.workers.borrow(r) {
 			return false, nil
 		}
-		peeked, readErr := r.read(up, scratch.buffer[:], scratch)
-		if peeked < 0 || peeked > len(scratch.buffer) {
-			r.workers.giveBack(r)
-			return false, io.ErrShortBuffer
-		}
-		if peeked > 0 {
-			n, err := r.write(up, scratch.buffer[:peeked], scratch)
-			if n < 0 || n > peeked {
-				r.workers.giveBack(r)
-				return false, io.ErrShortWrite
-			}
-			if consumeErr := r.discard(up, scratch.buffer[:n], scratch); consumeErr != nil {
-				r.workers.giveBack(r)
-				return false, consumeErr
-			}
-			r.workers.giveBack(r)
-			if n > 0 {
-				moved += n
-				if up {
-					r.c.up.Add(uint64(n))
-					r.c.ticket.Add(uint64(n), 0)
-				} else {
-					r.c.down.Add(uint64(n))
-					r.c.ticket.Add(0, uint64(n))
-				}
-			}
-			if errors.Is(err, platform.ErrWouldBlock) {
-				d.blocked = true
-				return false, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			if n == 0 {
-				return false, io.ErrNoProgress
-			}
-			// Re-peek even after a short successful write. EOF is propagated
-			// only once every byte before it has actually been consumed.
-			continue
-		}
+		n, readErr, writeErr := r.transfer(up, scratch)
 		r.workers.giveBack(r)
+		if n > 0 {
+			moved += n
+			if up {
+				r.c.up.Add(uint64(n))
+				r.c.ticket.Add(uint64(n), 0)
+			} else {
+				r.c.down.Add(uint64(n))
+				r.c.ticket.Add(0, uint64(n))
+			}
+		}
+		if errors.Is(writeErr, platform.ErrWouldBlock) {
+			d.blocked = true
+			return false, nil
+		}
+		if writeErr != nil {
+			return false, writeErr
+		}
 		if errors.Is(readErr, platform.ErrWouldBlock) {
 			return false, nil
 		}
@@ -427,10 +402,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 				if err := r.remote.CloseWrite(); err != nil {
 					return false, err
 				}
-				// Receive shutdown is cleanup, as in Splice. A peer's FIN can
-				// already have moved the endpoint into TIME_WAIT, where another
-				// ShutdownRead reports not-connected. It must not abort the
-				// lost-final-ACK protection we just established.
+				// TIME_WAIT may already have closed the receive side.
 				r.c.ep.Shutdown(tcpip.ShutdownRead)
 				return false, nil
 			}
@@ -444,7 +416,9 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 		if readErr != nil {
 			return false, readErr
 		}
-		return false, io.ErrNoProgress
+		if n == 0 {
+			return false, io.ErrNoProgress
+		}
 	}
 	return true, nil
 }
@@ -469,7 +443,7 @@ func (r *readyRelay) step(scratch *relayScratch) {
 		r.close(false)
 		return
 	}
-	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && !r.down.blocked, r.up.blocked); err != nil {
+	if err := r.watch.Arm(!down && !r.waitBuffer && !r.down.finished && !r.down.blocked, r.up.blocked); err != nil {
 		r.close(true)
 		return
 	}

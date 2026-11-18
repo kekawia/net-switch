@@ -20,7 +20,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var winsock = windows.NewLazySystemDLL("ws2_32.dll")
+var (
+	winsock   = windows.NewLazySystemDLL("ws2_32.dll")
+	relayRecv = winsock.NewProc("recv")
+	relaySend = winsock.NewProc("send")
+	relayPoll = winsock.NewProc("WSAPoll")
+)
 
 // The shared relay consumes readiness, not blocking reads. Every outbound TCP
 // socket is associated with this one completion port when it is created: its
@@ -235,7 +240,7 @@ type pollFD struct {
 }
 
 func pollWritable(rows []pollFD) int32 {
-	n, _, _ := winsock.NewProc("WSAPoll").Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
+	n, _, _ := relayPoll.Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
 	return int32(n)
 }
 
@@ -482,13 +487,15 @@ func socketIOFlags(h winhandle.Owner, name string, b []byte, flags uint32) (int,
 		return 0, nil
 	}
 	site := "TCP send"
+	proc := relaySend
 	if name == "recv" {
+		proc = relayRecv
 		site = "TCP receive"
 		if flags != 0 {
 			site = "TCP peek"
 		}
 	}
-	n, _, err := winsock.NewProc(name).Call(uintptr(h.Handle(site)), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(flags))
+	n, _, err := proc.Call(uintptr(h.Handle(site)), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(flags))
 	runtime.KeepAlive(b)
 	if int32(n) == -1 {
 		if errors.Is(err, windows.WSAEWOULDBLOCK) {
