@@ -148,7 +148,7 @@ try {
   if ($env:NETSWITCH_M6_PROFILE -eq '1') {
     if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/codex/m6-cpu-diagnostic' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Diagnostic builds require the hosted profiling branch.' }
     $baseLdflags = $baseLdflags.Replace('-s -w ', '')
-    if ($env:NETSWITCH_M6_BATCH -eq '1') { $buildTags=@('-tags=m6batch') }
+    if ($env:NETSWITCH_M6_GO_RELAY -eq '1') { $buildTags=@('-tags=m6gorelay') }
   }
   if ($UpdateTestFixture) { $buildTags = @('-tags=lifecycle_test') }
 
