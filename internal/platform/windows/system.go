@@ -40,8 +40,11 @@ func (s *System) Stream(ctx context.Context, mode string, emit func([]byte), rep
 		args = append(args, "--engine", s.EnginePath)
 	}
 	supervisor := s.Workers
-	if s.StreamExecutable != "" {
-		supervisor.Executable = s.StreamExecutable
+	switch mode {
+	case "meters", "outside", "network":
+		if s.StreamExecutable != "" {
+			supervisor.Executable = s.StreamExecutable
+		}
 	}
 	supervisor.Stream(ctx, mode, args, emit, report)
 }

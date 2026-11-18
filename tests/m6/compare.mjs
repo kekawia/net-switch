@@ -27,6 +27,11 @@ function metrics(x) {
     assert(x.accounting.inventoryReceipts > 0 && x.accounting.observedMembers > 0);
     assert(x.accounting.observedMembers <= x.accounting.members);
     assert.equal(x.accounting.processCpu.length, x.accounting.members);
+    assert.equal(x.accounting.processCpu.filter(p => p.observed).length, x.accounting.observedMembers);
+    for (const p of x.accounting.processCpu) {
+      assert.equal(p.seconds.length,x.accounting.windows.length);
+      assert(p.seconds.every(n => Number.isFinite(n) && n >= 0));
+    }
     for (const [i,window] of x.accounting.windows.entries()) {
       const seconds=x.accounting.processCpu.reduce((sum,p)=>sum+p.seconds[i],0);
       assert(Math.abs(seconds-window.cpuSeconds)<1e-6,'unattributed CPU in a measured window');

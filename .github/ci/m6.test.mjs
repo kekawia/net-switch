@@ -32,6 +32,16 @@ test('the first 400 and all 2400 connection times are independently verified', (
   }
   const old = extended(true), current = extended(false);
   assert.deepEqual(compare(old,current).failures, []);
+  for (const r of [old,current]) {
+    r.accounting.inventoryReceipts=1;
+    r.accounting.observedMembers=r.accounting.members=2;
+    r.accounting.processCpu=[1,2].map(pid=>({pid,observed:true,seconds:r.accounting.windows.map(w=>w.cpuSeconds/2)}));
+    for (const s of r.memory) s.processes=[{pid:1,workingSet:s.workingSetBytes/2},{pid:2,workingSet:s.workingSetBytes/2}];
+  }
+  assert.deepEqual(compare(old,current).failures, []);
+  current.accounting.processCpu.pop();
+  assert.throws(()=>compare(old,current));
+  current.accounting.processCpu=structuredClone(old.accounting.processCpu);
   const row={Utc:'2026-01-01T00:00:00Z',TotalRows:20,AllTimeWait:8,TargetRows:0,TargetTimeWait:0};
   for (const r of [old,current]) {
     r.gatewayHash='b'.repeat(64);
