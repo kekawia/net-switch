@@ -626,6 +626,7 @@ func (e *Engine) Stats() any {
 			s["tunDropped."+kind] = count
 		}
 		s["tunQueued"] = e.link.Queued()
+		s["m6Output"] = e.link.M6OutputStats()
 		s["tunPeakQueued"] = e.link.PeakQueued()
 	}
 	if e.tcp != nil {

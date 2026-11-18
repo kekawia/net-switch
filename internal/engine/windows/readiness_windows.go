@@ -45,7 +45,6 @@ type readiness struct {
 	batchWake   chan struct{}
 	wg          sync.WaitGroup
 	thread      atomic.Uint32
-	states      *stateQueue
 	capture     bool
 	closes      [1024]nativeSocketClose
 	closedCount uint64
@@ -117,10 +116,6 @@ func newReadinessWithPolicy(policy tcpCompletionPolicy) (*readiness, error) {
 		stop: make(chan struct{}), capture: hostedTraceEnabled(), poll: pollWritable,
 		batch: make(map[*socketWatch]struct{}), batchWake: make(chan struct{}, 1),
 		policy: policy, cancel: windows.CancelIoEx, providerIFS: socketProviderIFS,
-	}
-	if socketStateMode != "" {
-		// Older Windows builds can still use native overlapped readiness.
-		p.states, _ = newStateQueue()
 	}
 	p.wg.Go(p.completions)
 	p.wg.Go(p.pollWrites)
@@ -535,11 +530,7 @@ func (p *readiness) close() error {
 	close(p.stop)
 	windows.PostQueuedCompletionStatus(p.port.Handle("TCP completion stop"), 0, 0, nil)
 	p.wg.Wait()
-	var stateErr error
-	if p.states != nil {
-		stateErr = p.states.close()
-	}
-	return errors.Join(stateErr, p.port.HandleClose("TCP completion port close"))
+	return p.port.HandleClose("TCP completion port close")
 }
 
 // errRelayOnly answers net.Conn's blocking calls. Every engine TCP socket
@@ -552,7 +543,6 @@ type readySocket struct {
 	handle        winhandle.Owner
 	pool          *readiness
 	watch         *socketWatch // registered since creation; handed out by Watch
-	state         *stateWatch
 	watched       bool
 	local, remote net.Addr
 	closed        bool
@@ -572,13 +562,6 @@ func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
 	c.watch.wake = wake
 	c.watch.mu.Unlock()
 	c.watched = true
-	if c.pool.states != nil {
-		state, err := c.pool.states.watch(c.watch, wake)
-		if err == nil {
-			c.state = state
-			return state, nil
-		}
-	}
 	return c.watch, nil
 }
 
@@ -696,9 +679,6 @@ func (c *readySocket) Close() error {
 		return nil
 	}
 	c.closed = true
-	if c.state != nil {
-		c.state.Detach()
-	}
 	// Cancel and drain any receive, and leave the port's registration, before
 	// the only handle is closed.
 	c.watch.Detach()

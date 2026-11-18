@@ -89,6 +89,7 @@ type outputBuffers struct {
 // class keeps a SYN/ACK burst from reserving 9 KiB for every tiny packet.
 type OutputPacket struct {
 	Bytes     []byte
+	m6Enqueued int64
 	storage   any
 	pool      *outputBuffers
 	onRelease func()
@@ -179,6 +180,9 @@ type Link struct {
 	done          chan struct{}
 	Dropped       atomic.Uint64
 	droppedByType [5]atomic.Uint64
+	m6Bulk, m6Copies, m6CopyNS uint64
+	m6Batches, m6Packets, m6Single, m6Samples, m6DwellNS atomic.Uint64
+	m6Dwell [5]atomic.Uint64
 }
 
 type linkDelivery struct {
@@ -217,8 +221,18 @@ func (l *Link) enqueue(size int, kind packetClass, bulk bool, copyInto func([]by
 		l.mu.Unlock()
 		return false
 	}
+	var started int64
+	if kind == packetTCPData {
+		l.m6Bulk++
+		if l.m6Bulk % 128 == 0 { started=m6Now() }
+	}
 	p := l.buffers.packet(size)
 	copyInto(p.Bytes)
+	if started!=0 {
+		p.m6Enqueued=m6Now()
+		l.m6Copies++
+		l.m6CopyNS+=uint64(p.m6Enqueued-started)
+	}
 	l.queue[(l.head+l.count)%QueuePackets] = p
 	l.count++
 	l.peak = max(l.peak, l.count)
@@ -365,7 +379,33 @@ func (l *Link) ReadBatch(ctx context.Context, packets [][]byte) int {
 }
 
 func (l *Link) ReadOwnedBatch(ctx context.Context, packets []OutputPacket) int {
-	return l.readBatch(ctx, len(packets), func(i int, p OutputPacket) { packets[i] = p })
+	n:=l.readBatch(ctx, len(packets), func(i int, p OutputPacket) { packets[i] = p })
+	if n>0 {
+		l.m6Batches.Add(1)
+		l.m6Packets.Add(uint64(n))
+		if n==1 {l.m6Single.Add(1)}
+	}
+	for _,p:=range packets[:n] {
+		if p.m6Enqueued==0 {continue}
+		delay:=uint64(m6Now()-p.m6Enqueued)
+		l.m6DwellNS.Add(delay)
+		l.m6Samples.Add(1)
+		idx:=0
+		for _,limit:=range [...]uint64{25000,100000,500000,2000000} {
+			if delay<=limit {break}
+			idx++
+		}
+		l.m6Dwell[idx].Add(1)
+	}
+	return n
+}
+
+func (l *Link) M6OutputStats() map[string]any {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return map[string]any{"bulkFrames":l.m6Bulk,"copies":l.m6Copies,"copyNS":l.m6CopyNS,
+		"batches":l.m6Batches.Load(),"packets":l.m6Packets.Load(),"single":l.m6Single.Load(),"samples":l.m6Samples.Load(),"dwellNS":l.m6DwellNS.Load(),
+		"dwellBuckets":[]uint64{l.m6Dwell[0].Load(),l.m6Dwell[1].Load(),l.m6Dwell[2].Load(),l.m6Dwell[3].Load(),l.m6Dwell[4].Load()}}
 }
 
 func (l *Link) readBatch(ctx context.Context, capacity int, consume func(int, OutputPacket)) int {

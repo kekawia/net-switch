@@ -62,11 +62,9 @@ try {
     $observe=Join-Path $machineData 'm6-observe'
     [IO.File]::WriteAllText($observe,'measure')
     try { Measure-M6Product 'candidate' $candidateVersion $setup100 } finally { Remove-Item -LiteralPath $observe }
-    $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch ('"variant":"'+$env:NETSWITCH_M6_VARIANT+'"'))
-    if (!$samples.Count) {throw 'Missing socket notification proof'}
-    $samples.Line | Set-Content -LiteralPath "$diagDir/m6-relay-observations.txt"
-    $last=(($samples[-1].Line -split 'M6_RELAY ',2)[1]|ConvertFrom-Json)
-    if ($last.registrations -lt 401 -or $last.fallbacks -ne 0) {throw 'Installed socket notification exercise incomplete'}
+    $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch 'M6_RELAY ')
+    if (!$samples.Count) {throw 'Missing output timing observations'}
+    $samples.Line | Set-Content -LiteralPath "$diagDir/m6-output-observations.txt"
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {

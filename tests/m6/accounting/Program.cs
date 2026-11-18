@@ -69,16 +69,22 @@ if (input.InstallDirectory is string install) {
     }
 }
 var cpu = new long[input.Samples.Length];
+var outside = new long[input.Samples.Length,4];
 var counted = new HashSet<IProcess>();
 long calibrationTicks = 0;
 foreach (var slice in usage.Result.CpuTimeSlices) {
-    if (!members.Contains(slice.Process)) continue;
+    bool inProduct = members.Contains(slice.Process);
+    if (!inProduct && (input.InstallDirectory is null || slice.Process is null || slice.Process.Id == 0)) continue;
+    int group = slice.Process?.ImageName?.ToLowerInvariant() switch {
+        "node.exe" => 0, "testisp.exe" => 1, "system" => 2, _ => 3
+    };
     var lo = slice.StartTime.DateTimeOffset.UtcTicks;
     var hi = slice.StopTime.DateTimeOffset.UtcTicks;
     for (int i=0; i<cpu.Length; i++) {
         var window = input.Samples[i];
         var ticks = Math.Min(hi,window.EndUtc.UtcTicks) - Math.Max(lo,window.StartUtc.UtcTicks);
         if (ticks <= 0) continue;
+        if (!inProduct) { outside[i,group] += ticks; continue; }
         cpu[i] += ticks;
         if (slice.Process.Id == input.CalibrationChild) calibrationTicks += ticks;
         counted.Add(slice.Process);
@@ -95,6 +101,9 @@ File.WriteAllText(args[2],JsonSerializer.Serialize(new {
     members = members.Count,
     scheduled = counted.Count,
     exited = counted.Count(p=>p.ExitTime.HasValue),
+    external = input.Samples.Select((s,i)=>new { s.Streams, s.Pass, s.Bytes,
+        clientAndServer=TimeSpan.FromTicks(outside[i,0]).TotalSeconds, gateway=TimeSpan.FromTicks(outside[i,1]).TotalSeconds,
+        system=TimeSpan.FromTicks(outside[i,2]).TotalSeconds, other=TimeSpan.FromTicks(outside[i,3]).TotalSeconds }),
     windows = input.Samples.Select((s,i)=>new { s.Streams, s.Pass, s.Bytes, cpuSeconds=TimeSpan.FromTicks(cpu[i]).TotalSeconds })
 }));
 record Root(int Pid,string Image,DateTimeOffset? CreatedAt=null);
