@@ -155,6 +155,16 @@ func (s *measuredTun) WriteBatch(packets [][]byte) (int, error) {
 	return n, err
 }
 
+func (s *measuredTun) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) (int, error) {
+	n, err := s.Session.ReadBatch(ctx, buffers, sizes)
+	if s.trace != nil {
+		for i := 0; i < n; i++ {
+			s.trace.record("from-app", buffers[i][:sizes[i]], 0, 0, err)
+		}
+	}
+	return n, err
+}
+
 func (s *measuredTun) Close() error {
 	err := s.Session.Close()
 	stats := s.Session.Stats()

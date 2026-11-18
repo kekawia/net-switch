@@ -449,8 +449,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
-        variant: [wide, wide-long]
+        arch: [arm64]
+        variant: [worker, native-window, ack-batch]
     runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 40
     env:

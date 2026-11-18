@@ -59,7 +59,9 @@ try {
   } | Out-Null
   Assert-RoutedEcho 'M6 installed candidate'
   if ($Qualification -eq 'compare') {
-    Measure-M6Product 'candidate' $candidateVersion $setup100
+    $observe=Join-Path $machineData 'm6-observe'
+    [IO.File]::WriteAllText($observe, 'measure')
+    try { Measure-M6Product 'candidate' $candidateVersion $setup100 } finally { Remove-Item -LiteralPath $observe }
     $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch ('"variant":"'+$env:NETSWITCH_M6_VARIANT+'"'))
     if (!$samples.Count) {throw 'Missing runtime proof of the selected relay'}
     $samples.Line | Set-Content -LiteralPath "$diagDir/m6-relay-observations.txt"

@@ -57,7 +57,7 @@ func (r *Runtime) Stats() any {
 		}
 	}
 	ws := r.routes.TunStats()
-	stats["m6Relay"] = map[string]any{"variant":m6BulkVariant, "flows":active, "tunDropped":stats["tunDropped"], "tunPeakQueued":stats["tunPeakQueued"], "nativeDropped":ws.DroppedPackets, "nativeWritten":ws.WrittenPackets, "nativeRead":ws.ReadPackets, "recoveries":ws.Recoveries, "procs":stats["gomaxprocs"]}
+	stats["m6Relay"] = map[string]any{"variant":platform.M6Trial, "flows":active, "tunDropped":stats["tunDropped"], "tunPeakQueued":stats["tunPeakQueued"], "nativeDropped":ws.DroppedPackets, "nativeWritten":ws.WrittenPackets, "nativeRead":ws.ReadPackets, "recoveries":ws.Recoveries, "procs":stats["gomaxprocs"]}
 	stats["socketResources"] = r.dialer.ports.stats()
 	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()
 	// Refused automatic port choices, per protocol (SYSTEM-DESIGN 5.9): first

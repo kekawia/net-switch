@@ -121,8 +121,10 @@ func (r *Remote) nativeSnapshotLocked(status protocol.Status) ce.Snapshot {
 
 func (r *Remote) nativeRefresh(ctx context.Context) error {
 	var sample struct{ Engine struct{ M6Relay json.RawMessage } }
-	if err := r.call(ctx, "stats", nil, "", &sample); err == nil && len(sample.Engine.M6Relay) != 0 {
-		r.log("M6_RELAY " + string(sample.Engine.M6Relay))
+	if _, err := os.Stat(filepath.Join(DefaultData(), "m6-observe")); err == nil {
+		if err := r.call(ctx, "stats", nil, "", &sample); err == nil && len(sample.Engine.M6Relay) != 0 {
+			r.log("M6_RELAY " + string(sample.Engine.M6Relay))
+		}
 	}
 	r.mu.Lock()
 	rpc, instance := r.rpc, r.instance

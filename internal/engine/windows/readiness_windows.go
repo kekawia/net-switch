@@ -228,8 +228,7 @@ func (p *readiness) stats() map[string]any {
 
 var relayClockStart = time.Now()
 
-const bulkReadDelay = 400 * time.Microsecond
-var m6BulkVariant string
+const bulkReadDelay = 1200 * time.Microsecond
 const bulkReadWindow = 20 * time.Millisecond
 
 // An active bulk socket can generate a completion for each incoming segment.
@@ -265,11 +264,7 @@ func (p *readiness) deliverBulkReads() {
 			return
 		case <-p.batchWake:
 		}
-		delay := bulkReadDelay
-		if m6BulkVariant == "wide-long" {
-			delay = 1200 * time.Microsecond
-		}
-		timer.Reset(delay)
+		timer.Reset(bulkReadDelay)
 		select {
 		case <-p.stop:
 			return
@@ -553,6 +548,7 @@ type readySocket struct {
 	closed        bool
 	readWindow    time.Duration // readWindow and windowBytes are protected by mu
 	windowBytes   int
+	m6Sized       bool
 }
 
 func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
@@ -637,6 +633,16 @@ func (c *readySocket) noteRead(now time.Duration, n int) {
 	}
 	c.windowBytes += n
 	if c.windowBytes >= 64<<10 && n < 16<<10 {
+		if platform.M6Trial == "native-window" && !c.m6Sized && !c.handle.IsZero() {
+			c.m6Sized = true
+			h := c.handle.Handle("experiment bulk receive window")
+			old, err := windows.GetsockoptInt(h, windows.SOL_SOCKET, windows.SO_RCVBUF)
+			if err == nil && old < 256<<10 {
+				if err := windows.SetsockoptInt(h, windows.SOL_SOCKET, windows.SO_RCVBUF, 256<<10); err != nil {
+					panic(err)
+				}
+			}
+		}
 		c.watch.bulkUntil.Store(int64(now + bulkReadWindow))
 	}
 }

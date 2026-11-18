@@ -231,6 +231,19 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			}
 		}
 		b := make([]byte, ns.MTU)
+		batch, hasBatch := tun.(interface {
+			ReadBatch(context.Context, [][]byte, []int) (int, error)
+		})
+		var buffers [][]byte
+		var sizes []int
+		var index, count int
+		if platform.M6Trial == "ack-batch" && provTun == nil && hasBatch {
+			buffers = make([][]byte, 16)
+			sizes = make([]int, len(buffers))
+			for i := range buffers {
+				buffers[i] = make([]byte, ns.MTU)
+			}
+		}
 		for {
 			var (
 				n    int
@@ -239,6 +252,21 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			)
 			if provTun != nil {
 				n, prov, err = provTun.ReadPacketWithProvenance(run, b)
+			} else if buffers != nil {
+				if run.Err() != nil {
+					return
+				}
+				if index == count {
+					count, err = batch.ReadBatch(run, buffers, sizes)
+					index = 0
+					if err == nil && (count < 1 || count > len(buffers)) {
+						err = errors.New("invalid TUN batch count")
+					}
+				}
+				if err == nil {
+					b, n = buffers[index], sizes[index]
+					index++
+				}
 			} else {
 				n, err = tun.ReadPacket(run, b)
 			}
