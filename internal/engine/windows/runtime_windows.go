@@ -46,6 +46,13 @@ func (r *Runtime) SaveEpoch(epoch uint64) error {
 
 func (r *Runtime) Stats() any {
 	stats := r.Engine.Stats().(map[string]any)
+	if p := r.dialer.pool; p != nil {
+		stats["m6Relay"] = map[string]uint64{
+			"calls": p.m6Calls.Load(), "requested": p.m6Request.Load(), "bytes": p.m6Bytes.Load(),
+			"small": p.m6Small.Load(), "blocked": p.m6Blocked.Load(), "recvNanos": p.m6RecvNanos.Load(),
+			"immediate": p.immediate.Load(), "pending": p.submitted.Load(), "completions": p.completed.Load(),
+		}
+	}
 	stats["ownerLookup"] = r.owners.Stats()
 	stats["socketResources"] = r.dialer.ports.stats()
 	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()

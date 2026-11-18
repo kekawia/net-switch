@@ -60,6 +60,9 @@ try {
   Assert-RoutedEcho 'M6 installed candidate'
   if ($Qualification -eq 'compare') {
     Measure-M6Product 'candidate' $candidateVersion $setup100
+    $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch 'M6_RELAY')
+    if (!$samples.Count) {throw 'Installed relay samples missing'}
+    $samples.Line | Set-Content -LiteralPath "$diagDir/m6-relay-observations.txt"
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {
