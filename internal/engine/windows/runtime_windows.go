@@ -47,15 +47,6 @@ func (r *Runtime) SaveEpoch(epoch uint64) error {
 func (r *Runtime) Stats() any {
 	stats := r.Engine.Stats().(map[string]any)
 	stats["ownerLookup"] = r.owners.Stats()
-	if p := r.dialer.pool; p != nil {
-		stats["m6Relay"] = map[string]any{
-			"bytes": p.readBytes.Load(), "reads": p.readCount.Load(), "small": p.smallReads.Load(), "emptyReads": p.emptyReads.Load(),
-			"batches": p.batchCount.Load(), "batchUS": p.batchUS.Load(), "lateBatches": p.lateBatches.Load(),
-			"fullWake": p.fullWake.Load(), "emptyWake": p.emptyWake.Load(), "pending": p.submitted.Load(),
-			"variant": m6BulkVariant, "initialBuffer": p.nativeInitial.Load(), "finalBuffer": p.nativeFinal.Load(),
-			"owners": stats["ownerLookup"].(LookupHistogram).Buckets, "tunDropped": stats["tunDropped"], "tunPeakQueued": stats["tunPeakQueued"],
-		}
-	}
 	stats["socketResources"] = r.dialer.ports.stats()
 	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()
 	// Refused automatic port choices, per protocol (SYSTEM-DESIGN 5.9): first

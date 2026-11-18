@@ -43,18 +43,6 @@ type readiness struct {
 	batchMu     sync.Mutex
 	batch       map[*socketWatch]struct{}
 	batchWake   chan struct{}
-	batchAt     time.Duration
-	batchCount  atomic.Uint64
-	batchUS     atomic.Uint64
-	lateBatches atomic.Uint64
-	emptyWake   atomic.Uint64
-	fullWake    atomic.Uint64
-	readCount   atomic.Uint64
-	readBytes   atomic.Uint64
-	smallReads  atomic.Uint64
-	emptyReads  atomic.Uint64
-	nativeInitial atomic.Int64
-	nativeFinal   atomic.Int64
 	wg          sync.WaitGroup
 	thread      atomic.Uint32
 	capture     bool
@@ -241,7 +229,6 @@ func (p *readiness) stats() map[string]any {
 var relayClockStart = time.Now()
 
 const bulkReadDelay = 400 * time.Microsecond
-var m6BulkVariant string
 const bulkReadWindow = 20 * time.Millisecond
 
 // An active bulk socket can generate a completion for each incoming segment.
@@ -254,32 +241,10 @@ func (w *socketWatch) readable(wake func()) {
 		return
 	}
 	p := w.pool
-	// FIONREAD is only a scheduling hint. The relay still peeks and consumes
-	// precisely the accepted prefix under its existing lifetime rules.
-	if !w.socket.IsZero() {
-		w.mu.Lock()
-		if w.detached {
-			w.mu.Unlock()
-			return
-		}
-		var available uint32
-		code, _, _ := ioctlsocketProc.Call(uintptr(w.socket.Handle("TCP bulk available bytes")), 0x4004667f, uintptr(unsafe.Pointer(&available)))
-		w.mu.Unlock()
-		if int32(code) != 0 || available == 0 || available >= 24<<10 {
-			if available == 0 {
-				p.emptyWake.Add(1)
-			} else {
-				p.fullWake.Add(1)
-			}
-			wake()
-			return
-		}
-	}
 	p.batchMu.Lock()
 	first := len(p.batch) == 0
 	p.batch[w] = struct{}{}
 	if first {
-		p.batchAt = winclock.Now()
 		select {
 		case p.batchWake <- struct{}{}:
 		default:
@@ -299,23 +264,13 @@ func (p *readiness) deliverBulkReads() {
 			return
 		case <-p.batchWake:
 		}
-		delay := bulkReadDelay
-		if m6BulkVariant == "long-batch" {
-			delay = 1200 * time.Microsecond
-		}
-		timer.Reset(delay)
+		timer.Reset(bulkReadDelay)
 		select {
 		case <-p.stop:
 			return
 		case <-timer.C:
 		}
 		p.batchMu.Lock()
-		elapsed := winclock.Since(p.batchAt)
-		p.batchUS.Add(uint64(elapsed.Microseconds()))
-		p.batchCount.Add(1)
-		if elapsed >= 2*time.Millisecond {
-			p.lateBatches.Add(1)
-		}
 		batch, p.batch = p.batch, batch
 		p.batchMu.Unlock()
 		for w := range batch {
@@ -593,7 +548,6 @@ type readySocket struct {
 	closed        bool
 	readWindow    time.Duration // readWindow and windowBytes are protected by mu
 	windowBytes   int
-	m6Checked     bool
 }
 
 func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
@@ -664,15 +618,7 @@ func (c *readySocket) tryReceive(b []byte, flags uint32) (int, error) {
 		return 0, net.ErrClosed
 	}
 	n, err := socketIOFlags(c.handle, "recv", b, flags)
-	if flags != 0 && errors.Is(err, platform.ErrWouldBlock) {
-		c.pool.emptyReads.Add(1)
-	}
 	if flags == 0 && n > 0 {
-		c.pool.readBytes.Add(uint64(n))
-		c.pool.readCount.Add(1)
-		if n <= 1500 {
-			c.pool.smallReads.Add(1)
-		}
 		c.noteRead(time.Since(relayClockStart), n)
 	}
 	return n, err
@@ -686,23 +632,6 @@ func (c *readySocket) noteRead(now time.Duration, n int) {
 	}
 	c.windowBytes += n
 	if c.windowBytes >= 64<<10 && n < 16<<10 {
-		if !c.m6Checked && !c.handle.IsZero() {
-			c.m6Checked = true
-			h := c.handle.Handle("TCP bulk window control")
-			size, err := windows.GetsockoptInt(h, windows.SOL_SOCKET, windows.SO_RCVBUF)
-			if err == nil {
-				c.pool.nativeInitial.Store(int64(size))
-				if m6BulkVariant == "native-window" && size < 256<<10 {
-					if err := windows.SetsockoptInt(h, windows.SOL_SOCKET, windows.SO_RCVBUF, 256<<10); err != nil {
-						panic(err)
-					}
-				}
-				size, err = windows.GetsockoptInt(h, windows.SOL_SOCKET, windows.SO_RCVBUF)
-				if err == nil {
-					c.pool.nativeFinal.Store(int64(size))
-				}
-			}
-		}
 		c.watch.bulkUntil.Store(int64(now + bulkReadWindow))
 	}
 }
