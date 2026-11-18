@@ -182,7 +182,7 @@ jobs:
 
   testisp-reproduction:
     name: TestISP reuse investigation / ${{ matrix.arch }} / ${{ matrix.repeat }}
-    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && !inputs.regular_jobs && !inputs.wintun_integrity
+    if: github.event_name == 'workflow_dispatch' && !inputs.control_security && !inputs.regular_jobs && !inputs.wintun_integrity && !inputs.m6_profile
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
