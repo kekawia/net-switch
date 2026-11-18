@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+case "$1" in
+upgrade) /usr/lib/netswitch/netswitchctl package upgrade deb ;;
+remove|deconfigure) /usr/lib/netswitch/netswitchctl package remove deb ;;
+esac

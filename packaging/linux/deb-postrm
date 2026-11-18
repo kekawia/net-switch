@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+case "$1" in
+remove|purge) if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi ;;
+abort-upgrade) if [ -x /usr/lib/netswitch/netswitchctl ]; then /usr/lib/netswitch/netswitchctl package abort deb; fi ;;
+esac

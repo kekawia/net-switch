@@ -1,0 +1,48 @@
+name: netswitch
+arch: ${GOARCH}
+platform: linux
+version: ${PACKAGE_VERSION}
+release: 1
+maintainer: kekawia <kekawia@users.noreply.github.com>
+description: Choose which internet connection each app uses
+homepage: https://github.com/kekawia/net-switch
+license: MIT
+section: net
+priority: optional
+contents:
+  - src: root/usr/lib/netswitch/
+    dst: /usr/lib/netswitch/
+    type: tree
+  - src: root/usr/lib/systemd/system/*
+    dst: /usr/lib/systemd/system/
+  - src: /usr/lib/netswitch/netswitchctl
+    dst: /usr/bin/netswitchctl
+    type: symlink
+  - src: /usr/lib/netswitch/netswitch-desktop
+    dst: /usr/bin/netswitch
+    type: symlink
+  - src: root/usr/share/applications/netswitch.desktop
+    dst: /usr/share/applications/netswitch.desktop
+  - src: root/usr/share/icons/hicolor/scalable/apps/netswitch.svg
+    dst: /usr/share/icons/hicolor/scalable/apps/netswitch.svg
+  - src: root/usr/share/doc/netswitch/
+    dst: /usr/share/doc/netswitch/
+    type: tree
+  - src: root/usr/share/licenses/netswitch/
+    dst: /usr/share/licenses/netswitch/
+    type: tree
+overrides:
+  deb:
+    depends: [systemd, dbus, xdg-utils, iproute2]
+    scripts:
+      preinstall: hooks/deb-preinst
+      postinstall: hooks/deb-postinst
+      preremove: hooks/deb-prerm
+      postremove: hooks/deb-postrm
+  rpm:
+    depends: [systemd, dbus, xdg-utils, iproute]
+    scripts:
+      preinstall: hooks/rpm-preinst
+      postinstall: hooks/rpm-postinst
+      preremove: hooks/rpm-prerm
+      postremove: hooks/rpm-postrm

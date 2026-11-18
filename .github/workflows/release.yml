@@ -89,9 +89,17 @@ jobs:
           path: dist/NetSwitch-Setup-${{ needs.release-gate.outputs.version }}-${{ matrix.arch }}.exe
           if-no-files-found: error
 
+  linux-packages:
+    needs: release-gate
+    uses: ./.github/workflows/linux-packages.yml
+    with:
+      version: ${{ needs.release-gate.outputs.version }}
+    secrets:
+      NETSWITCH_RPM_KEY: ${{ secrets.NETSWITCH_RPM_KEY }}
+
   signed-release:
     name: Sign, verify and publish release
-    needs: [release-gate, windows-installers]
+    needs: [release-gate, windows-installers, linux-packages]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -129,6 +137,17 @@ jobs:
         run: node scripts/sign-update-release.mjs --ctl bin/netswitchctl --artifacts dist/release --version "$RELEASE_VERSION"
       - name: Recheck release notes
         run: node scripts/release-metadata.mjs
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: linux-packages
+          path: dist/linux
+      - name: Collect verified Linux packages, signed repository and Arch recipe
+        env:
+          VERSION: ${{ needs.release-gate.outputs.version }}
+        run: |
+          cp dist/linux/*.{deb,rpm,tar.gz} dist/release/
+          tar -C dist/linux/repo -czf "dist/release/netswitch-rpm-repo-$VERSION.tar.gz" .
+          tar -C "dist/linux/aur-$VERSION" -czf "dist/release/netswitch-aur-$VERSION.tar.gz" .
       - name: Publish only after every asset verifies
         env:
           GH_TOKEN: ${{ github.token }}
@@ -137,3 +156,22 @@ jobs:
           set -euo pipefail
           gh release create "v$RELEASE_VERSION" --draft --verify-tag --title "Net Switch $RELEASE_VERSION" --notes-file dist/release-notes.md dist/release/*
           gh release edit "v$RELEASE_VERSION" --draft=false
+
+  rpm-repository:
+    needs: signed-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: github-pages
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: linux-packages
+          path: dist/linux
+      - uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b
+        with:
+          path: dist/linux/repo
+      - uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e

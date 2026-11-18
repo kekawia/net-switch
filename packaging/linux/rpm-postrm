@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+if [ "$1" -eq 0 ] && [ -d /run/systemd/system ]; then systemctl daemon-reload; fi

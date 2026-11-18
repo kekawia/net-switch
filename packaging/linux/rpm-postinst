@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+/usr/lib/netswitch/netswitchctl package configure rpm

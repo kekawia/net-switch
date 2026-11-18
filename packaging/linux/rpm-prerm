@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+if [ "$1" -eq 0 ]; then /usr/lib/netswitch/netswitchctl package remove rpm; fi

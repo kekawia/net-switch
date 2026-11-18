@@ -219,7 +219,7 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	shutdown, stop := context.WithTimeout(context.Background(), 25*time.Second)
 	defer stop()
 	if !alreadyStopped {
-		if shutdownErr := core.ShutdownForService(shutdown); shutdownErr != nil {
+		if shutdownErr := stopInstalledControl(shutdown, c.Data, core); shutdownErr != nil {
 			return errors.Join(err, shutdownErr)
 		}
 	}

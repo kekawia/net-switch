@@ -51,7 +51,14 @@ func Ctl(args []string) (resultErr error) {
 		return errors.New("usage: netswitchctl status|enroll|start|stop|journal|install|cleanup|recover|uninstall|migration-check|migrate-profiles|migrate|restore-windows|cleanup-machine-data|whoami|version|update|update-keygen|update-issue-release-key|update-sign-manifest|update-verify-manifest|update-check-root")
 	}
 	command := args[0]
+	if command == "install" || command == "uninstall" {
+		if err := checkManualInstall(); err != nil {
+			return err
+		}
+	}
 	switch command {
+	case "package":
+		return packageCommand(args[1:])
 	case "update", "update-keygen", "update-issue-release-key", "update-sign-manifest", "update-verify-manifest", "update-check-root", "update-keep":
 		return updateCommand(args)
 	}

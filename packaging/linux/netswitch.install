@@ -1,0 +1,15 @@
+pre_install() {
+# A full custom unit or unmanaged executable must not be replaced by the package.
+for unit in netswitch.socket netswitch.service netswitch-engine.service; do
+    path=/etc/systemd/system/$unit
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        [ "$(readlink "$path" || :)" = /dev/null ] || {
+            echo "Move the manual $path aside before installing Net Switch." >&2
+            exit 1
+        }
+    fi
+done
+}
+post_install() { /usr/lib/netswitch/netswitchctl package configure arch; }
+post_upgrade() { /usr/lib/netswitch/netswitchctl package configure arch; }
+post_remove() { if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi; }

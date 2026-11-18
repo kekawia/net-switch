@@ -1,0 +1,113 @@
+name: Linux packages
+on:
+  pull_request:
+    paths: ['packaging/linux/**','scripts/build-linux-packages.sh','scripts/linux-aur.sh','scripts/sign-linux-repo.sh','scripts/package-*.sh','scripts/engine-notices.mjs','tests/lifecycle/**','tests/linux/**','internal/**','cmd/**','ui/**','assets.go','package.json','go.mod','go.sum','vendor/**','third_party/**','LICENSE','licenses/**','THIRD_PARTY_NOTICES.md','docs/user-guide.md','.github/workflows/linux-packages.yml','.github/workflows/release.yml']
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+    secrets:
+      NETSWITCH_RPM_KEY:
+        required: true
+
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      NODE_OPTIONS: --max-old-space-size=2048
+      RELEASE_VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build staged packages and checksum-bound Arch recipes
+        run: |
+          set -euo pipefail
+          go test -count=1 -v ./internal/service ./internal/control
+          for version in ${RELEASE_VERSION:-1.0.1 1.0.2}; do
+            for arch in amd64 arm64; do
+              bash scripts/build-linux-packages.sh "$version" dist/linux "$arch"
+            done
+            bash scripts/linux-aur.sh "$version" dist/linux
+            mv dist/linux/aur "dist/linux/aur-$version"
+            docker run --rm --user nobody -e HOME=/tmp \
+              -v "$PWD/dist/linux/aur-$version:/recipe:ro" -w /tmp \
+              archlinux:base@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899 \
+              bash -ec 'cd "$(mktemp -d)"; cp /recipe/PKGBUILD /recipe/*.hook /recipe/*.install .; makepkg --printsrcinfo' \
+              > "dist/linux/aur-$version/.SRCINFO"
+          done
+      - name: Prepare Fedora signing tools
+        run: |
+          docker build --tag ns-rpm-signer - <<'EOF'
+          FROM registry.fedoraproject.org/fedora:45@sha256:8430348a73c5a0e607b5de2cf9dd4741d9aa0891bbce3108588298102015f8c6
+          RUN dnf -y install rpm-sign gnupg2 createrepo_c && dnf clean all
+          EOF
+      - name: Compile disposable package traffic proof
+        if: inputs.version == ''
+        run: |
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOARCH="$arch" go test -c -o "dist/linux/package-$arch.test" ./tests/lifecycle
+          done
+      - name: Sign and verify the test packages and repository
+        if: inputs.version == ''
+        run: docker run --rm -v "$PWD:/src" -w /src ns-rpm-signer bash scripts/sign-linux-repo.sh dist/linux test
+      - name: Sign and verify the release packages and repository
+        if: inputs.version != ''
+        env:
+          NETSWITCH_RPM_KEY: ${{ secrets.NETSWITCH_RPM_KEY }}
+          NETSWITCH_RPM_FINGERPRINT: ${{ vars.NETSWITCH_RPM_FINGERPRINT }}
+        run: docker run --rm -e NETSWITCH_RPM_KEY -e NETSWITCH_RPM_FINGERPRINT -v "$PWD:/src" -w /src ns-rpm-signer bash scripts/sign-linux-repo.sh dist/linux release
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: linux-packages
+          path: dist/linux/
+          if-no-files-found: error
+          include-hidden-files: true
+  smoke:
+    needs: build
+    if: inputs.version == ''
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, family: deb}
+          - {runner: ubuntu-24.04-arm, family: deb}
+          - {runner: ubuntu-24.04, family: rpm}
+          - {runner: ubuntu-24.04, family: arch}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: linux-packages
+          path: dist/linux
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: matrix.family != 'deb'
+        with:
+          path: ${{ runner.temp }}/netswitch-package-images
+          key: package-guest-${{ matrix.family }}-${{ hashFiles('scripts/package-guest.sh') }}
+      - name: Install, upgrade and remove with the distribution package manager
+        env:
+          FAMILY: ${{ matrix.family }}
+        run: |
+          if [[ "$FAMILY" == deb ]]; then
+            sudo env NETSWITCH_PACKAGE_SMOKE=disposable bash scripts/package-smoke.sh deb "$PWD/dist/linux"
+          else
+            bash scripts/package-guest.sh "$FAMILY" "$PWD/dist/linux"
+          fi
