@@ -47,6 +47,32 @@ function Add-M6Inventory($receipts,$known,$members,[string]$from,[string]$at) {
   })
   $receipts.Add(@{from=$from;at=$at;processes=$rows})
 }
+function Get-M6MemoryObservation($members) {
+  $at=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+  $rows=@($members | ForEach-Object {
+    @{pid=[int]$_.ProcessId;parent=[int]$_.ParentProcessId;name=$_.Name;created=$_.CreationDate.ToUniversalTime().ToString('o');workingSet=[long]$_.WorkingSetSize}
+  })
+  return @{utc=$at;workingSetBytes=[long](($members|Measure-Object WorkingSetSize -Sum).Sum);processes=$rows}
+}
+function Save-M6PrivateObservation([string]$file) {
+  $members=@(Get-M6ProductProcesses)
+  $result=Get-M6MemoryObservation $members
+  try {
+    $perf=@{}
+    foreach ($row in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -Property IDProcess,WorkingSetPrivate,WorkingSet,PrivateBytes -ErrorAction Stop)) {
+      $perf[[int]$row.IDProcess]=$row
+    }
+    foreach ($member in $result.processes) {
+      $counter=$perf[$member.pid]
+      if ($null -ne $counter) {
+        $member.privateWorkingSet=[long]$counter.WorkingSetPrivate
+        $member.counterWorkingSet=[long]$counter.WorkingSet
+        $member.privateCommitted=[long]$counter.PrivateBytes
+      }
+    }
+  } catch { $result.counterError=$_.Exception.Message }
+  $result|ConvertTo-Json -Depth 5|Set-Content -LiteralPath $file
+}
 function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $out = Join-Path $diagDir "m6-$label"
   $null=New-Item -ItemType Directory -Path $out -Force
@@ -74,6 +100,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   if ($LASTEXITCODE -ne 0) {throw 'Could not establish matched initial socket state'}
   $table=@(Get-Content -Raw -LiteralPath (Join-Path $out 'initial-table.json') | ConvertFrom-Json)
   if (!$table.Count -or $table[-1].TargetRows -ne 0) {throw 'Incomplete initial socket observation'}
+  Save-M6PrivateObservation (Join-Path $out 'settled-memory.json')
   $before=Get-M6Count
   & wpr.exe -start "$m6Profile!NetSwitchCPU.Light" -filemode
   if ($LASTEXITCODE -ne 0) { throw "WPR start failed ($LASTEXITCODE)" }
@@ -104,7 +131,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
       $sampleFrom=[DateTimeOffset]::UtcNow.ToString('o')
       $sample=@(Get-M6ProductProcesses)
       Add-M6Inventory $inventories $known $sample $sampleFrom ([DateTimeOffset]::UtcNow.ToString('o'))
-      $memory.Add(@{utc=[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ss.fffZ');workingSetBytes=[long](($sample | Measure-Object WorkingSetSize -Sum).Sum)})
+      $memory.Add((Get-M6MemoryObservation $sample))
       $null=$worker.WaitForExit(300)
     }
     $worker.WaitForExit()
@@ -115,11 +142,15 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
     else { & wpr.exe -cancel }
   }
   $t=Get-Content -Raw -LiteralPath $traffic | ConvertFrom-Json
+  Save-M6PrivateObservation (Join-Path $out 'post-traffic-memory.json')
   $connections=(Get-M6Count)-$before
   if ($connections -ne $t.connections) { throw "TestISP saw $connections benchmark connections, expected $($t.connections)" }
   @{rootsFrom=$rootsFrom;rootsAt=$rootsAt;roots=$roots;inventories=$inventories.ToArray();installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
   & $m6Reader $trace $inputData $usage
-  if ($LASTEXITCODE -ne 0) { throw 'CPU trace analysis failed' }
+  if ($LASTEXITCODE -ne 0) {
+    $memory.ToArray() | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $out 'memory-before-accounting-failure.json')
+    throw 'CPU trace analysis failed'
+  }
   $report=@{arch=$Arch;runner=$env:COMPUTERNAME;commit=$env:GITHUB_SHA;release=$release;installerHash=(Get-FileHash -LiteralPath $setup).Hash.ToLowerInvariant();images=$images;gatewayConnections=$connections;traffic=$t;memory=$memory.ToArray();accounting=(Get-Content -Raw $usage|ConvertFrom-Json)}
   $report.precondition=@{verifiedConnections=$primed.connections;before=$table[0];after=$table[-1]}
   $report.gatewayHash=(Get-FileHash -Algorithm SHA256 -LiteralPath $ispExe).Hash.ToLowerInvariant()

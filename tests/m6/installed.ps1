@@ -58,6 +58,17 @@ try {
     return $false
   } | Out-Null
   Assert-RoutedEcho 'M6 installed candidate'
+  $observer=Join-Path (Split-Path $ctl) 'netswitch-worker.exe'
+  $observerHash=(Get-FileHash -LiteralPath $observer -Algorithm SHA256).Hash
+  $workerProof=Wait-Until 'installed stream executable and its two private copies are active' 25 {
+    $members=@(Get-M6ProductProcesses)
+    if (!($members | Where-Object { $_.ExecutablePath -eq $observer })) {return $false}
+    $copies=@($members | Where-Object { $_.ExecutablePath -and [IO.Path]::GetFileName($_.ExecutablePath) -eq 'worker.exe' } |
+      Where-Object { (Get-FileHash -LiteralPath $_.ExecutablePath -Algorithm SHA256).Hash -eq $observerHash })
+    if ($copies.Count -lt 2) {return $false}
+    return @{sha256=$observerHash.ToLowerInvariant();privateCopies=$copies.Count;arch=$Arch}
+  }
+  $workerProof | ConvertTo-Json | Set-Content -LiteralPath "$diagDir/m6-worker-proof.json"
   if ($Qualification -eq 'compare') {
     Measure-M6Product 'candidate' $candidateVersion $setup100
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"

@@ -23,6 +23,19 @@ function initialState(report) {
   return report.precondition;
 }
 function metrics(x) {
+  if (x.accounting.inventoryReceipts != null) {
+    assert(x.accounting.inventoryReceipts > 0 && x.accounting.observedMembers > 0);
+    assert(x.accounting.observedMembers <= x.accounting.members);
+    assert.equal(x.accounting.processCpu.length, x.accounting.members);
+    for (const [i,window] of x.accounting.windows.entries()) {
+      const seconds=x.accounting.processCpu.reduce((sum,p)=>sum+p.seconds[i],0);
+      assert(Math.abs(seconds-window.cpuSeconds)<1e-6,'unattributed CPU in a measured window');
+    }
+    for (const s of x.memory) {
+      assert.equal(new Set(s.processes.map(p=>p.pid)).size,s.processes.length);
+      assert.equal(s.processes.reduce((sum,p)=>sum+p.workingSet,0),s.workingSetBytes);
+    }
+  }
   if (x.traffic.connectBlocks) {
     const latency = latencySummary(x.traffic.connectBlocks);
     assert.equal(x.traffic.connectCount, latency.count);
@@ -91,7 +104,8 @@ export function compare(old,candidate) {
     latency = {count:current.count, baselineBlocks:baseline.blocks, candidateBlocks:current.blocks, first400};
   }
   const initialTables = oldState && {baseline:oldState, candidate:newState};
-  return {arch:old.arch,runner:old.runner,commit:candidate.commit,results,failures,latency,initialTables,gatewayHash:old.gatewayHash};
+  const cpuCoverage={baseline:old.accounting.observedMembers,candidate:candidate.accounting.observedMembers};
+  return {arch:old.arch,runner:old.runner,commit:candidate.commit,results,failures,latency,initialTables,cpuCoverage,gatewayHash:old.gatewayHash};
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [oldFile,newFile,output]=process.argv.slice(2);

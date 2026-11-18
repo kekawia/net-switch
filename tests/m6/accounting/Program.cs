@@ -119,6 +119,7 @@ if (input.InstallDirectory is string install) {
     }
 }
 var cpu = new long[input.Samples.Length];
+var perProcess = new Dictionary<IProcess,long[]>();
 var counted = new HashSet<IProcess>();
 long calibrationTicks = 0;
 foreach (var slice in usage.Result.CpuTimeSlices) {
@@ -130,6 +131,11 @@ foreach (var slice in usage.Result.CpuTimeSlices) {
         var ticks = Math.Min(hi,window.EndUtc.UtcTicks) - Math.Max(lo,window.StartUtc.UtcTicks);
         if (ticks <= 0) continue;
         cpu[i] += ticks;
+        if (!perProcess.TryGetValue(slice.Process, out var times)) {
+            times = new long[cpu.Length];
+            perProcess.Add(slice.Process,times);
+        }
+        times[i] += ticks;
         if (slice.Process.Id == input.CalibrationChild) calibrationTicks += ticks;
         counted.Add(slice.Process);
     }
@@ -146,6 +152,8 @@ File.WriteAllText(args[2],JsonSerializer.Serialize(new {
     inventoryReceipts = input.Inventories?.Length,
     observedMembers = observed.Count,
     reconciled = observed.Except(initialTree).Select(p=>new {pid=p.Id,image=p.ImageName}),
+    processCpu = members.Select(p=>new {pid=p.Id,image=p.ImageName,observed=observed.Contains(p),
+        seconds=(perProcess.TryGetValue(p,out var times)?times:new long[cpu.Length]).Select(n=>TimeSpan.FromTicks(n).TotalSeconds)}),
     scheduled = counted.Count,
     exited = counted.Count(p=>p.ExitTime.HasValue),
     windows = input.Samples.Select((s,i)=>new { s.Streams, s.Pass, s.Bytes, cpuSeconds=TimeSpan.FromTicks(cpu[i]).TotalSeconds })
