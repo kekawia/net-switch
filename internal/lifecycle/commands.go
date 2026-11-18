@@ -52,6 +52,8 @@ func Ctl(args []string) (resultErr error) {
 	}
 	command := args[0]
 	switch command {
+	case "package":
+		return packageCommand(args[1:])
 	case "update", "update-keygen", "update-issue-release-key", "update-sign-manifest", "update-verify-manifest", "update-check-root", "update-keep":
 		return updateCommand(args)
 	}

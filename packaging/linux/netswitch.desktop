@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Net Switch
+Comment=Choose which connection your apps use
+Exec=/usr/lib/netswitch/netswitch-desktop
+Icon=netswitch
+Terminal=false
+Categories=Network;

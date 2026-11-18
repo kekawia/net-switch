@@ -1,0 +1,7 @@
+[netswitch]
+name=Net Switch
+baseurl=https://kekawia.github.io/net-switch/
+enabled=1
+repo_gpgcheck=1
+gpgcheck=1
+gpgkey=https://kekawia.github.io/net-switch/netswitch.asc

@@ -11,6 +11,9 @@ const nativeStateComment = "# NetSwitchNativeState="
 func nativeStateDirectory() (string, error) {
 	b, err := os.ReadFile("/etc/systemd/system/netswitch-engine.service")
 	if os.IsNotExist(err) {
+		b, err = os.ReadFile("/usr/lib/systemd/system/netswitch-engine.service")
+	}
+	if os.IsNotExist(err) {
 		return "", nil
 	}
 	if err != nil {
