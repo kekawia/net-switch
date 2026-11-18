@@ -63,7 +63,7 @@ try {
     $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch 'M6_RELAY')
     if (!$samples.Count) {throw 'Installed relay samples missing'}
     $samples.Line | Set-Content -LiteralPath "$diagDir/m6-relay-observations.txt"
-    foreach ($trial in @(@{name='watermark';version='1.0.1'},@{name='watermark-growth';version='1.0.2'})) {
+    foreach ($trial in @(@{name='wide';version='1.0.1'},@{name='wide-long';version='1.0.2'})) {
       $env:NETSWITCH_M6_VARIANT=$trial.name
       try { & (Join-Path $PSScriptRoot '../../scripts/build-windows-installer.ps1') -Arch $Arch -Version $trial.version } finally { Remove-Item Env:NETSWITCH_M6_VARIANT }
       $setup=Join-Path $dist "NetSwitch-Setup-$($trial.version)-$Arch.exe"

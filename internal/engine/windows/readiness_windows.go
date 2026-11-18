@@ -43,7 +43,6 @@ type readiness struct {
 	batchMu     sync.Mutex
 	batch       map[*socketWatch]struct{}
 	batchWake   chan struct{}
-	available   func(winhandle.Owner) uint32
 	wg          sync.WaitGroup
 	thread      atomic.Uint32
 	capture     bool
@@ -96,7 +95,6 @@ type socketWatch struct {
 	pin                      runtime.Pinner
 	pending, detached, write bool
 	bulkUntil                atomic.Int64
-	batchDue                 time.Duration // under mu; nonzero while a read notification is owed
 	drained                  chan struct{}
 	detachDone               chan struct{}
 	detachErr                error
@@ -116,7 +114,7 @@ func newReadinessWithPolicy(policy tcpCompletionPolicy) (*readiness, error) {
 		port:    winhandle.Open(port, "TCP completion port open"),
 		watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{}, writeWake: make(chan struct{}, 1),
 		stop: make(chan struct{}), capture: hostedTraceEnabled(), poll: pollWritable,
-		batch: make(map[*socketWatch]struct{}), batchWake: make(chan struct{}, 1), available: socketReadableBytes,
+		batch: make(map[*socketWatch]struct{}), batchWake: make(chan struct{}, 1),
 		policy: policy, cancel: windows.CancelIoEx, providerIFS: socketProviderIFS,
 	}
 	p.wg.Go(p.completions)
@@ -233,19 +231,6 @@ var relayClockStart = time.Now()
 const bulkReadDelay = 400 * time.Microsecond
 var m6BulkVariant string
 const bulkReadWindow = 20 * time.Millisecond
-const bulkReadTarget = 64 << 10
-const bulkReadMaxDelay = 3 * time.Millisecond
-
-// FIONREAD is only a scheduling hint. The ordinary relay still controls the
-// actual amount consumed. Returning zero delivers EOF and query errors promptly.
-func socketReadableBytes(socket winhandle.Owner) uint32 {
-	var n uint32
-	result, _, _ := ioctlsocketProc.Call(uintptr(socket.Handle("TCP readable bytes")), 0x4004667f, uintptr(unsafe.Pointer(&n)))
-	if int32(result) != 0 {
-		return 0
-	}
-	return n
-}
 
 // An active bulk socket can generate a completion for each incoming segment.
 // Give these notifications one short shared batch. The bytes stay in Winsock,
@@ -256,21 +241,7 @@ func (w *socketWatch) readable(wake func()) {
 		wake()
 		return
 	}
-	if m6BulkVariant == "" {
-		w.pool.queueBulk(w)
-		return
-	}
-	w.mu.Lock()
-	if w.detached || w.batchDue != 0 {
-		w.mu.Unlock()
-		return
-	}
-	w.batchDue = winclock.Now() + bulkReadMaxDelay
-	w.mu.Unlock()
-	w.pool.queueBulk(w)
-}
-
-func (p *readiness) queueBulk(w *socketWatch) {
+	p := w.pool
 	p.batchMu.Lock()
 	first := len(p.batch) == 0
 	p.batch[w] = struct{}{}
@@ -281,25 +252,6 @@ func (p *readiness) queueBulk(w *socketWatch) {
 		}
 	}
 	p.batchMu.Unlock()
-}
-
-func (w *socketWatch) deliverBulk(now time.Duration) {
-	w.mu.Lock()
-	if w.detached {
-		w.mu.Unlock()
-		return
-	}
-	if now < w.batchDue {
-		if n := w.pool.available(w.socket); n > 0 && n < bulkReadTarget {
-			w.mu.Unlock()
-			w.pool.queueBulk(w)
-			return
-		}
-	}
-	w.batchDue = 0
-	wake := w.wake
-	w.mu.Unlock()
-	wake()
 }
 
 func (p *readiness) deliverBulkReads() {
@@ -313,7 +265,11 @@ func (p *readiness) deliverBulkReads() {
 			return
 		case <-p.batchWake:
 		}
-		timer.Reset(bulkReadDelay)
+		delay := bulkReadDelay
+		if m6BulkVariant == "wide-long" {
+			delay = 1200 * time.Microsecond
+		}
+		timer.Reset(delay)
 		select {
 		case <-p.stop:
 			return
@@ -323,7 +279,12 @@ func (p *readiness) deliverBulkReads() {
 		batch, p.batch = p.batch, batch
 		p.batchMu.Unlock()
 		for w := range batch {
-			w.deliverBulk(winclock.Now())
+			w.mu.Lock()
+			wake, detached := w.wake, w.detached
+			w.mu.Unlock()
+			if !detached {
+				wake()
+			}
 		}
 		clear(batch)
 	}
@@ -485,7 +446,7 @@ func (w *socketWatch) Arm(read, write bool) error {
 		}
 		p.mu.Unlock()
 	}
-	if !read || w.pending || w.batchDue != 0 {
+	if !read || w.pending {
 		w.mu.Unlock()
 		return nil
 	}

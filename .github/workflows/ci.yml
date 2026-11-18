@@ -480,7 +480,10 @@ jobs:
         if: always()
         with:
           name: m6-release-comparison-${{ matrix.arch }}
-          path: dist/installer-logs-${{ matrix.arch }}/m6*
+          path: |
+            dist/installer-logs-${{ matrix.arch }}/m6*
+            dist/installer-logs-${{ matrix.arch }}/failure/netswitch*.log
+            dist/installer-logs-${{ matrix.arch }}/failure/migration-journal.json
           if-no-files-found: error
   go1-windows:
     needs: changes
