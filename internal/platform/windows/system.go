@@ -13,6 +13,7 @@ import (
 
 type System struct {
 	Workers                               worker.Supervisor
+	StreamExecutable                      string
 	EnginePath, Root, UserDir, MachineDir string
 }
 
@@ -38,7 +39,11 @@ func (s *System) Stream(ctx context.Context, mode string, emit func([]byte), rep
 	if mode == "outside" {
 		args = append(args, "--engine", s.EnginePath)
 	}
-	s.Workers.Stream(ctx, mode, args, emit, report)
+	supervisor := s.Workers
+	if s.StreamExecutable != "" {
+		supervisor.Executable = s.StreamExecutable
+	}
+	supervisor.Stream(ctx, mode, args, emit, report)
 }
 func query(args []string, supervised bool) int {
 	if len(args) != 1 && len(args) != 2 {

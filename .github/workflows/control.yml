@@ -110,6 +110,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-engine.exe" ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-worker.exe" ./cmd/netswitch-worker
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-desktop.exe" ./cmd/netswitch-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitchctl.exe" ./cmd/netswitchctl
