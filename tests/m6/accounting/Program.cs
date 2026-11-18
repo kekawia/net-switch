@@ -3,9 +3,30 @@ using Microsoft.Windows.EventTracing.Processes;
 using Microsoft.Windows.EventTracing.Cpu;
 using System.Text.Json;
 using System.Diagnostics;
+using System.Net;
+using System.Net.NetworkInformation;
 
 // WMI enumerates processes over an interval. Helpers can exit before that
 // enumeration returns. Follow the matched ETW lifetimes through process exit.
+if (args is ["table", var tablePort, var tableUplink]) {
+    Console.WriteLine(JsonSerializer.Serialize(ReadTable(Int32.Parse(tablePort), IPAddress.Parse(tableUplink))));
+    return;
+}
+if (args is ["settle", var settlePort, var settleUplink, var settleOutput]) {
+    var port = Int32.Parse(settlePort);
+    var uplink = IPAddress.Parse(settleUplink);
+    var timer = Stopwatch.StartNew();
+    var observations = new List<TableObservation>();
+    while (true) {
+        var sample = ReadTable(port, uplink);
+        observations.Add(sample);
+        if (sample.TargetRows == 0 || timer.Elapsed >= TimeSpan.FromMinutes(8)) break;
+        Thread.Sleep(TimeSpan.FromSeconds(2));
+    }
+    File.WriteAllText(settleOutput, JsonSerializer.Serialize(observations));
+    if (observations[^1].TargetRows != 0) throw new InvalidDataException("Benchmark TCP rows still present: "+JsonSerializer.Serialize(observations[^1]));
+    return;
+}
 if (args is ["burn"]) {
     using var self = Process.GetCurrentProcess();
     var cpuStart = self.TotalProcessorTime;
@@ -97,6 +118,19 @@ File.WriteAllText(args[2],JsonSerializer.Serialize(new {
     exited = counted.Count(p=>p.ExitTime.HasValue),
     windows = input.Samples.Select((s,i)=>new { s.Streams, s.Pass, s.Bytes, cpuSeconds=TimeSpan.FromTicks(cpu[i]).TotalSeconds })
 }));
+static TableObservation ReadTable(int port, IPAddress uplink) {
+    if (port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
+    var target = IPAddress.Parse("198.19.128.2");
+    var rows = IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpConnections();
+    static bool Same(IPAddress a, IPAddress b) => a.Equals(b) || a.MapToIPv6().Equals(b.MapToIPv6());
+    var matched = rows.Where(row =>
+        (row.RemoteEndPoint.Port == port && (Same(row.RemoteEndPoint.Address,target) || Same(row.RemoteEndPoint.Address,uplink))) ||
+        (row.LocalEndPoint.Port == port && Same(row.LocalEndPoint.Address,uplink))).ToArray();
+    return new TableObservation(DateTimeOffset.UtcNow, rows.Length,
+        rows.Count(row => row.State == TcpState.TimeWait), matched.Length,
+        matched.Count(row => row.State == TcpState.TimeWait));
+}
+record TableObservation(DateTimeOffset Utc,int TotalRows,int AllTimeWait,int TargetRows,int TargetTimeWait);
 record Root(int Pid,string Image,DateTimeOffset? CreatedAt=null);
 record Window(int Streams,int Pass,long Bytes,DateTimeOffset StartUtc,DateTimeOffset EndUtc);
 record Measurement(DateTimeOffset RootsAt,Root[] Roots,Window[] Samples,int? CalibrationChild,double ExpectedChildSeconds,string? InstallDirectory,DateTimeOffset? RootsFrom=null);

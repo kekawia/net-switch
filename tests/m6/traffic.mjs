@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { performance } from 'node:perf_hooks';
 import { writeFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import { blockCount, blockSize, latencySummary } from './latency.mjs';
 
 const block = Buffer.alloc(64 * 1024);
@@ -91,7 +92,11 @@ export async function measure(host, port) {
     }
   }
   const connectBlocks = [];
+  const tableAtBlocks = [];
   for (let block = 0; block < blockCount; block++) {
+    const table = execFileSync(process.env.M6_TCP_READER, ['table', String(port), process.env.M6_TCP_UPLINK],
+      {encoding:'utf8', windowsHide:true, timeout:10000});
+    tableAtBlocks.push(JSON.parse(table));
     const measurements = [];
     for (let i = 0; i < blockSize; i++) {
       measurements.push((await transfer(host, port, 'ping')).connectMs);
@@ -99,7 +104,7 @@ export async function measure(host, port) {
     connectBlocks.push(measurements);
   }
   const latency = latencySummary(connectBlocks);
-  return {samples, connectBlocks, connectCount:latency.count, p95ms:latency.p95ms, p99ms:latency.p99ms,
+  return {samples, connectBlocks, tableAtBlocks, connectCount:latency.count, p95ms:latency.p95ms, p99ms:latency.p99ms,
     connections:1+latency.count+samples.reduce((n,r)=>n+r.connections,0)};
 }
 
@@ -130,7 +135,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     writeFileSync(arg,String(server.address().port),{flag:'wx'});
   } else {
     assert(process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_ENVIRONMENT === 'github-hosted');
-    if (mode === 'measure') writeFileSync(out, JSON.stringify(await measure(host,Number(arg))), {flag:'wx'});
+    if (mode === 'prime') {
+      const timings = [];
+      for (let i=0; i<64; i++) timings.push((await transfer(host,Number(arg),'ping')).connectMs);
+      writeFileSync(out,JSON.stringify({connections:timings.length,timings}),{flag:'wx'});
+    } else if (mode === 'measure') writeFileSync(out, JSON.stringify(await measure(host,Number(arg))), {flag:'wx'});
     else if (mode === 'soak') await soak(host,Number(arg), result=>writeFileSync(out,JSON.stringify(result)));
     else throw Error('unknown traffic mode');
   }
