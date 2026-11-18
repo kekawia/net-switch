@@ -32,6 +32,7 @@ if (input.Roots.Length == 0 || input.Samples.Length == 0) throw new InvalidDataE
 using var trace = TraceProcessor.Create(args[0], new TraceProcessorSettings { AllowLostEvents = false, SuppressFirstTimeSetupMessage = true });
 var processes = trace.UseProcesses();
 var usage = trace.UseCpuSchedulingData();
+var sampling = trace.UseCpuSamplingData();
 trace.Process();
 var roots = new HashSet<IProcess>();
 foreach (var root in input.Roots) {
@@ -87,7 +88,19 @@ if (input.CalibrationChild is int childId) {
         Math.Abs(duration-input.ExpectedChildSeconds) > Math.Max(0.10,0.15*input.ExpectedChildSeconds))
         throw new InvalidDataException("Trace missed CPU from the short-lived calibration child.");
 }
+var samplesByStack=new Dictionary<string,int>();
+foreach(var sample in sampling.Result.Samples) {
+    if (!members.Contains(sample.Process) || !input.Samples.Any(w=>sample.Timestamp.DateTimeOffset>=w.StartUtc && sample.Timestamp.DateTimeOffset<w.EndUtc)) continue;
+    string Frame(Microsoft.Windows.EventTracing.Symbols.StackFrame f) {
+        if (!f.HasValue) return "unknown";
+        var image=Path.GetFileName(f.Image?.Path ?? "unknown");
+        return image.Equals("netswitch-engine.exe",StringComparison.OrdinalIgnoreCase) ? image+"+"+f.RelativeVirtualAddress : image;
+    }
+    var path=sample.Process.ImageName+"|"+Frame(sample.TopStackFrame)+"|"+(sample.Stack==null?"":String.Join(";",sample.Stack.Frames.Select(Frame).Take(48)));
+    samplesByStack[path]=samplesByStack.GetValueOrDefault(path)+1;
+}
 File.WriteAllText(args[2],JsonSerializer.Serialize(new {
+    samplesByStack,
     byImageSeconds = byImage.ToDictionary(p=>p.Key,p=>TimeSpan.FromTicks(p.Value).TotalSeconds),
     members = members.Count,
     scheduled = counted.Count,

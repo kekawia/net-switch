@@ -147,7 +147,7 @@ try {
   $buildTags = @()
   if ($env:NETSWITCH_M6_PROFILE -eq '1') {
     if ($env:GITHUB_ACTIONS -ne 'true' -or $env:GITHUB_REF -ne 'refs/heads/codex/m6-cpu-diagnostic' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'Diagnostic builds require the hosted profiling branch.' }
-    $buildTags = @('-tags=m6profile')
+    $baseLdflags = $baseLdflags.Replace('-s -w ', '')
   }
   if ($UpdateTestFixture) { $buildTags = @('-tags=lifecycle_test') }
 

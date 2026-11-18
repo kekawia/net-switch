@@ -10,7 +10,9 @@
         <Keyword Value="ProcessThread"/>
         <Keyword Value="Loader"/>
         <Keyword Value="CSwitch"/>
+        <Keyword Value="SampledProfile"/>
       </Keywords>
+      <Stacks><Stack Value="SampledProfile"/></Stacks>
     </SystemProvider>
     <Profile Id="NetSwitchCPU.Light.File" Name="NetSwitchCPU" Description="Process lifetime and scheduling" LoggingMode="File" DetailLevel="Light">
       <Collectors>
