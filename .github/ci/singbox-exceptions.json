@@ -58,13 +58,6 @@
       "reason": "Historical architecture and retirement documentation"
     },
     {
-      "path": "docs/user-guide.md",
-      "sha256": "dfd8b35341e5ec79ea6fc1dd73272faeb851ef38f43f2a76d53d29821a637752",
-      "matches": 1,
-      "category": "historical-doc",
-      "reason": "Historical architecture and retirement documentation"
-    },
-    {
       "path": "helper/main_test.go",
       "sha256": "77a2487e7d170eba2128860c64dbade007e2a7351c35d1c13044b11f91a13f66",
       "matches": 2,

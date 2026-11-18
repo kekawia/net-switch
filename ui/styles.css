@@ -14,6 +14,7 @@
   --cable: #f5b13d;
   --second: #3cc8ea;
   --ok: #3dd68c;
+  --update-surface: #17241f;
   --warn: #f2b24d;
   --alert: #f26d6d;
   --focus: #f4f5f7;
@@ -1244,6 +1245,94 @@ h1 {
 .notice[data-kind='update'] {
   --tone: var(--ok);
   align-items: center;
+}
+
+/* Signed-update states share the compact approved notice layout. */
+.notice[data-update] {
+  align-items: center;
+  /* The design's stroke is inset: include it in the 10px / 14px inset. */
+  padding: 9px 13px;
+  font-size: 12.5px;
+  line-height: 15px;
+}
+
+.notice[data-update][data-kind='update'] {
+  background: var(--update-surface);
+  border-color: color-mix(in srgb, var(--ok) 30%, transparent);
+}
+
+.notice[data-update][data-kind='error'] {
+  background: color-mix(in srgb, var(--alert) 7%, var(--bg));
+  border-color: color-mix(in srgb, var(--alert) 30%, transparent);
+  font-size: 12px;
+}
+
+.notice[data-update] .notice-icon {
+  margin-top: 0;
+}
+
+.notice[data-update] .notice-actions {
+  align-items: center;
+  gap: 6px;
+}
+
+.notice[data-update] .button {
+  padding: 4px 11px;
+  font-size: 12px;
+  line-height: 15px;
+}
+
+.notice[data-update] .button-quiet {
+  padding-inline: 7px;
+}
+
+.notice[data-update][data-kind='status'] {
+  padding: 5px 11px;
+}
+
+.notice[data-update][data-kind='update'] .notice-icon {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2v13m-5-5 5 5 5-5M4 22h16'/%3E%3C/svg%3E");
+}
+
+.notice[data-update][data-kind='error'] .notice-icon {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M12 8v4m0 4h.01'/%3E%3C/svg%3E");
+}
+
+.notice[data-update][data-kind='update'][data-icon='verified'] .notice-icon {
+  --icon: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3 3 7v6c0 4 5 7 9 9 4-2 9-5 9-9V7z'/%3E%3Cpath d='m8 12 3 3 5-5'/%3E%3C/svg%3E");
+}
+
+.update-download {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.update-size {
+  color: var(--ink-2);
+  font: 12px var(--mono);
+  white-space: nowrap;
+}
+
+.update-progress {
+  appearance: none;
+  width: 88px;
+  height: 4px;
+  border: 0;
+  border-radius: 3px;
+  overflow: hidden;
+  background: var(--cell-off);
+  color: var(--ok);
+}
+
+.update-progress::-webkit-progress-bar { background: var(--cell-off); }
+.update-progress::-webkit-progress-value { background: var(--ok); border-radius: 3px; }
+.update-progress::-moz-progress-bar { background: var(--ok); border-radius: 3px; }
+
+@media (max-width: 640px) {
+  .notice[data-update] { flex-wrap: wrap; }
+  .notice[data-update] .notice-body { flex-basis: calc(100% - 28px); }
+  .notice[data-update] .notice-actions { margin-inline-start: 27px; flex-wrap: wrap; }
 }
 
 .notice[data-kind='update'] .notice-icon {

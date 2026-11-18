@@ -21,6 +21,9 @@ jobs:
       CGO_ENABLED: '0'
       GOMAXPROCS: '2'
       GOFLAGS: -mod=vendor -p=2
+      NODE_OPTIONS: --max-old-space-size=2048
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -34,8 +37,103 @@ jobs:
           node-version: '24'
           package-manager-cache: false
       - name: Check tag and changelog
+        id: metadata
         run: node scripts/release-metadata.mjs
       - name: Verify retirement manifest and CI gates
         run: node --test .github/ci/*.test.mjs
       - name: Refuse a release while any declared gate is unfinished
         run: go run ./tests/linux/cmd/nsaccept release-gate
+      - name: Require the production offline root public key
+        run: go run ./cmd/netswitchctl update-check-root
+
+  windows-installers:
+    name: Build Windows ${{ matrix.arch }} installer
+    needs: release-gate
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-latest
+          - arch: arm64
+            runner: windows-11-arm
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: go
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: webview2
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: inno
+      - name: Build the pinned production installer
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ needs.release-gate.outputs.version }}
+          RELEASE_ARCH: ${{ matrix.arch }}
+        run: ./scripts/build-windows-installer.ps1 -Arch $env:RELEASE_ARCH -Version $env:RELEASE_VERSION
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: dist/NetSwitch-Setup-${{ needs.release-gate.outputs.version }}-${{ matrix.arch }}.exe
+          if-no-files-found: error
+
+  signed-release:
+    name: Sign, verify and publish release
+    needs: [release-gate, windows-installers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GOTOOLCHAIN: local
+      CGO_ENABLED: '0'
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      NODE_OPTIONS: --max-old-space-size=2048
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      # Compile before the online signing secret enters the environment.
+      - name: Build the verification and signing tool
+        run: go build -trimpath -o bin/netswitchctl ./cmd/netswitchctl
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          pattern: release-windows-*
+          path: dist/release
+          merge-multiple: true
+      - name: Sign and independently reverify the release assets
+        env:
+          NETSWITCH_RELEASE_SIGNING_KEY: ${{ secrets.NETSWITCH_RELEASE_SIGNING_KEY }}
+          RELEASE_VERSION: ${{ needs.release-gate.outputs.version }}
+        run: node scripts/sign-update-release.mjs --ctl bin/netswitchctl --artifacts dist/release --version "$RELEASE_VERSION"
+      - name: Recheck release notes
+        run: node scripts/release-metadata.mjs
+      - name: Publish only after every asset verifies
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.release-gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "v$RELEASE_VERSION" --draft --verify-tag --title "Net Switch $RELEASE_VERSION" --notes-file dist/release-notes.md dist/release/*
+          gh release edit "v$RELEASE_VERSION" --draft=false

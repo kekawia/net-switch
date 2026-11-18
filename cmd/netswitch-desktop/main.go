@@ -21,6 +21,7 @@ func main() {
 		os.Exit(code)
 	}
 	background := flag.Bool("background", false, "owner sign-in startup without opening the browser")
+	resume := flag.Bool("resume", false, "reconnect after an update without changing routing")
 	autostart := flag.String("autostart", "", "on, off or status; configure only this owner's sign-in entry")
 	version := flag.Bool("version", false, "print build identity")
 	flag.Parse()
@@ -40,7 +41,11 @@ func main() {
 		return
 	}
 	lifecycle.SetDesktopUIFactory(host.New)
-	if err := lifecycle.Desktop(ctx, !*background); err != nil {
+	run := lifecycle.Desktop
+	if *resume {
+		run = lifecycle.ResumeDesktop
+	}
+	if err := run(ctx, !*background); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}

@@ -12,23 +12,26 @@ import (
 type MigrateProfilesResult struct{}
 
 type MigrateOptions struct {
-	AppDir   string
-	StageDir string
-	Version  string
-	Owner    string
-	Profile  string
-	DataDir  string
-	OutPath  string
+	AppDir          string
+	StageDir        string
+	Version         string
+	Owner           string
+	Profile         string
+	DataDir         string
+	OutPath         string
+	InstallerSource string
 }
 
 type InstallVersionedOptions struct {
-	AppDir       string
-	StageDir     string
-	Version      string
-	Owner        string
-	DataDir      string
-	Mode         string
-	OwnerBackend string
+	AppDir          string
+	StageDir        string
+	Version         string
+	Owner           string
+	DataDir         string
+	Mode            string
+	OwnerBackend    string
+	InstallerSource string
+	UpdateOperation string
 }
 
 func MigrateProfiles(string, string, string, string) (MigrateProfilesResult, error) {

@@ -75,7 +75,9 @@ func AcquireSingleInstance(ctx context.Context, scope string, show bool, onShow 
 	if errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
 		_ = windows.CloseHandle(hMutex)
 		if show {
-			_ = notifyExistingInstance(ctx, pipeName)
+			if err := notifyExistingInstance(ctx, pipeName); err != nil {
+				return nil, fmt.Errorf("activate existing desktop: %w", err)
+			}
 		}
 		return &SingleInstanceLock{AlreadyRunning: true}, nil
 	}
@@ -128,8 +130,14 @@ func notifyExistingInstance(ctx context.Context, pipeName string) error {
 			}
 			var written uint32
 			msg := []byte("show\n")
-			_ = windows.WriteFile(h, msg, &written, nil)
+			writeErr := windows.WriteFile(h, msg, &written, nil)
 			_ = windows.CloseHandle(h)
+			if writeErr != nil {
+				return writeErr
+			}
+			if written != uint32(len(msg)) {
+				return io.ErrShortWrite
+			}
 			return nil
 		}
 		if time.Now().After(deadline) {
@@ -193,38 +201,37 @@ func (l *SingleInstanceLock) serve(h, stop windows.Handle, onShow func()) {
 		if stopped || err == windows.ERROR_OPERATION_ABORTED {
 			return
 		}
-		if err != nil && err != windows.ERROR_PIPE_CONNECTED {
+		if err != nil && err != windows.ERROR_PIPE_CONNECTED && err != windows.ERROR_NO_DATA {
 			return
 		}
 
-		var pid uint32
-		if err := windows.GetNamedPipeClientProcessId(h, &pid); err == nil {
-			// Pipe DACL restricts clients to our own SID; read line bounded.
-			buf := make([]byte, 64)
-			var n uint32
-			overRead := &windows.Overlapped{}
-			evRead, evErr := windows.CreateEvent(nil, 1, 0, nil)
-			if evErr == nil {
-				overRead.HEvent = evRead
-				var rp runtime.Pinner
-				rp.Pin(&buf[0])
-				rp.Pin(overRead)
-				rErr := windows.ReadFile(h, buf, &n, overRead)
-				readStopped := false
-				if rErr == windows.ERROR_IO_PENDING {
-					readStopped, rErr = waitOverlappedOrStop(h, evRead, stop, overRead, &n)
-				}
-				rp.Unpin()
-				_ = windows.CloseHandle(evRead)
-				if readStopped {
-					_ = windows.DisconnectNamedPipe(h)
-					return
-				}
-				if rErr == nil || errors.Is(rErr, io.EOF) || rErr == windows.ERROR_BROKEN_PIPE {
-					line, _ := bufio.NewReader(strings.NewReader(string(buf[:n]))).ReadString('\n')
-					if strings.TrimSpace(line) == "show" && onShow != nil {
-						onShow()
-					}
+		// The DACL already restricts clients to our SID. A client may finish
+		// its small write and close before accept or the PID query; consume
+		// the buffered request even then, and keep listening after empty opens.
+		buf := make([]byte, 64)
+		var n uint32
+		overRead := &windows.Overlapped{}
+		evRead, evErr := windows.CreateEvent(nil, 1, 0, nil)
+		if evErr == nil {
+			overRead.HEvent = evRead
+			var rp runtime.Pinner
+			rp.Pin(&buf[0])
+			rp.Pin(overRead)
+			rErr := windows.ReadFile(h, buf, &n, overRead)
+			readStopped := false
+			if rErr == windows.ERROR_IO_PENDING {
+				readStopped, rErr = waitOverlappedOrStop(h, evRead, stop, overRead, &n)
+			}
+			rp.Unpin()
+			_ = windows.CloseHandle(evRead)
+			if readStopped {
+				_ = windows.DisconnectNamedPipe(h)
+				return
+			}
+			if rErr == nil || errors.Is(rErr, io.EOF) || rErr == windows.ERROR_BROKEN_PIPE {
+				line, _ := bufio.NewReader(strings.NewReader(string(buf[:n]))).ReadString('\n')
+				if strings.TrimSpace(line) == "show" && onShow != nil {
+					onShow()
 				}
 			}
 		}

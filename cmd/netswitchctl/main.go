@@ -1,5 +1,4 @@
-// Command netswitchctl manages 1.0 services, enrollment and recovery.
-// The 0.3.x migration transaction belongs to milestone five.
+// Command netswitchctl manages services, enrollment, recovery and signed updates.
 package main
 
 import (
@@ -7,6 +6,8 @@ import (
 	"os"
 
 	"github.com/kekawia/net-switch/internal/lifecycle"
+	// Signing and detached update application use Go's registered BLAKE2b hashes.
+	_ "golang.org/x/crypto/blake2b"
 )
 
 func main() {

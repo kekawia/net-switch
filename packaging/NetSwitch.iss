@@ -80,6 +80,13 @@ var
   DeleteMachineData: Boolean;
   UninstallCtlPath: String;
 
+#ifdef UpdateTestFixture
+function NeedRestart: Boolean;
+begin
+  Result := ExpandConstant('{param:NSUPDATEREBOOT|0}') = '1';
+end;
+#endif
+
 function ReadFirstTrimmedLine(const FilePath: String): String;
 var
   Lines: TArrayOfString;
@@ -204,6 +211,7 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   CtlExe, AppPath, ErrFile, CallerSID, ChosenProfile, SubCmd, Params, ErrMsg: String;
+  UpdateOperation, MachineData: String;
   ExitCode: Integer;
 begin
   Result := '';
@@ -240,6 +248,14 @@ begin
   end;
   if CallerSID <> '' then
     Params := Params + ' --owner "' + CallerSID + '"';
+
+  Params := Params + ' --installer "' + ExpandConstant('{srcexe}') + '"';
+  UpdateOperation := Trim(ExpandConstant('{param:UPDATEOP|}'));
+  MachineData := Trim(ExpandConstant('{param:DATA|}'));
+  if UpdateOperation <> '' then
+    Params := Params + ' --update-operation "' + UpdateOperation + '"';
+  if MachineData <> '' then
+    Params := Params + ' --data "' + MachineData + '"';
 
   ExitCode := -1;
   if not Exec(CtlExe, Params, ExpandConstant('{tmp}\stage'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then begin
@@ -331,7 +347,7 @@ end;
 
 function InitializeUninstall: Boolean;
 var
-  SrcCtl: String;
+  SrcCtl, ErrFile, ErrMsg: String;
   ExitCode: Integer;
 begin
   Result := False;
@@ -349,10 +365,16 @@ begin
     Exit;
   end;
   ExitCode := -1;
-  if Exec(UninstallCtlPath, 'uninstall --app-dir "' + ExpandConstant('{app}') + '"',
+  ErrFile := ExpandConstant('{tmp}\uninstall-error.txt');
+  DeleteFile(ErrFile);
+  if Exec(UninstallCtlPath, 'uninstall --app-dir "' + ExpandConstant('{app}') + '" --error-out "' + ErrFile + '"',
     ExpandConstant('{tmp}'), SW_HIDE, ewWaitUntilTerminated, ExitCode) then
     Result := ExitCode = 0;
   Log(Format('Net Switch uninstall stop/cleanup result: %d', [ExitCode]));
+  if not Result then begin
+    ErrMsg := ReadFirstTrimmedLine(ErrFile);
+    if ErrMsg <> '' then Log('Net Switch uninstall detail: ' + ErrMsg);
+  end;
   if not Result then
     SuppressibleMsgBox('Net Switch could not be stopped. Retry uninstalling. No files have been removed.', mbError, MB_OK, IDOK);
 end;
@@ -360,6 +382,7 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   ExitCode: Integer;
+  ErrFile, ErrMsg: String;
 begin
   { SuppressibleMsgBox takes its default answer during silent uninstall (/SILENT or /VERYSILENT). }
   if CurUninstallStep = usUninstall then begin
@@ -367,11 +390,17 @@ begin
     if SuppressibleMsgBox('Undo the Windows settings Net Switch changed (connection priority, keeping Wi-Fi on with the cable)?',
       mbConfirmation, MB_YESNO or MB_DEFBUTTON1, IDYES) = IDYES then begin
       ExitCode := -1;
+      ErrFile := ExpandConstant('{tmp}\restore-error.txt');
+      DeleteFile(ErrFile);
       if (UninstallCtlPath <> '') and FileExists(UninstallCtlPath) and
-         Exec(UninstallCtlPath, 'restore-windows', ExpandConstant('{tmp}'),
+         Exec(UninstallCtlPath, 'restore-windows --error-out "' + ErrFile + '"', ExpandConstant('{tmp}'),
            SW_HIDE, ewWaitUntilTerminated, ExitCode) then
         DeleteMachineData := ExitCode = 0;
       Log(Format('Net Switch Windows restore result: %d', [ExitCode]));
+      if not DeleteMachineData then begin
+        ErrMsg := ReadFirstTrimmedLine(ErrFile);
+        if ErrMsg <> '' then Log('Net Switch restore detail: ' + ErrMsg);
+      end;
       if not DeleteMachineData then
         SuppressibleMsgBox('Windows settings could not be fully restored. Your undo record is kept in ' +
           ExpandConstant('{commonappdata}\Net Switch') +

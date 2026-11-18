@@ -42,6 +42,34 @@ func (a *Access) request(ctx context.Context, peer localipc.Peer, statusOnly boo
 	if r.Method == "status" {
 		return a.status(), nil
 	}
+	if r.Method == "update-snapshot" {
+		if statusOnly || (!privilegedPeer(peer.User) && (a.Owner.User == "" || peer.User != a.Owner.User)) {
+			return nil, errors.New("update snapshot requires the owner or service account")
+		}
+		if _, err := readActiveUpdateSnapshot(a.Data, r.Key); err != nil {
+			return nil, err
+		}
+		snapshot := a.Remote.Snapshot()
+		return map[string]any{"wanted": a.Core.WantsRouting(), "routing": snapshot.Status, "engineInstanceId": snapshot.Instance, "owner": a.Owner}, nil
+	}
+	if r.Method == "desktop-restart" {
+		if statusOnly || (!privilegedPeer(peer.User) && (a.Owner.User == "" || peer.User != a.Owner.User)) {
+			return nil, errors.New("desktop restart requires the owner or service account")
+		}
+		if err := authorizeUpdateRestart(a.Data, r.Key); err != nil {
+			return nil, err
+		}
+		wait, cancel := context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+		for a.Desktop.PID() == 0 {
+			if err := localipc.Pause(wait, 100*time.Millisecond); err != nil {
+				return nil, err
+			}
+		}
+		previous := a.Desktop.PID()
+		_, err := a.Desktop.Call(wait, "restart-self", nil)
+		return map[string]any{"previousPID": previous}, err
+	}
 	if statusOnly || a.Owner.User == "" || peer.User != a.Owner.User {
 		return nil, errors.New("only the enrolled owner may control routing")
 	}

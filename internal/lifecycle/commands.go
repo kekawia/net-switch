@@ -22,6 +22,12 @@ func ServiceCommand(name string, args []string) error {
 		return err
 	}
 	return service.Run(name, func(ctx context.Context, ready func()) error {
+		if name == service.Control {
+			stopped, err := deferControlForUpdate(ctx, *data, func(message string) { service.ReportError(name, errors.New(message)) })
+			if err != nil || stopped {
+				return err
+			}
+		}
 		c, err := LoadConfig(*data)
 		if err != nil {
 			service.ReportError(name, err)
@@ -40,11 +46,15 @@ func ServiceCommand(name string, args []string) error {
 		return err
 	})
 }
-func Ctl(args []string) error {
+func Ctl(args []string) (resultErr error) {
 	if len(args) == 0 {
-		return errors.New("usage: netswitchctl status|enroll|start|stop|journal|install|cleanup|recover|uninstall|migration-check|migrate-profiles|migrate|restore-windows|cleanup-machine-data|whoami|version")
+		return errors.New("usage: netswitchctl status|enroll|start|stop|journal|install|cleanup|recover|uninstall|migration-check|migrate-profiles|migrate|restore-windows|cleanup-machine-data|whoami|version|update|update-keygen|update-issue-release-key|update-sign-manifest|update-verify-manifest|update-check-root")
 	}
 	command := args[0]
+	switch command {
+	case "update", "update-keygen", "update-issue-release-key", "update-sign-manifest", "update-verify-manifest", "update-check-root", "update-keep":
+		return updateCommand(args)
+	}
 	if command == "version" {
 		fmt.Println("netswitchctl", buildinfo.String())
 		return nil
@@ -56,6 +66,8 @@ func Ctl(args []string) error {
 	appDir := flags.String("app-dir", "", "root versioned installation directory")
 	stageDir := flags.String("stage-dir", "", "temporary stage directory to copy and verify")
 	versionFlag := flags.String("version", "", "target semantic version for versioned layout")
+	installerSource := flags.String("installer", "", "explicit installer to keep for offline recovery")
+	updateOperation := flags.String("update-operation", "", "accepted signed update operation")
 	profileFlag := flags.String("profile", "", "selected Windows user profile SID for migration")
 	outPath := flags.String("out", "", "optional JSON output file path")
 	wizardOutPath := flags.String("wizard-out", "", "optional line-formatted wizard output file path")
@@ -69,6 +81,7 @@ func Ctl(args []string) error {
 	if err := flags.Parse(args[1:]); err != nil {
 		return err
 	}
+	defer func() { WriteInstallerError(*errorOutPath, resultErr) }()
 	if *machineData != "" {
 		*data = *machineData
 	}
@@ -87,6 +100,15 @@ func Ctl(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
+	if runtime.GOOS == "windows" && (command == "enroll" || command == "enrol" || command == "uninstall") {
+		if resolved, err := ResolveStore(*data); err == nil && CheckDirectory(resolved) == nil {
+			release, err := (Lock{Data: resolved, Name: "update"}).Acquire(ctx)
+			if err != nil {
+				return err
+			}
+			defer release()
+		}
+	}
 	printJSON := func(value any, err error) error {
 		if err != nil {
 			return err
@@ -102,13 +124,14 @@ func Ctl(args []string) error {
 		return printJSON(res, err)
 	case "migrate":
 		err := Migrate(ctx, MigrateOptions{
-			AppDir:   *appDir,
-			StageDir: *stageDir,
-			Version:  *versionFlag,
-			Owner:    *ownerName,
-			Profile:  *profileFlag,
-			DataDir:  *data,
-			OutPath:  *outPath,
+			AppDir:          *appDir,
+			StageDir:        *stageDir,
+			Version:         *versionFlag,
+			Owner:           *ownerName,
+			Profile:         *profileFlag,
+			DataDir:         *data,
+			OutPath:         *outPath,
+			InstallerSource: *installerSource,
 		})
 		WriteInstallerError(*errorOutPath, err)
 		return err
@@ -175,13 +198,15 @@ func Ctl(args []string) error {
 				return errors.New("native service qualification requires tun mode and no adapter")
 			}
 			err := InstallVersioned(ctx, InstallVersionedOptions{
-				AppDir:       *appDir,
-				StageDir:     *stageDir,
-				Version:      *versionFlag,
-				Owner:        *ownerName,
-				DataDir:      *data,
-				Mode:         *mode,
-				OwnerBackend: *ownerBackend,
+				AppDir:          *appDir,
+				StageDir:        *stageDir,
+				Version:         *versionFlag,
+				Owner:           *ownerName,
+				DataDir:         *data,
+				Mode:            *mode,
+				OwnerBackend:    *ownerBackend,
+				InstallerSource: *installerSource,
+				UpdateOperation: *updateOperation,
 			})
 			WriteInstallerError(*errorOutPath, err)
 			return err

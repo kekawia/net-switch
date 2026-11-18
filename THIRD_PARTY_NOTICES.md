@@ -51,6 +51,13 @@ retained in `vendor/fyne.io/systray/LICENSE`.
   `licenses\go-LICENSE.txt`, taken unchanged from the official Go release.
   golang.org/x/sys ships the same text.
 
+## Signed update hashes (Net Switch 1.0, not yet shipped)
+
+The Control service and `netswitchctl` include the unmodified
+`golang.org/x/crypto/blake2b` package from `golang.org/x/crypto` v0.57.0 for
+signed updates. Copyright 2009 The Go Authors; BSD-3-Clause. Its license is
+identical to the installed `licenses\go-LICENSE.txt`.
+
 ## Microsoft Edge WebView2 Loader
 
 The unshipped Net Switch 1.0 Windows desktop app embeds

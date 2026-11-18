@@ -110,8 +110,8 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 		if err != nil {
 			return nil, err
 		}
-		return updates.Check(ctx, assets.AppVersion(), fmt.Sprint(architecture))
-	}})
+		return updateClient(c.Data).Check(ctx, assets.AppVersion(), fmt.Sprint(architecture))
+	}, Updater: newControlUpdater(ctx, c, log)})
 	if err != nil {
 		return err
 	}
@@ -188,10 +188,13 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 			return err
 		}
 	}
+	updateHealthDone := runUpdateHealthCheck(ctx, c, core, remote, log)
 	core.Run()
 	go runSessionEvents(ctx, service.Events(serviceCtx), owner.User, remote, core.SetPowerSuspended, func() error { return core.Routing(ctx, false) }, log, sessionPresence(c.Data))
 	ready()
-	go runMigrationHealthCheck(ctx, c, core, remote, log)
+	if !updateHealthDone {
+		go runMigrationHealthCheck(ctx, c, core, remote, log)
+	}
 	go clearRestartDelayWhenHealthy(ctx, c.Data, log)
 	// No credential, HTTP port or session token is published to a file.
 	log(fmt.Sprintf("Control ready (PID %d); owner=%s", os.Getpid(), owner.Name))
@@ -216,7 +219,7 @@ func ControlService(serviceCtx context.Context, ready func(), c Config, log func
 	shutdown, stop := context.WithTimeout(context.Background(), 25*time.Second)
 	defer stop()
 	if !alreadyStopped {
-		if shutdownErr := core.Shutdown(shutdown); shutdownErr != nil {
+		if shutdownErr := core.ShutdownForService(shutdown); shutdownErr != nil {
 			return errors.Join(err, shutdownErr)
 		}
 	}

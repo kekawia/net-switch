@@ -110,11 +110,11 @@ func New(cb desktop.UICallbacks) desktop.UI {
 				_ = s.Save(p)
 			}
 		},
-		OnOpenUpdate: func(uri string) {
-			if !strings.HasPrefix(uri, desktop.InstallerPrefix) {
-				return
+		OnApplyUpdate: func(version string) {
+			u.ShowWindow("")
+			if u.cb.ApplyUpdate != nil {
+				u.cb.ApplyUpdate(version)
 			}
-			openShellURI(uri)
 		},
 		OnRemoveIcon: func() {
 			u.mu.Lock()
@@ -215,6 +215,13 @@ func (u *windowsDesktopUI) ShowWindow(appKey string) {
 	if err := wv.Open(appKey); err != nil {
 		go u.openPairFallback()
 	}
+}
+
+func (u *windowsDesktopUI) WindowVisible() bool {
+	u.mu.Lock()
+	wv := u.wv
+	u.mu.Unlock()
+	return wv != nil && wv.Visible()
 }
 
 func (u *windowsDesktopUI) openPairFallback() {

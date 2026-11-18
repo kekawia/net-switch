@@ -56,8 +56,10 @@ function Save-SuiteDiagnostics([string] $Label) {
   New-Item -ItemType Directory -Force -Path $dest | Out-Null
   foreach ($src in @(
     (Join-Path $machineData 'migration-journal.json'),
+    (Join-Path $machineData 'update-journal.json'),
     (Join-Path $machineData 'netswitch.log'),
     (Join-Path $machineData 'netswitch-engine.log'),
+    (Join-Path $machineData 'netswitch-update.log'),
     (Join-Path $machineData 'settings.json'),
     (Join-Path $machineData 'windows-undo.json'),
     (Join-Path $userData 'server.log'),
@@ -67,6 +69,15 @@ function Save-SuiteDiagnostics([string] $Label) {
       Copy-Item -LiteralPath $src -Destination (Join-Path $dest ([IO.Path]::GetFileName($src))) -Force -ErrorAction SilentlyContinue
     }
   }
+  $updateStages = Join-Path $appDir 'updates\staging'
+  if (Test-Path -LiteralPath $updateStages -PathType Container) {
+    Get-ChildItem -LiteralPath $updateStages -Recurse -Filter 'install-*.log' -File | ForEach-Object {
+      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $dest ($_.Directory.Name + '-' + $_.Name)) -Force
+    }
+  }
+  foreach ($name in @('NetSwitch','NetSwitchEngine')) { & sc.exe queryex $name }
+  Get-CimInstance Win32_Process -Filter "Name = 'netswitch.exe' OR Name = 'netswitch-engine.exe' OR Name = 'netswitchctl.exe' OR Name = 'netswitch-desktop.exe'" -ErrorAction SilentlyContinue |
+    Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine | Format-List
 }
 
 function Wait-Until([string] $Description, [int] $Seconds, [scriptblock] $Condition) {
@@ -323,26 +334,32 @@ setInterval(() => {}, 60000);
   Invoke-RestMethod -Method POST -Uri "$($primaryIsp.control)/targets" -Headers $ispHeaders -ContentType 'application/json' -Body $targetsBody -TimeoutSec 5 | Out-Null
   Invoke-RestMethod -Method POST -Uri "$($secondaryIsp.control)/targets" -Headers $ispHeaders -ContentType 'application/json' -Body $targetsBody -TimeoutSec 5 | Out-Null
 
-  function Assert-RoutedEcho([string] $Tag) {
-    $beforeStats = Invoke-RestMethod -Method GET -Uri "$($primaryIsp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
+  function Assert-RoutedEcho([string] $Tag, $Isp=$primaryIsp, [switch] $ViaCurl) {
+    $beforeStats = Invoke-RestMethod -Method GET -Uri "$($Isp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
     $beforeCount = 0
     if ($beforeStats.destinations -and $beforeStats.destinations.PSObject.Properties[$echoTarget]) {
       $beforeCount = [int64]$beforeStats.destinations.PSObject.Properties[$echoTarget].Value
     }
     $nonce = [Guid]::NewGuid().ToString('N')
-    $reply = Invoke-RestMethod -Method GET -Uri "http://${echoTarget}/echo?nonce=${nonce}" -TimeoutSec 10
+    if ($ViaCurl) {
+      $replyText = & (Join-Path $env:SystemRoot 'System32\curl.exe') --silent --show-error --fail --noproxy '*' --max-time 10 "http://${echoTarget}/echo?nonce=${nonce}"
+      if ($LASTEXITCODE -ne 0) { throw "[$Tag] Pinned curl echo failed with exit $LASTEXITCODE" }
+      $reply = ($replyText -join "`n") | ConvertFrom-Json
+    } else {
+      $reply = Invoke-RestMethod -Method GET -Uri "http://${echoTarget}/echo?nonce=${nonce}" -TimeoutSec 10
+    }
     if ($reply.nonce -ne $nonce) {
       throw "[$Tag] Routed HTTP echo nonce mismatch: expected '$nonce', got '$($reply.nonce)'."
     }
-    $afterStats = Invoke-RestMethod -Method GET -Uri "$($primaryIsp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
+    $afterStats = Invoke-RestMethod -Method GET -Uri "$($Isp.control)/stats" -Headers $ispHeaders -TimeoutSec 5
     $afterCount = 0
     if ($afterStats.destinations -and $afterStats.destinations.PSObject.Properties[$echoTarget]) {
       $afterCount = [int64]$afterStats.destinations.PSObject.Properties[$echoTarget].Value
     }
     if ($afterCount -le $beforeCount) {
-      throw "[$Tag] Primary TestISP destination counter for $echoTarget did not advance ($beforeCount -> $afterCount)."
+      throw "[$Tag] $($Isp.alias) destination counter for $echoTarget did not advance ($beforeCount -> $afterCount)."
     }
-    Write-Host "[$Tag] Verified live routed HTTP traffic via $($primaryIsp.alias) ($beforeCount -> $afterCount)"
+    Write-Host "[$Tag] Verified live routed HTTP traffic via $($Isp.alias) ($beforeCount -> $afterCount)"
   }
 
   $passedCases = 0
@@ -724,6 +741,7 @@ setInterval(() => {}, 60000);
     throw "Expected 4 passed installer cases, got $passedCases"
   }
   Write-Host "INSTALLER SUITE SUMMARY ($Arch): $passedCases/4 cases passed"
+  . (Join-Path $PSScriptRoot 'test-signed-updates.ps1')
 } catch {
   Save-SuiteDiagnostics 'failure'
   throw

@@ -490,6 +490,23 @@ jobs:
           node --test scripts/gvisor-diff.test.mjs scripts/repeat-close-tests.test.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: go vet ./internal/... ./cmd/... ./tests/...
+      - name: Prove the updater survives worker job and parent exit
+        if: runner.os == 'Windows'
+        env:
+          NETSWITCH_UPDATE_PROCESS_REQUIRED: '1'
+        run: go test -v -count=1 -timeout=2m -run '^TestDetachedUpdaterSurvivesWorkerJobAndParentExit$' ./internal/lifecycle
+      - name: Check signatures against official Minisign
+        if: matrix.name == 'Linux x64'
+        shell: bash
+        env:
+          NETSWITCH_MINISIGN_REQUIRED: '1'
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y minisign
+          minisign -v
+          go test -v -count=1 -timeout=2m -run '^TestUpdateSigningMinisignInteroperability$' ./internal/lifecycle
+          go test -v -count=1 -timeout=2m -tags=lifecycle_test ./internal/updates
       - name: Held hostile engine ownership folder through startup and recovery
         if: runner.os == 'Windows'
         env:
@@ -1085,7 +1102,8 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.installer != 'false') }}
     name: Installer smoke test
     runs-on: windows-latest
-    timeout-minutes: 45
+    # Four existing migration cases plus 17 signed-update transaction cases.
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh
@@ -1123,7 +1141,7 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.installer != 'false') }}
     name: Installer smoke test (ARM64)
     runs-on: windows-11-arm
-    timeout-minutes: 45
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh

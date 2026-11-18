@@ -16,6 +16,7 @@ const GB = 1024 * MB;
 const MAX_KEYS = 4;
 const MAX_KEYS_NARROW = 3;
 const narrowWindow = matchMedia('(max-width: 640px)');
+const compactWindow = matchMedia('(max-width: 480px)');
 
 const els = {
   status: document.getElementById('routing-status'),
@@ -1197,9 +1198,110 @@ function actionButton(label, busyLabel, name, task, { quiet = false } = {}) {
     class: quiet ? 'button button-quiet' : 'button',
     type: 'button',
     text: busyAction === name ? busyLabel : label,
-    disabled: Boolean(busyAction),
+    'data-focus': name,
+    'aria-disabled': busyAction ? 'true' : null,
     onclick: () => run(name, task),
   });
+}
+
+const UPDATE_BUSY_PHASES = new Set(['downloading', 'verifying', 'ready', 'preparing', 'snapshotted', 'applying', 'checking', 'rolling-back']);
+
+function updateBusy() {
+  return UPDATE_BUSY_PHASES.has(state?.updateStatus?.phase);
+}
+
+function applyUpdateButton(version, retry = false) {
+  return actionButton(retry ? 'Try again' : 'Update now', 'Starting…', 'update-apply',
+    () => api('/api/update/apply', { version }));
+}
+
+function availableUpdateAction(offer) {
+  if (state.features?.signedUpdates) return applyUpdateButton(offer.version);
+  // The same UI is retained by the frozen 0.3.x reference server. It does not
+  // advertise the native installer capability, so preserve its manual flow.
+  return h('a', { class: 'button', href: offer.installer, target: '_blank', rel: 'noopener noreferrer', text: 'Download', 'data-focus': 'update-download' });
+}
+
+function updateNotice() {
+  const status = state.updateStatus;
+  const offer = state.update;
+  if (!status && !offer) return null;
+  const version = status?.version ?? offer.version;
+  const dismiss = (label = 'Dismiss') => actionButton(label, 'Hiding…', 'update-status-dismiss',
+    () => api('/api/update/status-dismiss', { operation: status.operation }), { quiet: true });
+  let node;
+  switch (status?.phase) {
+    case 'downloading':
+      node = notice('update', `Downloading Net Switch ${version}…`, [
+        h('div', { class: 'update-download' },
+          h('span', { class: 'update-size' }),
+          h('progress', { class: 'update-progress', 'aria-label': `Downloading Net Switch ${version}` })),
+      ]);
+      break;
+    case 'verifying':
+      node = notice('update', `Checking signature for Net Switch ${version}…`, [h('span', { class: 'update-size' })]);
+      node.dataset.icon = 'verified';
+      break;
+    case 'ready':
+    case 'preparing':
+    case 'snapshotted':
+    case 'applying':
+    case 'checking':
+    case 'rolling-back':
+      node = notice('update', `Installing Net Switch ${version}… Routing reconnects in a moment.`);
+      break;
+    case 'download-error':
+      node = notice('error', `Couldn’t download Net Switch ${version}.`, [applyUpdateButton(version, true), dismiss('Not now')]);
+      break;
+    case 'signature-error':
+      node = notice('error', `Net Switch ${version} failed its signature check and wasn’t installed.`, [dismiss()]);
+      break;
+    case 'rolled-back':
+      node = notice('error', `Couldn’t install Net Switch ${version}. Kept ${status.previousVersion} with your settings.`,
+        [applyUpdateButton(version, true), dismiss()]);
+      break;
+    case 'failed':
+      node = notice('error', `Couldn’t install Net Switch ${version}.`, [dismiss()], status.error);
+      break;
+    case 'reboot-required':
+      node = notice('status', `Updated to ${version}. Restart Windows when convenient to finish.`, [dismiss()]);
+      break;
+    default:
+      if (!offer) return null;
+      const manual = !offer.packageManager && !state.features?.signedUpdates;
+      const message = manual
+        ? `Net Switch ${offer.version} is out (you have ${state.version}). Download it and run the installer: it updates this copy and keeps your settings.`
+        : `Net Switch ${offer.version} is out.${offer.packageManager ? ' Update with your package manager.' : ''}`;
+      node = notice('update', message, [
+        ...(!offer.packageManager ? [availableUpdateAction(offer)] : []),
+        h('a', { class: 'button button-quiet', href: offer.page, target: '_blank', rel: 'noopener noreferrer', text: 'What’s new', 'data-focus': 'update-notes' }),
+        actionButton('Not now', 'Hiding…', 'update-dismiss', () => api('/api/update/dismiss', { version: offer.version }), { quiet: true }),
+      ]);
+  }
+  node.dataset.update = status?.phase ?? 'available';
+  // Byte progress is updated in place below. It must not replace the buttons,
+  // collapse Details or repeatedly announce an unchanged status sentence.
+  node.dataset.noticeKey = JSON.stringify([status?.phase, status?.operation, version, status?.previousVersion, status?.error, offer?.page, offer?.packageManager, state.features?.signedUpdates]);
+  if (node.dataset.kind !== 'error') node.querySelector('.notice-body p').setAttribute('role', 'status');
+  return node;
+}
+
+function renderUpdateProgress() {
+  const node = els.notices.querySelector('[data-update]');
+  const status = state?.updateStatus;
+  if (!node || !status) return;
+  const size = Math.max(0, Number(status.size) || 0);
+  const downloaded = Math.min(size || Infinity, Math.max(0, Number(status.downloaded) || 0));
+  const number = new Intl.NumberFormat(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  const label = node.querySelector('.update-size');
+  if (label) label.textContent = status.phase === 'downloading'
+    ? `${number.format(downloaded / MB)}${size ? ` / ${number.format(size / MB)}` : ''} MB`
+    : `${number.format(size / MB)} MB`;
+  const progress = node.querySelector('progress');
+  if (progress) {
+    if (size > 0) { progress.max = size; progress.value = downloaded; }
+    else progress.removeAttribute('value');
+  }
 }
 
 // The Wi-Fi line Windows' Wi-Fi settings are about, for their notices.
@@ -1210,33 +1312,22 @@ function wifiName() {
 
 function renderNotices() {
   const list = [];
+  const updating = updateBusy();
   if (!token) {
     list.push(notice('error', 'Open Net Switch from its shortcut.'));
-  } else if (outdated) {
+  } else if (outdated && !updating) {
     list.push(
       notice('error', 'This window is from an earlier session of Net Switch. Close it and open Net Switch from its shortcut.'),
     );
-  } else if (unreachable) {
+  } else if (unreachable && !updating) {
     list.push(notice('error', 'Net Switch isn’t running. Open it again from its shortcut.'));
+  }
+  if (state && ((!unreachable && !outdated) || updating)) {
+    const update = updateNotice();
+    if (update) list.push(update);
   }
   if (state && !unreachable && !outdated) {
     const { routing, setup } = state;
-    // A newer release. The download is an ordinary one in the browser; the
-    // installer then updates this copy and keeps the settings.
-    const update = state.update;
-    if (update) {
-      list.push(
-        notice(
-          'update',
-          `Net Switch ${update.version} is out (you have ${state.version}). Download it and run the installer: it updates this copy and keeps your settings.`,
-          [
-            h('a', { class: 'button', href: update.installer, target: '_blank', rel: 'noopener noreferrer', text: 'Download' }),
-            h('a', { class: 'button button-quiet', href: update.page, target: '_blank', rel: 'noopener noreferrer', text: 'What’s new' }),
-            actionButton('Not now', 'Hiding…', 'update-dismiss', () => api('/api/update/dismiss', { version: update.version }), { quiet: true }),
-          ],
-        ),
-      );
-    }
     if (routing.status === 'error' && routing.error) {
       const [first, ...rest] = routing.error.split('\n');
       const canRetry = state.elevated || state.mode === 'proxy';
@@ -1355,11 +1446,12 @@ function renderNotices() {
   // While a panel is open its own error line shows this.
   if (actionError && !panel) list.push(notice('error', actionError));
 
-  const signature = JSON.stringify([list.map((item) => item.textContent), busyAction]);
+  const signature = JSON.stringify([list.map((item) => item.dataset.noticeKey ?? item.textContent), busyAction]);
   if (els.notices.dataset.signature !== signature) {
-    els.notices.replaceChildren(...list);
+    rebuildKeepingFocus(els.notices, () => list);
     els.notices.dataset.signature = signature;
   }
+  renderUpdateProgress();
 }
 
 // ------------------------------------------------------------ channel strips
@@ -1407,6 +1499,9 @@ function createRow(app) {
 }
 
 function maxKeys() {
+  // Three route keys consume 240px and erase the app name at phone widths.
+  // Use the existing route picker when those choices no longer fit.
+  if (compactWindow.matches) return 2;
   return narrowWindow.matches ? MAX_KEYS_NARROW : MAX_KEYS;
 }
 
@@ -1777,7 +1872,7 @@ function rebuildKeepingFocus(container, build, fallbackKey = null) {
   const key = inside ? (active.dataset.focus ?? fallbackKey) : null;
   let selection = null;
   if (inside && typeof active.selectionStart === 'number') selection = [active.selectionStart, active.selectionEnd];
-  container.replaceChildren(...build());
+  container.replaceChildren(...build().filter((child) => child !== null && child !== undefined && child !== false));
   if (!key) return;
   // A control that is gone (Make main line, once the line is main) hands the
   // focus to the panel's Close, so it never drops out of the panel.
@@ -3115,19 +3210,19 @@ function updateChecksValue() {
   return typeof value === 'boolean' ? value : null;
 }
 
-// Check now, and what it found. A newer release gets its download right here;
+// Check now, and what it found. A newer release can be installed right here;
 // the notice in the window offers it too.
 function updateCheckRow() {
   const checking = busyAction === 'update-check';
   const found = lastUpdateCheck;
-  let text = 'See whether a newer version is out.';
-  if (checking) text = 'Asking GitHub…';
-  else if (found?.result === 'available' && state.update) text = `Net Switch ${state.update.version} is out.`;
-  else if (found?.result === 'latest') text = `You have the latest version${state.version ? ` (${state.version})` : ''}.`;
+  let text = 'Up to date';
+  if (checking) text = 'Checking…';
+  else if (updateBusy()) text = 'Updating…';
+  else if (state.update) text = `Net Switch ${state.update.version} is out.${state.update.packageManager ? ' Update with your package manager.' : ''}`;
   else if (found?.result === 'failed') text = 'Couldn’t reach GitHub. Check your connection and try again.';
-  const download =
-    !checking && found?.result === 'available' && state.update
-      ? h('a', { class: 'button', href: state.update.installer, target: '_blank', rel: 'noopener noreferrer', text: 'Download' })
+  const update =
+    !checking && !updateBusy() && state.update && !state.update.packageManager
+      ? availableUpdateAction(state.update)
       : null;
   return h(
     'div',
@@ -3136,15 +3231,15 @@ function updateCheckRow() {
     h(
       'div',
       { class: 'setting-actions' },
-      download,
+      update,
       h('button', {
-        class: download ? 'button button-quiet' : 'button',
+        class: update ? 'button button-quiet' : 'button',
         type: 'button',
         'data-focus': 'update-check',
         text: checking ? 'Checking…' : 'Check now',
-        'aria-disabled': busyAction ? 'true' : null,
+        'aria-disabled': busyAction || updateBusy() ? 'true' : null,
         onclick: () => {
-          if (busyAction) return;
+          if (busyAction || updateBusy()) return;
           run('update-check', async () => {
             const answer = await api('/api/update/check', {});
             lastUpdateCheck = answer.check ?? null;
@@ -3165,7 +3260,6 @@ function buildSettingsPanel() {
       switchRow({
         id: 'setting-autostart',
         name: 'Start with Windows',
-        help: 'Open Net Switch when you sign in to Windows.',
         checked: settings.autostart,
         busy: busyAction === 'autostart',
         disabled: busy,
@@ -3180,7 +3274,6 @@ function buildSettingsPanel() {
       switchRow({
         id: 'setting-updates',
         name: 'Check for updates',
-        help: 'Net Switch asks GitHub twice a day whether a newer version is out. It never installs anything by itself.',
         checked: checks,
         busy: busyAction === 'update-checks',
         disabled: busy,
@@ -3245,7 +3338,7 @@ function buildSettingsPanel() {
           h('p', {
             class: 'field-help',
             id: 'probe-targets-help',
-            text: 'Net Switch checks each line’s internet by connecting to these through that line. Write each as address:port, separated by commas.',
+            text: 'address:port, comma-separated',
           }),
         ),
       ),
@@ -3407,9 +3500,9 @@ els.quit.addEventListener('click', quit);
 els.openSettings.addEventListener('click', openSettingsPanel);
 els.addApp.addEventListener('click', openAppsPanel);
 els.addProxy?.addEventListener('click', () => openProxyForm(null));
-narrowWindow.addEventListener('change', () => {
-  if (state) render();
-});
+for (const breakpoint of [narrowWindow, compactWindow]) {
+  breakpoint.addEventListener('change', () => { if (state) render(); });
+}
 window.addEventListener('hashchange', () => {
   const next = readToken();
   if (!next || next === token) return;

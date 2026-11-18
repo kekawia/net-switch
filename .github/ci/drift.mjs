@@ -255,7 +255,7 @@ export function commands(text) {
       // A redirection's target is not a command.
       if (char === '>' || char === '<') {
         index += 1;
-        while ('>&12'.includes(text[index] ?? '')) index += 1;
+        while (index < text.length && '>&12'.includes(text[index])) index += 1;
         while (text[index] === ' ') index += 1;
         while (index < text.length && !/\s/.test(text[index])) index += 1;
         continue;

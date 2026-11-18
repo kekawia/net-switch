@@ -61,24 +61,27 @@ type MigrateProfilesResult struct {
 
 // MigrateOptions configures `netswitchctl migrate`.
 type MigrateOptions struct {
-	AppDir   string
-	StageDir string
-	Version  string
-	Owner    string
-	Profile  string
-	DataDir  string
-	OutPath  string
+	AppDir          string
+	StageDir        string
+	Version         string
+	Owner           string
+	Profile         string
+	DataDir         string
+	OutPath         string
+	InstallerSource string
 }
 
 // InstallVersionedOptions configures `netswitchctl install --app-dir ... --version ...`.
 type InstallVersionedOptions struct {
-	AppDir       string
-	StageDir     string
-	Version      string
-	Owner        string
-	DataDir      string
-	Mode         string
-	OwnerBackend string
+	AppDir          string
+	StageDir        string
+	Version         string
+	Owner           string
+	DataDir         string
+	Mode            string
+	OwnerBackend    string
+	InstallerSource string
+	UpdateOperation string
 }
 
 // MigrationJournal persists every phase of the 0.3.x -> 1.0 transaction in
@@ -106,7 +109,9 @@ type MigrationJournal struct {
 	LastError           string                  `json:"lastError,omitempty"`
 	// Upgrade marks a journal written by a 1.0 to 1.0 install, which reuses the
 	// health check. It has no 0.3.x state to go back to.
-	Upgrade bool `json:"upgrade,omitempty"`
+	Upgrade         bool   `json:"upgrade,omitempty"`
+	UpdateOperation string `json:"updateOperation,omitempty"`
+	UpdateWanted    bool   `json:"updateWanted,omitempty"`
 }
 
 type migrationHealthReport struct {
@@ -881,6 +886,20 @@ func copyNoFollowFile(src, dst string) error {
 	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
 		return err
 	}
+	return copyNoFollowFileWith(src, dst, func(path string) (*os.File, error) {
+		name, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return nil, err
+		}
+		h, err := windows.CreateFile(name, windows.GENERIC_WRITE, 0, nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+		if err != nil {
+			return nil, err
+		}
+		return os.NewFile(uintptr(h), path), nil
+	})
+}
+
+func copyNoFollowFileWith(src, dst string, create func(string) (*os.File, error)) error {
 	srcPtr, err := windows.UTF16PtrFromString(src)
 	if err != nil {
 		return err
@@ -901,16 +920,10 @@ func copyNoFollowFile(src, dst string) error {
 	}
 
 	tempDst := dst + "." + randomID()[:16] + ".tmp"
-	dstPtr, err := windows.UTF16PtrFromString(tempDst)
+	outFile, err := create(tempDst)
 	if err != nil {
 		return err
 	}
-	outHandle, err := windows.CreateFile(dstPtr, windows.GENERIC_WRITE,
-		0, nil, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-	if err != nil {
-		return err
-	}
-	outFile := os.NewFile(uintptr(outHandle), tempDst)
 	_, copyErr := io.Copy(outFile, inFile)
 	syncErr := outFile.Sync()
 	closeErr := outFile.Close()
@@ -933,10 +946,31 @@ func copyStageTree(stageDir, appDir, versionDir string) error {
 	if err := VerifyStageChecksums(stageDir); err != nil {
 		return fmt.Errorf("verify temporary stage %s: %w", stageDir, err)
 	}
+	// Rollback normally returns to an immutable folder which the old desktop
+	// still has mapped. Reuse it only after checking every file against the
+	// kept installer's exact manifest; never delete a live matching version.
+	if wintrust.Path(versionDir, false) == nil && VerifyStageChecksums(versionDir) == nil {
+		current, currentErr := readNoFollowRegularFile(filepath.Join(versionDir, "STAGE-SHA256SUMS.txt"), 4<<20)
+		staged, stagedErr := readNoFollowRegularFile(filepath.Join(stageDir, "STAGE-SHA256SUMS.txt"), 4<<20)
+		if currentErr == nil && stagedErr == nil && bytes.Equal(current, staged) {
+			return nil
+		}
+	}
+	if marker, exists, err := readNoFollowMarker(filepath.Join(appDir, "current")); err != nil {
+		return err
+	} else if exists {
+		sub, err := ParseCurrentMarker(marker)
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(filepath.Join(appDir, sub), versionDir) {
+			return errors.New("the running version differs from this installer; install a newer version to repair it")
+		}
+	}
 	if err := os.MkdirAll(appDir, 0755); err != nil {
 		return err
 	}
-	if err := removeNoFollowTree(versionDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removeInactiveVersion(appDir, versionDir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := os.MkdirAll(versionDir, 0755); err != nil {
@@ -971,6 +1005,28 @@ func copyStageTree(stageDir, appDir, versionDir string) error {
 		return nil
 	}
 	return copyWalk(stageDir, versionDir)
+}
+
+// Cleanup may follow a rejected stage as well as a successful copy. The caller
+// must never delete the current version merely because validation refused it.
+func removeInactiveVersion(appDir, versionDir string) error {
+	if !filepath.IsAbs(appDir) || !strings.EqualFold(filepath.Dir(versionDir), filepath.Clean(appDir)) {
+		return errors.New("version cleanup escaped the installation root")
+	}
+	marker, exists, err := readNoFollowMarker(filepath.Join(appDir, "current"))
+	if err != nil {
+		return err
+	}
+	if exists {
+		sub, err := ParseCurrentMarker(marker)
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(filepath.Join(appDir, sub), versionDir) {
+			return errors.New("refusing to remove the current version")
+		}
+	}
+	return removeNoFollowTree(versionDir)
 }
 
 func removeNoFollowTree(target string) error {
@@ -1423,7 +1479,7 @@ func Migrate(ctx context.Context, opts MigrateOptions) error {
 						return nil
 					}
 					// 0.3.x is gone, so what is left is an ordinary upgrade.
-					return InstallVersioned(ctx, InstallVersionedOptions{AppDir: opts.AppDir, StageDir: opts.StageDir, Version: opts.Version, Owner: opts.Owner, DataDir: opts.DataDir})
+					return InstallVersioned(ctx, InstallVersionedOptions{AppDir: opts.AppDir, StageDir: opts.StageDir, Version: opts.Version, Owner: opts.Owner, DataDir: opts.DataDir, InstallerSource: opts.InstallerSource})
 				case "rollback":
 					if rbErr := rollbackMigration(ctx, prev); rbErr != nil {
 						return fmt.Errorf("recover interrupted migration (%s): %w", prev.Phase, rbErr)
@@ -1473,27 +1529,36 @@ func Migrate(ctx context.Context, opts MigrateOptions) error {
 	// Phase 2: Staged (stage files if requested, harden, verify SHA-256 & installation, snapshot tasks & runtime).
 	if opts.StageDir != "" {
 		if err := copyStageTree(opts.StageDir, appDir, versionDir); err != nil {
-			_ = removeNoFollowTree(versionDir)
+			_ = removeInactiveVersion(appDir, versionDir)
 			return err
 		}
 	}
 	if err := wintrust.HardenInstallation(appDir, versionDir); err != nil {
 		if opts.StageDir != "" {
-			_ = removeNoFollowTree(versionDir)
+			_ = removeInactiveVersion(appDir, versionDir)
 		}
 		return err
 	}
 	if err := VerifyStageChecksums(versionDir); err != nil {
 		if opts.StageDir != "" {
-			_ = removeNoFollowTree(versionDir)
+			_ = removeInactiveVersion(appDir, versionDir)
 		}
 		return err
 	}
 	if err := service.CheckInstallation(versionDir); err != nil {
 		if opts.StageDir != "" {
-			_ = removeNoFollowTree(versionDir)
+			_ = removeInactiveVersion(appDir, versionDir)
 		}
 		return err
+	}
+	if opts.InstallerSource != "" {
+		architecture, err := verifyHostArchitecture()
+		if err != nil {
+			return err
+		}
+		if err := keepUpdateInstaller(appDir, version, opts.InstallerSource, architecture); err != nil {
+			return fmt.Errorf("keep recovery installer before migration: %w", err)
+		}
 	}
 	tasksSnap, err := win.SnapshotLegacyTasks()
 	if err != nil {
@@ -1771,6 +1836,11 @@ func runMigrationHealthCheck(ctx context.Context, c Config, core *control.Core, 
 	if mj.Phase != "installed" || mj.HealthCheckID == "" {
 		return
 	}
+	if mj.UpdateOperation != "" {
+		if _, err := readActiveUpdateSnapshot(c.Data, mj.UpdateOperation); err != nil {
+			return
+		}
+	}
 	var existing migrationHealthReport
 	if err := Read(filepath.Join(c.Data, "migration-health.json"), &existing); err == nil && existing.ID == mj.HealthCheckID {
 		return
@@ -1799,23 +1869,35 @@ func runMigrationHealthCheck(ctx context.Context, c Config, core *control.Core, 
 		return
 	}
 
-	if mj.RoutingWasOn && len(desired.Policy.Lines) > 0 {
-		if err := core.Routing(hCtx, true); err != nil {
+	if mj.UpdateOperation != "" {
+		if err := core.RestoreUpdateIntent(mj.UpdateOperation, mj.UpdateWanted); err != nil {
+			writeReport(migrationHealthReport{OK: false, Error: "restore update routing choice: " + err.Error()})
+			return
+		}
+	}
+	if mj.RoutingWasOn && len(desired.Policy.Lines) > 0 && (mj.UpdateOperation == "" || core.WantsRouting()) {
+		resume := func() error { return core.Routing(hCtx, true) }
+		if mj.UpdateOperation != "" {
+			resume = func() error { return core.ResumeRouting(hCtx) }
+		}
+		if err := resume(); err != nil {
 			writeReport(migrationHealthReport{OK: false, Error: "resume routing on native engine: " + err.Error()})
 			return
 		}
 		snap := remote.Snapshot()
-		if snap.Status != "on" || snap.Instance == "" || snap.AppliedRevision == 0 {
+		if (snap.Status != "on" || snap.Instance == "" || snap.AppliedRevision == 0) && (mj.UpdateOperation == "" || core.WantsRouting()) {
 			writeReport(migrationHealthReport{OK: false, Error: fmt.Sprintf("unexpected engine snapshot after resume: status=%s instance=%q rev=%d", snap.Status, snap.Instance, snap.AppliedRevision)})
 			return
 		}
-		writeReport(migrationHealthReport{
-			OK:               true,
-			EngineInstanceID: snap.Instance,
-			Revision:         snap.AppliedRevision,
-			RoutingStatus:    snap.Status,
-		})
-		return
+		if snap.Status == "on" {
+			writeReport(migrationHealthReport{
+				OK:               true,
+				EngineInstanceID: snap.Instance,
+				Revision:         snap.AppliedRevision,
+				RoutingStatus:    snap.Status,
+			})
+			return
+		}
 	}
 
 	if err := remote.Attach(hCtx, true); err != nil {
@@ -2003,7 +2085,8 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 	if !Administrator() {
 		return errors.New("install requires an administrator")
 	}
-	if _, err := verifyHostArchitecture(); err != nil {
+	architecture, err := verifyHostArchitecture()
+	if err != nil {
 		return err
 	}
 	version := strings.TrimPrefix(strings.TrimSpace(opts.Version), "v")
@@ -2038,37 +2121,75 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 		}
 	}
 
-	wasRoutingOn := queryCurrentControlRoutingWanted(ctx)
+	var wasRoutingOn, updateWanted bool
+	var existingStore string
+	if opts.UpdateOperation != "" {
+		dataDir, err = ResolveStore(dataDir)
+		if err != nil {
+			return err
+		}
+		if err := CheckDirectory(dataDir); err != nil {
+			return err
+		}
+		existingStore = dataDir
+		wasRoutingOn, updateWanted, err = updateInstallContext(dataDir, appDir, opts.UpdateOperation, version)
+		if err != nil {
+			return err
+		}
+	} else {
+		if resolved, err := ResolveStore(dataDir); err == nil && CheckDirectory(resolved) == nil {
+			release, err := (Lock{Data: resolved, Name: "update"}).Acquire(ctx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			existingStore = resolved
+		}
+		wasRoutingOn = queryCurrentControlRoutingWanted(ctx)
+	}
 
 	if opts.StageDir != "" {
 		if err := copyStageTree(opts.StageDir, appDir, versionDir); err != nil {
-			_ = removeNoFollowTree(versionDir)
+			_ = removeInactiveVersion(appDir, versionDir)
 			return err
 		}
 	}
 	if err := wintrust.HardenInstallation(appDir, versionDir); err != nil {
 		if opts.StageDir != "" && prevSub != "app-"+version {
-			_ = removeNoFollowTree(versionDir)
+			_ = removeInactiveVersion(appDir, versionDir)
 		}
 		return err
 	}
 	if _, statErr := os.Lstat(filepath.Join(versionDir, "STAGE-SHA256SUMS.txt")); statErr == nil {
 		if err := VerifyStageChecksums(versionDir); err != nil {
 			if opts.StageDir != "" && prevSub != "app-"+version {
-				_ = removeNoFollowTree(versionDir)
+				_ = removeInactiveVersion(appDir, versionDir)
 			}
 			return err
 		}
 	}
 	if err := service.CheckInstallation(versionDir); err != nil {
 		if opts.StageDir != "" && prevSub != "app-"+version {
-			_ = removeNoFollowTree(versionDir)
+			_ = removeInactiveVersion(appDir, versionDir)
 		}
 		return err
 	}
 
-	storeDir, err := PrepareStore(dataDir)
-	if err != nil {
+	if opts.InstallerSource != "" {
+		if err := keepUpdateInstaller(appDir, version, opts.InstallerSource, architecture); err != nil {
+			return fmt.Errorf("keep recovery installer before install: %w", err)
+		}
+	}
+	// A certified store is already protected. Preparing it again would need
+	// exclusive handles to update.lock, which this transaction deliberately
+	// holds (or the detached runner holds for a signed installation).
+	storeDir := existingStore
+	if storeDir == "" {
+		storeDir, err = PrepareStore(dataDir)
+		if err != nil {
+			return err
+		}
+	} else if err := CheckDirectory(storeDir); err != nil {
 		return err
 	}
 	if err := refuseStandInStore(storeDir); err != nil {
@@ -2094,6 +2215,11 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 	}
 
 	rollbackToPrev := func(cause error) error {
+		// The outer signed transaction owns data and binary rollback together.
+		// A failed recovery installer must not switch back to the failed target.
+		if opts.UpdateOperation != "" {
+			return cause
+		}
 		if prevSub == "" {
 			return cause
 		}
@@ -2108,20 +2234,30 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 			}
 		}
 		if prevSub != "app-"+version {
-			_ = removeNoFollowTree(versionDir)
+			_ = removeInactiveVersion(appDir, versionDir)
 		}
 		return cause
 	}
 
 	// Stop existing services cleanly before switching service-config.json.
-	if err := service.Uninstall(ctx); err != nil {
+	stopServices := service.Uninstall
+	if opts.UpdateOperation != "" {
+		stopServices = service.StopForUpdate
+	}
+	if err := stopServices(ctx); err != nil {
 		return rollbackToPrev(err)
 	}
 	cfg := Config{Directory: versionDir, Data: storeDir, Mode: mode, OwnerBackend: opts.OwnerBackend}
 	if err := Save(filepath.Join(storeDir, "service-config.json"), cfg); err != nil {
 		return rollbackToPrev(err)
 	}
-	if err := service.InstallOrReplace(ctx, service.Config{Directory: versionDir, Data: storeDir, Owner: owner.User, Native: true}); err != nil {
+	serviceConfig := service.Config{Directory: versionDir, Data: storeDir, Owner: owner.User, Native: true}
+	if opts.UpdateOperation != "" {
+		err = service.UpdatePaths(ctx, serviceConfig)
+	} else {
+		err = service.InstallOrReplace(ctx, serviceConfig)
+	}
+	if err != nil {
 		return rollbackToPrev(err)
 	}
 	if err := publishRootDesktopFiles(appDir, version, versionDir); err != nil {
@@ -2132,36 +2268,44 @@ func InstallVersioned(ctx context.Context, opts InstallVersionedOptions) error {
 		_ = os.Remove(filepath.Join(storeDir, "migration-health.json"))
 		_ = os.Remove(filepath.Join(storeDir, "migration-health.json.bak"))
 		_ = Save(filepath.Join(storeDir, "migration-journal.json"), MigrationJournal{
-			Phase:         "installed",
-			UpdatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-			AppDir:        appDir,
-			Version:       version,
-			VersionDir:    versionDir,
-			DataDir:       dataDir,
-			StoreDir:      storeDir,
-			Owner:         owner,
-			RoutingWasOn:  wasRoutingOn,
-			HealthCheckID: healthID,
-			Upgrade:       true,
+			Phase:           "installed",
+			UpdatedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+			AppDir:          appDir,
+			Version:         version,
+			VersionDir:      versionDir,
+			DataDir:         dataDir,
+			StoreDir:        storeDir,
+			Owner:           owner,
+			RoutingWasOn:    wasRoutingOn,
+			HealthCheckID:   healthID,
+			Upgrade:         true,
+			UpdateOperation: opts.UpdateOperation,
+			UpdateWanted:    updateWanted,
 		})
-		if err := service.Activate(ctx); err != nil {
+		activate := service.Activate
+		if opts.UpdateOperation != "" {
+			activate = service.ActivateAfterUpdate
+		}
+		if err := activate(ctx); err != nil {
 			return rollbackToPrev(err)
 		}
 		if err := waitForMigrationHealth(ctx, storeDir, owner.User, healthID); err != nil {
 			return rollbackToPrev(err)
 		}
 		_ = Save(filepath.Join(storeDir, "migration-journal.json"), MigrationJournal{
-			Phase:         "committed",
-			UpdatedAt:     time.Now().UTC().Format(time.RFC3339Nano),
-			AppDir:        appDir,
-			Version:       version,
-			VersionDir:    versionDir,
-			DataDir:       dataDir,
-			StoreDir:      storeDir,
-			Owner:         owner,
-			RoutingWasOn:  wasRoutingOn,
-			HealthCheckID: healthID,
-			Upgrade:       true,
+			Phase:           "committed",
+			UpdatedAt:       time.Now().UTC().Format(time.RFC3339Nano),
+			AppDir:          appDir,
+			Version:         version,
+			VersionDir:      versionDir,
+			DataDir:         dataDir,
+			StoreDir:        storeDir,
+			Owner:           owner,
+			RoutingWasOn:    wasRoutingOn,
+			HealthCheckID:   healthID,
+			Upgrade:         true,
+			UpdateOperation: opts.UpdateOperation,
+			UpdateWanted:    updateWanted,
 		})
 	}
 	pruneSupersededVersionDirs(appDir, "app-"+version, prevSub)

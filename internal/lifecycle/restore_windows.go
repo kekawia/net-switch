@@ -2,6 +2,7 @@ package lifecycle
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	js "github.com/kekawia/net-switch/internal/jsvalue"
 	win "github.com/kekawia/net-switch/internal/platform/windows"
@@ -57,6 +59,16 @@ func RestoreWindows(dataDir string) error {
 	if err := CheckDirectory(resolved); err != nil {
 		return err
 	}
+	// Preparation exclusively opens the tree, including its lock files. Take
+	// update.lock only after that trust/provenance check, then serialize every
+	// actual Windows change and Undo write against update application.
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	release, err := (Lock{Data: resolved, Name: "update"}).Acquire(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	return restoreWindowsWith(
 		resolved,
 		durableFiles{},

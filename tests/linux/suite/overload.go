@@ -764,6 +764,7 @@ func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends m
 			"--rate", strconv.Itoa(rate), "--timeout", "2000", "--times"}})
 	}
 	refusals, sends = map[string]map[int64]int{}, map[string]map[int64]int{}
+	kernelTotal := map[int64]int{}
 	var firstWhole, lastWhole int64 // the whole seconds every app sent through
 	sent, refused, answered := 0, 0, 0
 	for i, name := range names {
@@ -778,12 +779,26 @@ func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends m
 		e.T.Require(span > 0 && float64(sockets)/span >= float64(rate)*9/10,
 			"capped %s sent at %d a second or more (%d over %.2f s)", name, rate*9/10, sockets, span)
 		refusals[name], sends[name] = map[int64]int{}, map[int64]int{}
+		e.T.Require(len(r.TimestampErrors) == 0 && len(r.KernelRefusedAt) == r.Refused && len(r.RefusedAt) == r.Refused,
+			"capped %s has one kernel timestamp per refusal (%d kernel, %d handled, %d refused, errors %v)", name, len(r.KernelRefusedAt), len(r.RefusedAt), r.Refused, r.TimestampErrors)
+		kernelSeconds := map[int64]int{}
+		var minDelay, maxDelay int64
+		for index, stamp := range r.KernelRefusedAt {
+			kernelSeconds[stamp/1000]++
+			kernelTotal[stamp/1000]++
+			delay := r.RefusedAt[index] - stamp
+			if index == 0 || delay < minDelay {
+				minDelay = delay
+			}
+			maxDelay = max(maxDelay, delay)
+		}
 		for _, t := range r.RefusedAt {
 			refusals[name][t/1000]++
 		}
 		for _, t := range r.SentAt {
 			sends[name][t/1000]++
 		}
+		e.T.Logf("REFUSAL CLOCK %s: kernel=%v handled=%v handling-delay-ms=%d..%d", name, kernelSeconds, refusals[name], minDelay, maxDelay)
 		if i == 0 {
 			firstWhole, lastWhole = first/1000+1, last/1000-1
 		} else {
@@ -793,6 +808,7 @@ func (e *Env) cappedFloods(names []string, sockets, rate int) (refusals, sends m
 		sent += r.Sent
 		refused += r.Refused
 	}
+	e.T.Logf("REFUSAL CLOCK all apps: kernel buckets=%v; existing verdict still uses handled buckets", kernelTotal)
 	// The window comes from send times the apps really recorded; check it
 	// before walking it.
 	e.T.Require(lastWhole-firstWhole >= 1 && lastWhole-firstWhole < 60,
@@ -824,7 +840,7 @@ func rejectionNoticesPerApp(e *Env) {
 		worst = max(worst, n)
 	}
 	// A notice sent just before a second ends can arrive just after it.
-	e.T.Check(worst <= noticesPerApp*105/100, "alpha got no more than %d refusal notices in any second (most %d, per second %v)", noticesPerApp, worst, refusals["alpha"])
+	e.T.Check(worst <= noticesPerApp*105/100, "alpha stays within %d notices per second including the existing 5%% delivery-boundary tolerance for its %d/s budget (most %d, per second %v)", noticesPerApp*105/100, noticesPerApp, worst, refusals["alpha"])
 	var low []string
 	for _, sec := range whole {
 		if sends["alpha"][sec] < 2500 || refusals["alpha"][sec] < noticesPerApp*9/10 {
@@ -849,7 +865,7 @@ func rejectionNoticesTotal(e *Env) {
 	for _, n := range total {
 		worst = max(worst, n)
 	}
-	e.T.Check(worst <= noticesTotal*105/100, "together the apps got no more than %d refusal notices in any second (most %d, per second %v)", noticesTotal, worst, total)
+	e.T.Check(worst <= noticesTotal*105/100, "together the apps stay within %d notices per second including the existing 5%% delivery-boundary tolerance for the %d/s budget (most %d, per second %v)", noticesTotal*105/100, noticesTotal, worst, total)
 	var low []string
 	for _, sec := range whole {
 		sent := 0

@@ -544,6 +544,13 @@ func TestSOCKS5UDPAssociateSecurityMTUAndControlLifetime(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
+	// Wait for the control watcher to finish cleanup, without closing the
+	// association on its behalf. The closed flag rejects new work earlier.
+	select {
+	case <-assoc.(*socks5UDPConn).done:
+	case <-waitCtx.Done():
+		t.Fatal("UDP association cleanup did not finish after TCP control closed")
+	}
 	// Association slot must be released when control connection dies.
 	rt, _, _ := d.lookup("p-udp")
 	if got := rt.associations.Load(); got != 0 {

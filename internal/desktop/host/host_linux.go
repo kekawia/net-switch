@@ -91,7 +91,7 @@ func New(cb desktop.UICallbacks) desktop.UI {
 			}
 		},
 		OnOpenUpdate: func(uri string) {
-			if !strings.HasPrefix(uri, desktop.InstallerPrefix) {
+			if !strings.HasPrefix(uri, "https://github.com/kekawia/net-switch/releases/tag/v") {
 				return
 			}
 			cmd := exec.Command("xdg-open", uri)

@@ -106,6 +106,7 @@ var (
 	startDesktopUI = func(cb desktop.UICallbacks) desktop.UI {
 		return desktop.NoopUI{}
 	}
+	launchReplacementDesktop = restartDesktopProcess
 )
 
 // SetDesktopUIFactory installs the platform UI constructor used by Desktop.
@@ -116,15 +117,17 @@ func SetDesktopUIFactory(fn func(desktop.UICallbacks) desktop.UI) {
 }
 
 type desktopRuntime struct {
-	mu        sync.Mutex
-	ui        desktop.UI
-	rpc       *RPC
-	client    *desktop.Client
-	refreshCh chan struct{}
-	quitting  atomic.Bool
-	quitOnce  sync.Once
-	quitDone  chan struct{}
-	cancelRun context.CancelFunc
+	mu          sync.Mutex
+	ui          desktop.UI
+	rpc         *RPC
+	client      *desktop.Client
+	refreshCh   chan struct{}
+	quitting    atomic.Bool
+	restarting  atomic.Bool
+	restartShow atomic.Bool
+	quitOnce    sync.Once
+	quitDone    chan struct{}
+	cancelRun   context.CancelFunc
 }
 
 func (r *desktopRuntime) triggerPoll() {
@@ -213,6 +216,7 @@ func (r *desktopRuntime) runAction(key string, fn func(context.Context, *desktop
 }
 
 func (r *desktopRuntime) requestQuit() {
+	r.restarting.Store(false)
 	r.quitting.Store(true)
 	r.quitOnce.Do(func() {
 		r.mu.Lock()
@@ -237,6 +241,21 @@ func (r *desktopRuntime) requestQuit() {
 }
 
 func Desktop(ctx context.Context, show bool) error {
+	return desktopRun(ctx, show, !show)
+}
+
+func ResumeDesktop(ctx context.Context, show bool) error {
+	return desktopRun(ctx, show, false)
+}
+
+func desktopRun(ctx context.Context, show, signIn bool) (result error) {
+	var rt *desktopRuntime
+	// Registered before the lock/UI cleanups, so it runs after both are closed.
+	defer func() {
+		if rt != nil && rt.restarting.Load() && !rt.quitting.Load() {
+			result = errors.Join(result, launchReplacementDesktop(rt.restartShow.Load()))
+		}
+	}()
 	showReq := make(chan struct{}, 1)
 	lock, err := desktop.AcquireSingleInstance(ctx, desktopScope(), show, func() {
 		select {
@@ -254,7 +273,7 @@ func Desktop(ctx context.Context, show bool) error {
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
 
-	rt := &desktopRuntime{
+	rt = &desktopRuntime{
 		refreshCh: make(chan struct{}, 1),
 		quitDone:  make(chan struct{}),
 		cancelRun: cancelRun,
@@ -275,7 +294,7 @@ func Desktop(ctx context.Context, show bool) error {
 
 	// Only the sign-in entry point requests automatic routing. Reopening a
 	// window must preserve an explicit Turn off or a latched recovery error.
-	first := !show
+	first := signIn
 	wantInitialShow := show
 	backoff := time.Second
 	for runCtx.Err() == nil {
@@ -358,6 +377,9 @@ func Desktop(ctx context.Context, show bool) error {
 					rt.runAction("update", func(cctx context.Context, c *desktop.Client) error {
 						return c.DismissUpdate(cctx, version)
 					})
+				},
+				ApplyUpdate: func(version string) {
+					rt.runAction("update", func(cctx context.Context, c *desktop.Client) error { return c.ApplyUpdate(cctx, version) })
 				},
 				Quit:           rt.requestQuit,
 				FallbackStatus: ShowStatus,
@@ -545,6 +567,22 @@ func desktopSession(ctx context.Context, rt *desktopRuntime, rpc *RPC, show, reg
 				return err
 			}
 			for _, task := range tasks {
+				if task.Operation == "restart-self" {
+					if rt.quitting.Load() {
+						_ = rpc.Call(ctx, map[string]any{"method": "desktop-result", "key": task.ID, "error": "desktop is quitting"}, nil)
+						continue
+					}
+					if visible, ok := ui.(interface{ WindowVisible() bool }); ok {
+						rt.restartShow.Store(visible.WindowVisible())
+					}
+					// Acknowledge before closing the RPC, and never call Quit.
+					if err := rpc.Call(ctx, map[string]any{"method": "desktop-result", "key": task.ID, "value": true}, nil); err != nil {
+						return err
+					}
+					rt.restarting.Store(true)
+					rt.cancelRun()
+					return nil
+				}
 				value, err := DesktopCall(ctx, task.Operation, task.Args)
 				message := ""
 				if err != nil {

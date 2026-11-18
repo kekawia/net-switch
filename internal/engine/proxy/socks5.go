@@ -512,13 +512,13 @@ func (c *socks5UDPConn) Close() error {
 	var closeErr error
 	c.once.Do(func() {
 		c.closed.Store(true)
-		close(c.done)
 		if c.release != nil {
 			c.release()
 		}
 		errUDP := c.udp.Close()
 		errTCP := c.tcp.Close()
 		closeErr = errors.Join(errUDP, errTCP)
+		close(c.done)
 	})
 	return closeErr
 }

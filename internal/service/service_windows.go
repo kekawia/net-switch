@@ -160,17 +160,33 @@ func Query(name string) (Status, error) {
 	return nativeOutcome(name, out), err
 }
 func Start(ctx context.Context, name string) error {
+	return startService(ctx, name, false)
+}
+
+type serviceStarter interface {
+	Query() (svc.Status, error)
+	Start(...string) error
+}
+
+func startService(ctx context.Context, name string, settleStarting bool) error {
 	s, err := open(name, windows.SERVICE_START|windows.SERVICE_QUERY_STATUS)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
+	return startServiceHandle(ctx, name, s, settleStarting)
+}
+
+func startServiceHandle(ctx context.Context, name string, s serviceStarter, settleStarting bool) error {
 	for {
 		state, err := s.Query()
 		if err != nil {
 			return err
 		}
-		if state.State != svc.StopPending {
+		if settleStarting && state.State == svc.Stopped && state.Win32ExitCode != 0 {
+			return fmt.Errorf("%s stopped during startup (exit %d)", name, state.Win32ExitCode)
+		}
+		if state.State != svc.StopPending && (!settleStarting || state.State != svc.StartPending) {
 			break
 		}
 		select {
@@ -179,7 +195,7 @@ func Start(ctx context.Context, name string) error {
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
-	err = s.Start()
+	err := s.Start()
 	if err != nil && err != windows.ERROR_SERVICE_ALREADY_RUNNING {
 		return err
 	}

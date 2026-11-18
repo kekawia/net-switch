@@ -37,7 +37,7 @@ func (c *Core) persistJournal() error {
 
 // routingIntent is a change to the owner's routing choice. A fresh intent
 // also clears the retry backoff and the crash latch.
-type routingIntent struct{ wanted, fresh bool }
+type routingIntent struct{ wanted, fresh, preserveUpdate bool }
 
 // commitIntent writes the owner's routing choice before publishing it. The
 // supervisor reads wanted and the retry schedule without applyMu, so a choice
@@ -78,6 +78,7 @@ func (c *Core) writeJournal(pending *routingIntent) error {
 	failures := append([]int64{}, c.failureTimes...)
 	losses := append([]int64{}, c.adapterLosses...)
 	wanted := c.wanted
+	updateWanted := wanted
 	if pending != nil {
 		wanted = pending.wanted
 		if pending.fresh {
@@ -95,6 +96,20 @@ func (c *Core) writeJournal(pending *routingIntent) error {
 		record["wanted"], record["bootId"] = wanted, c.op.BootID
 		record["lastFailureId"] = failureID
 		record["adapterLosses"] = losses
+		if c.op.Updater != nil {
+			record["updateIntent"] = settings.Delete
+			if status := c.op.Updater.Status(); status != nil && status.Busy() {
+				if saved, ok := c.op.Journal.Values()["updateIntent"].(map[string]any); ok && saved["operation"] == status.Operation {
+					if value, ok := saved["wanted"].(bool); ok {
+						updateWanted = value
+					}
+				}
+				if pending != nil && !pending.preserveUpdate {
+					updateWanted = pending.wanted
+				}
+				record["updateIntent"] = map[string]any{"operation": status.Operation, "wanted": updateWanted}
+			}
+		}
 	}
 	_, err := c.op.Journal.Update(record)
 	if err != nil {

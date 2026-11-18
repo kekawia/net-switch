@@ -289,7 +289,13 @@ func TestNativeControlCutover(t *testing.T) {
 	}
 	c := openClient(t, owner, false)
 	c.must(t, "signin", nil, nil)
-	first := waitRouting(t, c, "native routing on through the installed Control", 60*time.Second, func(s status) bool { return s.Routing == "on" && s.Instance != "" })
+	// Sign-in acknowledges intent, and the remote status becomes on before
+	// Control's post-start ApplyPolicy records the new engine instance. Wait
+	// for both witnesses within the same startup deadline before inspecting
+	// that journal; observing live traffic alone does not join the writer.
+	first := waitRouting(t, c, "native routing and its journal through the installed Control", 60*time.Second, func(s status) bool {
+		return s.Routing == "on" && s.Instance != "" && readControlJournal(t, data).Instance == s.Instance
+	})
 	t.Logf("NATIVE_CONTROL routing=on instance=%s control_pid=%d", first.Instance, first.ControlPID)
 	if runtime.GOOS == "linux" {
 		time.Sleep(time.Second) // the namespace relay follows the TUN's route change

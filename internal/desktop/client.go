@@ -136,6 +136,19 @@ func (c *Client) DismissUpdate(ctx context.Context, version string) error {
 	return err
 }
 
+func (c *Client) CheckForUpdate(ctx context.Context) (map[string]any, error) {
+	return c.doJSON(ctx, http.MethodPost, "/api/update/check", map[string]any{}, 20*time.Second)
+}
+
+func (c *Client) ApplyUpdateState(ctx context.Context, version string) (map[string]any, error) {
+	return c.doJSON(ctx, http.MethodPost, "/api/update/apply", map[string]any{"version": version}, RequestTimeout)
+}
+
+func (c *Client) ApplyUpdate(ctx context.Context, version string) error {
+	_, err := c.ApplyUpdateState(ctx, version)
+	return err
+}
+
 func (c *Client) Quit(ctx context.Context) error {
 	_, err := c.doJSON(ctx, http.MethodPost, "/api/quit", map[string]any{}, QuitRequestTimeout)
 	return err
