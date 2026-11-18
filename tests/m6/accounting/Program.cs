@@ -4,8 +4,8 @@ using Microsoft.Windows.EventTracing.Cpu;
 using System.Text.Json;
 using System.Diagnostics;
 
-// PIDs are sampled before the first traffic window. Match the lifetime at that
-// instant, then follow ETW's lifetime-resolved parent links through process exit.
+// WMI enumerates processes over an interval. Helpers can exit before that
+// enumeration returns. Follow the matched ETW lifetimes through process exit.
 if (args is ["burn"]) {
     using var self = Process.GetCurrentProcess();
     var cpuStart = self.TotalProcessorTime;
@@ -34,13 +34,20 @@ var processes = trace.UseProcesses();
 var usage = trace.UseCpuSchedulingData();
 trace.Process();
 var roots = new HashSet<IProcess>();
+var from = input.RootsFrom ?? input.RootsAt;
+if (from > input.RootsAt) throw new InvalidDataException("Invalid process inventory interval.");
 foreach (var root in input.Roots) {
-    var process = processes.Result.Processes.Single(p => p.Id == root.Pid &&
+    var lifetimes = processes.Result.Processes.Where(p => p.Id == root.Pid).ToArray();
+    var overlaps = lifetimes.Where(p =>
+        String.Equals(Path.GetFileName(p.ImageName), Path.GetFileName(root.Image), StringComparison.OrdinalIgnoreCase) &&
         (p.CreateTime is null || p.CreateTime.Value.DateTimeOffset <= input.RootsAt) &&
-        (p.ExitTime is null || p.ExitTime.Value.DateTimeOffset >= input.RootsAt));
-    if (!String.Equals(Path.GetFileName(process.ImageName), Path.GetFileName(root.Image), StringComparison.OrdinalIgnoreCase))
-        throw new InvalidDataException("Recorded process identity differs from the root inventory.");
-    roots.Add(process);
+        (p.ExitTime is null || p.ExitTime.Value.DateTimeOffset >= from)).ToArray();
+    if (overlaps.Length != 1) {
+        var seen = String.Join(", ", lifetimes.Select(p =>
+            $"{p.ImageName} [{p.CreateTime?.DateTimeOffset:O}, {p.ExitTime?.DateTimeOffset:O}]"));
+        throw new InvalidDataException($"Expected one lifetime for PID {root.Pid} {root.Image} created {root.CreatedAt:O}, observed [{from:O}, {input.RootsAt:O}]. Trace: {seen}");
+    }
+    roots.Add(overlaps[0]);
 }
 bool Included(IProcess? p) {
     while (p is not null) {
@@ -90,6 +97,6 @@ File.WriteAllText(args[2],JsonSerializer.Serialize(new {
     exited = counted.Count(p=>p.ExitTime.HasValue),
     windows = input.Samples.Select((s,i)=>new { s.Streams, s.Pass, s.Bytes, cpuSeconds=TimeSpan.FromTicks(cpu[i]).TotalSeconds })
 }));
-record Root(int Pid,string Image);
+record Root(int Pid,string Image,DateTimeOffset? CreatedAt=null);
 record Window(int Streams,int Pass,long Bytes,DateTimeOffset StartUtc,DateTimeOffset EndUtc);
-record Measurement(DateTimeOffset RootsAt,Root[] Roots,Window[] Samples,int? CalibrationChild,double ExpectedChildSeconds,string? InstallDirectory);
+record Measurement(DateTimeOffset RootsAt,Root[] Roots,Window[] Samples,int? CalibrationChild,double ExpectedChildSeconds,string? InstallDirectory,DateTimeOffset? RootsFrom=null);
