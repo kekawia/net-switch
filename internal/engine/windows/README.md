@@ -102,12 +102,6 @@ same kernel socket, reported unbound, refusing `SO_UPDATE_CONNECT_CONTEXT`).
   at startup (Microsoft's documented `WSAEnumProtocols` check) and the socket's
   own provider (`SO_PROTOCOL_INFOW`) still has `XP1_IFS_HANDLES`, which also
   catches a non-IFS layered provider installed after startup.
-- A download that consumes at least 64 KiB within a 20 ms interval can group
-  short read notifications on one shared 1.2 ms timer. New and idle sockets
-  wake immediately. After 512 KiB, a Windows download can use up to four
-  available 32 KiB loans in one operation. Each loan counts against the same
-  global and per-app limits and goes back before the relay waits. The worker
-  consumes only the prefix accepted by the app-facing TCP endpoint.
 - **Health probes** dial their own Go connections with the identical line
   options. They need blocking HTTP/TLS I/O with deadlines, which Go's network
   package already does correctly, and they are never handed to the relay, so

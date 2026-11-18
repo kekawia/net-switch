@@ -72,10 +72,7 @@ jobs:
         if: always()
         with:
           name: m6-windows-${{ matrix.arch }}-${{ matrix.mode }}
-          path: |
-            dist/installer-logs-${{ matrix.arch }}/m6*
-            dist/installer-logs-${{ matrix.arch }}/failure/netswitch*.log
-            dist/installer-logs-${{ matrix.arch }}/failure/migration-journal.json
+          path: dist/installer-logs-${{ matrix.arch }}/m6*
           if-no-files-found: warn
   linux-soak:
     runs-on: ubuntu-24.04

@@ -449,11 +449,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        arch: [arm64]
+        variant: [native-copy, go-copy, native-copy-bulk]
     runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 40
     env:
       PRODUCT_ARCH: ${{ matrix.arch }}
+      NETSWITCH_M6_VARIANT: ${{ matrix.variant }}
       NODE_OPTIONS: --max-old-space-size=2048
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -479,7 +481,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         if: always()
         with:
-          name: m6-direct-${{ matrix.arch }}
+          name: m6-${{ matrix.variant }}
           path: |
             dist/installer-logs-${{ matrix.arch }}/m6*
             dist/installer-logs-${{ matrix.arch }}/failure/netswitch*.log

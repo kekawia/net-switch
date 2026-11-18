@@ -228,7 +228,7 @@ func (p *readiness) stats() map[string]any {
 
 var relayClockStart = time.Now()
 
-const bulkReadDelay = 1200 * time.Microsecond
+const bulkReadDelay = 400 * time.Microsecond
 const bulkReadWindow = 20 * time.Millisecond
 
 // An active bulk socket can generate a completion for each incoming segment.
@@ -236,7 +236,7 @@ const bulkReadWindow = 20 * time.Millisecond
 // so there is no outstanding payload operation, buffer loan or per-flow timer.
 func (w *socketWatch) readable(wake func()) {
 	until := w.bulkUntil.Load()
-	if until == 0 || int64(time.Since(relayClockStart)) >= until {
+	if m6SocketTrial == "native-copy" || until == 0 || int64(time.Since(relayClockStart)) >= until {
 		wake()
 		return
 	}

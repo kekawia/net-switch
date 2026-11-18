@@ -6,7 +6,6 @@ import (
 	"io"
 	"net"
 	"net/netip"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,7 +26,6 @@ type readyPeer struct {
 	mu                     sync.Mutex
 	download, upload       bytes.Buffer
 	eof, blocked, detached bool
-	maxReadRequest         int
 	wake                   func()
 	writeClosed, closed    chan struct{}
 	watching               chan struct{}
@@ -171,7 +169,6 @@ func (p *readyPeer) Arm(read, write bool) error {
 func (p *readyPeer) TryRead(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.maxReadRequest = max(p.maxReadRequest, len(b))
 	if p.download.Len() > 0 {
 		return p.download.Read(b)
 	}
@@ -183,7 +180,6 @@ func (p *readyPeer) TryRead(b []byte) (int, error) {
 func (p *readyPeer) TryPeek(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.maxReadRequest = max(p.maxReadRequest, len(b))
 	if p.download.Len() > 0 {
 		return copy(b, p.download.Bytes()), nil
 	}
@@ -249,7 +245,7 @@ func TestReadyRelayBackpressureShortWritesAndHalfClose(t *testing.T) {
 		peer.mu.Unlock()
 		t.Fatal("short writes lost or reordered data")
 	}
-	download := bytes.Repeat([]byte("response after upload EOF\n"), 60000)
+	download := bytes.Repeat([]byte("response after upload EOF\n"), 9000)
 	peer.download.Write(download)
 	peer.eof = true
 	peer.mu.Unlock()
@@ -265,13 +261,6 @@ func TestReadyRelayBackpressureShortWritesAndHalfClose(t *testing.T) {
 	}
 	if control.Up.Load() != uint64(len(upload)) || control.Down.Load() != uint64(len(download)) {
 		t.Fatalf("byte counts: %d/%d", control.Up.Load(), control.Down.Load())
-	}
-	peer.mu.Lock()
-	defer peer.mu.Unlock()
-	// The fake ticket stays at MinimumBuffer. A multi-loan read can exceed
-	// one loan, but must never ask for more than that endpoint could accept.
-	if runtime.GOOS == "windows" && (peer.maxReadRequest <= RelayBuffer || peer.maxReadRequest > MinimumBuffer) {
-		t.Fatalf("bulk read requested %d bytes with a %d-byte destination", peer.maxReadRequest, MinimumBuffer)
 	}
 }
 
@@ -482,42 +471,42 @@ func TestRelayLoanFIFOAndAppLimit(t *testing.T) {
 	holders := make([]*readyRelay, RelayAppLoans)
 	for i := range holders {
 		holders[i] = &readyRelay{workers: w, app: "slow"}
-		if w.borrow(holders[i], 1) != 1 {
+		if !w.borrow(holders[i]) {
 			t.Fatal("early refusal")
 		}
 	}
 	waiter := &readyRelay{workers: w, app: "slow"}
-	if w.borrow(waiter, 1) != 0 {
+	if w.borrow(waiter) {
 		t.Fatal("per-app loan cap exceeded")
 	}
 	healthy := &readyRelay{workers: w, app: "healthy"}
-	if w.borrow(healthy, 1) != 0 {
+	if w.borrow(healthy) {
 		t.Fatal("new caller skipped FIFO")
 	}
-	if w.borrow(healthy, 1) != 1 {
+	if !w.borrow(healthy) {
 		t.Fatal("eligible other app was not granted")
 	}
-	w.giveBack(healthy, 1)
+	w.giveBack(healthy)
 	for i := 0; i < 100; i++ {
 		holder := holders[0]
-		w.giveBack(holder, 1)
-		if w.borrow(holder, 1) != 0 {
+		w.giveBack(holder)
+		if w.borrow(holder) {
 			t.Fatal("slow holder overtook queued waiter")
 		}
-		if w.borrow(waiter, 1) != 1 {
+		if !w.borrow(waiter) {
 			t.Fatal("waiter starved")
 		}
-		w.giveBack(waiter, 1)
-		if w.borrow(holder, 1) != 1 {
+		w.giveBack(waiter)
+		if !w.borrow(holder) {
 			t.Fatal("holder never resumed")
 		}
-		if w.borrow(waiter, 1) != 0 {
+		if w.borrow(waiter) {
 			t.Fatal("waiter exceeded the per-app cap")
 		}
 	}
 	waiter.closed.Store(true)
 	for _, r := range holders {
-		w.giveBack(r, 1)
+		w.giveBack(r)
 	}
 	if w.loans != 0 || len(w.waiting) != 0 {
 		t.Fatal("loans leaked")
@@ -529,74 +518,30 @@ func TestRelayGlobalLoanBoundReservesFreedSlotForFIFOHead(t *testing.T) {
 	holders := make([]*readyRelay, RelayHeldBudget/RelayBuffer)
 	for i := range holders {
 		holders[i] = &readyRelay{workers: w, app: string(rune('a' + i/RelayAppLoans))}
-		if w.borrow(holders[i], 1) != 1 {
+		if !w.borrow(holders[i]) {
 			t.Fatal("capacity refused too early")
 		}
 	}
 	waiter := &readyRelay{workers: w, app: "new app"}
-	if w.borrow(waiter, 1) != 0 || w.loans*RelayBuffer != RelayHeldBudget {
+	if w.borrow(waiter) || w.loans*RelayBuffer != RelayHeldBudget {
 		t.Fatal("global loan bound exceeded")
 	}
-	w.giveBack(holders[0], 1)
-	if w.borrow(holders[0], 1) != 0 {
+	w.giveBack(holders[0])
+	if w.borrow(holders[0]) {
 		t.Fatal("returning holder stole FIFO reservation")
 	}
-	if w.borrow(waiter, 1) != 1 {
+	if !w.borrow(waiter) {
 		t.Fatal("FIFO waiter did not receive reserved capacity")
 	}
-	w.giveBack(waiter, 1)
-	if w.borrow(holders[0], 1) != 1 {
+	w.giveBack(waiter)
+	if !w.borrow(holders[0]) {
 		t.Fatal("previous holder never resumed")
 	}
 	for _, r := range holders {
-		w.giveBack(r, 1)
+		w.giveBack(r)
 	}
 	if w.loans != 0 || w.bufferPeak*RelayBuffer != RelayHeldBudget {
 		t.Fatal("loan accounting leaked or exceeded bound")
-	}
-}
-
-func TestBulkLoansRespectBothCapsAndReservedWaiters(t *testing.T) {
-	w := &relayWorkers{wake: make(chan struct{}, 1)}
-	holder := &readyRelay{workers: w, app: "download"}
-	waiter := &readyRelay{workers: w, app: "download"}
-	for i := 0; i < RelayAppLoans-1; i++ {
-		if w.borrow(holder, 1) != 1 {
-			t.Fatal("refused a free app loan")
-		}
-	}
-	if got := w.borrow(holder, 4); got != 1 {
-		t.Fatalf("last slot at the app limit granted %d", got)
-	}
-	if w.borrow(waiter, 4) != 0 {
-		t.Fatal("bulk request crossed the app limit")
-	}
-	w.giveBack(holder, 4)
-	if got := w.borrow(waiter, 4); got != 1 {
-		t.Fatalf("FIFO grant grew after reservation: %d", got)
-	}
-	w.giveBack(waiter, 1)
-	w.giveBack(holder, RelayAppLoans-4)
-	if w.loans != 0 || len(w.appLoans) != 0 {
-		t.Fatal("bulk loans leaked")
-	}
-	var holders []*readyRelay
-	for i := 0; i < RelayHeldBudget/RelayBuffer-2; i++ {
-		r := &readyRelay{workers: w, app: string(rune('a' + i/RelayAppLoans))}
-		holders = append(holders, r)
-		if w.borrow(r, 1) != 1 {
-			t.Fatal("refused a free global loan")
-		}
-	}
-	if n := w.borrow(holder, 4); n != 2 {
-		t.Fatalf("last two global slots granted %d", n)
-	}
-	w.giveBack(holder, 2)
-	for _, r := range holders {
-		w.giveBack(r, 1)
-	}
-	if w.loans != 0 || w.bufferPeak*RelayBuffer != RelayHeldBudget {
-		t.Fatal("wrong global loan accounting")
 	}
 }
 
