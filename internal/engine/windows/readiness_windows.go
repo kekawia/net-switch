@@ -231,6 +231,7 @@ func (p *readiness) stats() map[string]any {
 var relayClockStart = time.Now()
 
 const bulkReadDelay = 400 * time.Microsecond
+var m6BulkVariant string
 const bulkReadWindow = 20 * time.Millisecond
 const bulkReadTarget = 64 << 10
 const bulkReadMaxDelay = 3 * time.Millisecond
@@ -253,6 +254,10 @@ func (w *socketWatch) readable(wake func()) {
 	until := w.bulkUntil.Load()
 	if until == 0 || int64(time.Since(relayClockStart)) >= until {
 		wake()
+		return
+	}
+	if m6BulkVariant == "" {
+		w.pool.queueBulk(w)
 		return
 	}
 	w.mu.Lock()

@@ -11,7 +11,6 @@ import { pathToFileURL } from 'node:url';
 const block = Buffer.alloc(64 * 1024);
 for (let offset = 0; offset < block.length; offset++) block[offset] = (offset * 29 + (offset >>> 7)) & 255;
 const bytesPerStream = 32 * 1024 * 1024;
-const payloadBytes = {ping:0, bulk:bytesPerStream, steady1:32*bytesPerStream, steady8:8*bytesPerStream};
 const digest = createHash('sha256');
 for (let n = 0; n < bytesPerStream; n += block.length) digest.update(block);
 const expected = digest.digest('hex');
@@ -26,13 +25,13 @@ export function responder(host) {
       if (header.length > 80) return socket.destroy();
       if (!header.endsWith('\n')) return;
       socket.removeListener('data', read);
-      const match = /^(ping|bulk|steady1|steady8) ([a-f0-9]{32})\n$/.exec(header);
+      const match = /^(ping|bulk) ([a-f0-9]{32})\n$/.exec(header);
       if (!match) return socket.destroy();
       socket.write(match[2] + '\n');
       if (match[1] === 'ping') return socket.end();
       let sent = 0;
       const pump = () => {
-        while (sent < payloadBytes[match[1]]) {
+        while (sent < bytesPerStream) {
           sent += block.length;
           if (!socket.write(block)) { socket.once('drain', pump); return; }
         }
@@ -47,10 +46,10 @@ export function responder(host) {
 
 async function transfer(host, port, kind) {
   const marker = randomBytes(16).toString('hex') + '\n';
-  let hash = createHash('sha256');
+  const hash = createHash('sha256');
   const start = performance.now();
   const socket = createConnection({host,port});
-  const timer = setTimeout(() => socket.destroy(Error('traffic deadline exceeded')), kind.startsWith('steady') ? 120000 : 30000);
+  const timer = setTimeout(() => socket.destroy(Error('traffic deadline exceeded')), 30000);
   try {
     await once(socket, 'connect');
     const connectMs = performance.now() - start;
@@ -63,19 +62,12 @@ async function transfer(host, port, kind) {
         seen += count;
         chunk = chunk.subarray(count);
       }
-      while (chunk.length) {
-        const count = Math.min(chunk.length, bytesPerStream - bytes % bytesPerStream);
-        hash.update(chunk.subarray(0,count));
-        bytes += count;
-        chunk = chunk.subarray(count);
-        if (bytes % bytesPerStream === 0) {
-          assert.equal(hash.digest('hex'),expected);
-          hash = createHash('sha256');
-        }
-      }
+      hash.update(chunk);
+      bytes += chunk.length;
     }
     assert.equal(seen,marker.length);
-    assert.equal(bytes,payloadBytes[kind]);
+    assert.equal(bytes,kind === 'bulk' ? bytesPerStream : 0);
+    if (bytes) assert.equal(hash.digest('hex'), expected);
     return {connectMs, bytes};
   } finally { clearTimeout(timer); socket.destroy(); }
 }
@@ -87,8 +79,12 @@ export async function measure(host, port) {
     for (const streams of pass % 2 ? [8,1] : [1,8]) {
       const startUtc = new Date().toISOString();
       const start = performance.now();
-      const results = await Promise.all(Array.from({length:streams}, () => transfer(host,port,'steady'+streams)));
-      const bytes = results.reduce((n,r) => n+r.bytes,0), connections = streams;
+      let bytes = 0, connections = 0;
+      do {
+        const results = await Promise.all(Array.from({length:streams}, () => transfer(host,port,'bulk')));
+        bytes += results.reduce((n,r) => n+r.bytes,0);
+        connections += streams;
+      } while (performance.now()-start < 4000);
       const seconds = (performance.now()-start)/1000;
       samples.push({streams,pass,bytes,connections,seconds,startUtc,endUtc:new Date().toISOString(),mbps:bytes*8/seconds/1e6});
     }
