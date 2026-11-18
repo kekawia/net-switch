@@ -450,7 +450,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [arm64]
-        variant: [native-copy, go-copy, native-copy-bulk]
+        variant: [state, state-bulk]
     runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
     timeout-minutes: 40
     env:

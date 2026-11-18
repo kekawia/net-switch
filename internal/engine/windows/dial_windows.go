@@ -176,9 +176,6 @@ func (d *Dialer) DialTCP(ctx context.Context, line string, remote netip.AddrPort
 // choice gets bounded fresh attempts (SYSTEM-DESIGN 5.9); one that still
 // ends refused is counted and kept with the flow.
 func (d *Dialer) DialFlowTCP(ctx context.Context, line string, remote netip.AddrPort, flow platform.FlowIdentity) (platform.TCPConn, error) {
-	if m6SocketTrial == "go-copy" {
-		return limitCopy(d.dialGoSocket(ctx, line, remote, "flow", flow))
-	}
 	native := d.nativeDial
 	if native == nil {
 		if d.pool == nil {
@@ -205,9 +202,6 @@ func (d *Dialer) DialFlowTCP(ctx context.Context, line string, remote netip.Addr
 		d.ports.observe(err)
 		return nil, err
 	}
-	if m6SocketTrial == "native-copy" || m6SocketTrial == "native-copy-bulk" {
-		return limitCopy(nativeCopySocket(c))
-	}
 	return c, nil
 }
 
@@ -216,10 +210,6 @@ func (d *Dialer) DialFlowTCP(ctx context.Context, line string, remote netip.Addr
 // Go's network package already provides; this connection is never handed to
 // the relay, so it is never copied and Go keeps its only descriptor.
 func (d *Dialer) dialProbe(ctx context.Context, line string, remote netip.AddrPort) (net.Conn, error) {
-	return d.dialGoSocket(ctx, line, remote, "probe", platform.FlowIdentity{Destination: remote})
-}
-
-func (d *Dialer) dialGoSocket(ctx context.Context, line string, remote netip.AddrPort, kind string, flow platform.FlowIdentity) (platform.TCPConn, error) {
 	a, source, err := d.Routes.binding(line, remote.Addr().Is6())
 	if err != nil {
 		return nil, err
@@ -236,8 +226,7 @@ func (d *Dialer) dialGoSocket(ctx context.Context, line string, remote netip.Add
 	d.finishDial(note, started, c, err)
 	if err != nil {
 		if outcome.Refused {
-			flow.Destination = remote
-			d.refusals.record("tcp", kind, line, netip.AddrPortFrom(source, 0), flow, outcome.Attempts, err)
+			d.refusals.record("tcp", "probe", line, netip.AddrPortFrom(source, 0), platform.FlowIdentity{Destination: remote}, outcome.Attempts, err)
 		}
 		d.ports.observe(err)
 		return nil, err

@@ -47,7 +47,9 @@ func (r *Runtime) SaveEpoch(epoch uint64) error {
 func (r *Runtime) Stats() any {
 	stats := r.Engine.Stats().(map[string]any)
 	stats["ownerLookup"] = r.owners.Stats()
-	stats["m6Relay"] = map[string]any{"variant":m6SocketTrial, "copies":m6StartedCopies.Load(), "active":m6ActiveCopies.Load()}
+	if p := r.dialer.pool; p != nil && p.states != nil {
+		stats["m6Relay"] = map[string]any{"variant":socketStateMode, "registrations":p.states.registrations.Load(), "fallbacks":p.states.fallbacks.Load()}
+	}
 	stats["socketResources"] = r.dialer.ports.stats()
 	stats["udpSocketExhaustions"] = r.dialer.udpExhaustions.Load()
 	// Refused automatic port choices, per protocol (SYSTEM-DESIGN 5.9): first

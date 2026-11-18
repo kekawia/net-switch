@@ -146,8 +146,8 @@ try {
   $guiLdflags = "-s -w -buildid= -H=windowsgui -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
   $buildTags = @()
   if ($env:NETSWITCH_M6_VARIANT) {
-    if ($env:GITHUB_REF -ne 'refs/heads/codex/m6-cpu-diagnostic' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:NETSWITCH_M6_VARIANT -notin @('native-copy','go-copy','native-copy-bulk')) {throw 'Invalid hosted copy control'}
-    $baseLdflags += " -X github.com/kekawia/net-switch/internal/engine/windows.m6SocketTrial=$env:NETSWITCH_M6_VARIANT"
+    if ($env:GITHUB_REF -ne 'refs/heads/codex/m6-cpu-diagnostic' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:NETSWITCH_M6_VARIANT -notin @('state','state-bulk')) {throw 'Invalid hosted socket-state experiment'}
+    $baseLdflags += " -X github.com/kekawia/net-switch/internal/engine/windows.socketStateMode=$env:NETSWITCH_M6_VARIANT"
   }
   if ($UpdateTestFixture) { $buildTags = @('-tags=lifecycle_test') }
 
