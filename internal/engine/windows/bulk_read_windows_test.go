@@ -6,10 +6,13 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kekawia/net-switch/internal/winhandle"
 )
 
 func TestBulkReadNotificationsLeaveFreshSocketsImmediate(t *testing.T) {
 	p := &readiness{stop: make(chan struct{}), batch: make(map[*socketWatch]struct{}), batchWake: make(chan struct{}, 1)}
+	p.available = func(winhandle.Owner) uint32 { return bulkReadTarget }
 	var calls atomic.Int32
 	done := make(chan struct{}, 1)
 	bulk := &socketWatch{pool: p, wake: func() { calls.Add(1); done <- struct{}{} }}
@@ -59,6 +62,33 @@ func TestBulkReadRequiresRecentVolume(t *testing.T) {
 	c.noteRead(now+2*bulkReadWindow, 1)
 	if c.watch.bulkUntil.Load() != expiry {
 		t.Fatal("an interactive exchange after idle extended the batch window")
+	}
+}
+
+func TestBulkReadDeliversAtWatermarkEOFOrOriginalDeadline(t *testing.T) {
+	p := &readiness{batch: make(map[*socketWatch]struct{}), batchWake: make(chan struct{}, 1)}
+	var bytes uint32 = 1
+	p.available = func(winhandle.Owner) uint32 { return bytes }
+	calls := 0
+	w := &socketWatch{pool: p, wake: func() { calls++ }, batchDue: time.Millisecond}
+	w.deliverBulk(100 * time.Microsecond)
+	if calls != 0 || len(p.batch) != 1 || w.batchDue != time.Millisecond {
+		t.Fatal("short bulk prefix lost its original deadline")
+	}
+	w.deliverBulk(time.Millisecond)
+	if calls != 1 || w.batchDue != 0 {
+		t.Fatal("a partial tail waited past its deadline")
+	}
+	for _, n := range []uint32{0, bulkReadTarget} {
+		bytes = n
+		w.batchDue = time.Millisecond
+		w.deliverBulk(100 * time.Microsecond)
+		if w.batchDue != 0 {
+			t.Fatalf("queued bytes %d did not release the read", n)
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("read callbacks = %d", calls)
 	}
 }
 
