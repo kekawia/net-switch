@@ -228,6 +228,7 @@ func (p *readiness) stats() map[string]any {
 var relayClockStart = time.Now()
 
 const bulkReadDelay = 400 * time.Microsecond
+const bulkReadWindow = 20 * time.Millisecond
 
 // An active bulk socket can generate a completion for each incoming segment.
 // Give these notifications one short shared batch. The bytes stay in Winsock,
@@ -525,7 +526,8 @@ type readySocket struct {
 	watched       bool
 	local, remote net.Addr
 	closed        bool
-	received      uint64 // under mu
+	readWindow    time.Duration // readWindow and windowBytes are protected by mu
+	windowBytes   int
 }
 
 func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
@@ -597,12 +599,21 @@ func (c *readySocket) tryReceive(b []byte, flags uint32) (int, error) {
 	}
 	n, err := socketIOFlags(c.handle, "recv", b, flags)
 	if flags == 0 && n > 0 {
-		c.received += uint64(n)
-		if c.received >= 64<<10 && n < 16<<10 && len(b) >= 16<<10 {
-			c.watch.bulkUntil.Store(int64(time.Since(relayClockStart) + 20*time.Millisecond))
-		}
+		c.noteRead(time.Since(relayClockStart), n)
 	}
 	return n, err
+}
+
+// Count only bytes consumed from the socket. A long-lived interactive flow
+// must not acquire a batching delay merely by accumulating bytes over time.
+func (c *readySocket) noteRead(now time.Duration, n int) {
+	if now-c.readWindow >= bulkReadWindow {
+		c.readWindow, c.windowBytes = now, 0
+	}
+	c.windowBytes += n
+	if c.windowBytes >= 64<<10 && n < 16<<10 {
+		c.watch.bulkUntil.Store(int64(now + bulkReadWindow))
+	}
 }
 func (c *readySocket) TryWrite(b []byte) (int, error) {
 	c.mu.Lock()

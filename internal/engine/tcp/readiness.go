@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -10,7 +11,6 @@ import (
 
 	"github.com/kekawia/net-switch/internal/engine/platform"
 	"gvisor.dev/gvisor/pkg/tcpip"
-	gtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
 )
 
@@ -42,32 +42,12 @@ type relayDirection struct {
 	blocked, finished bool
 }
 
-type relayEvent uint8
-
-const (
-	appReadable relayEvent = 1 << iota
-	appWritable
-	socketReady
-	retryUpload
-	retryDownload
-	retryBoth = retryUpload | retryDownload
-)
-
-func (d *relayDirection) interest(source, destination, retry relayEvent) relayEvent {
-	if d.finished {
-		return 0
-	}
-	if d.blocked {
-		return destination | retry
-	}
-	return source | retry
-}
-
 // Endpoint I/O consumes these adapters synchronously. Reuse them per worker
 // rather than allocating an interface-backed reader/writer for every chunk.
 type relayScratch struct {
 	receive tcpip.SliceWriter
 	discard discardWriter
+	send    bytes.Reader
 	buffer  [RelayBuffer]byte
 }
 
@@ -88,25 +68,24 @@ func (d *discardWriter) Write(b []byte) (int, error) {
 }
 
 type readyRelay struct {
-	workers                 *relayWorkers
-	next                    *readyRelay
-	initializing, scheduled bool       // workers.mu
-	pending, interest       relayEvent // workers.mu
-	closed                  atomic.Bool
-	cancelled               atomic.Bool
-	ctx                     context.Context
-	c                       *connection
-	connection              connection
-	queue                   waiter.Queue
-	forward                 *Forwarder
-	remote                  platform.ReadyTCP
-	watch                   platform.Readiness
-	wq                      *waiter.Queue
-	entry                   waiter.Entry
-	up, down                relayDirection
-	waitBuffer              bool // worker only
-	app                     string
-	queued, granted         bool // workers.bufferMu
+	workers                        *relayWorkers
+	next                           *readyRelay
+	initializing, scheduled, again bool // workers.mu
+	closed                         atomic.Bool
+	cancelled                      atomic.Bool
+	ctx                            context.Context
+	c                              *connection
+	connection                     connection
+	queue                          waiter.Queue
+	forward                        *Forwarder
+	remote                         platform.ReadyTCP
+	watch                          platform.Readiness
+	wq                             *waiter.Queue
+	entry                          waiter.Entry
+	up, down                       relayDirection
+	waitBuffer                     bool // worker only
+	app                            string
+	queued, granted                bool // workers.bufferMu
 }
 
 func newRelayWorkers() *relayWorkers {
@@ -176,7 +155,7 @@ func (w *relayWorkers) grantLocked() {
 		if w.loans < RelayHeldBudget/RelayBuffer && w.appLoans[r.app] < RelayAppLoans {
 			w.reserveLocked(r)
 			r.queued, r.granted = false, true
-			r.notify(retryBoth)
+			r.notify()
 		} else {
 			kept = append(kept, r)
 		}
@@ -192,25 +171,18 @@ func (f *Forwarder) RelayBufferBytes() (int, int) {
 	return w.loans * RelayBuffer, w.bufferPeak * RelayBuffer
 }
 
-func (r *readyRelay) notify(event relayEvent) {
+func (r *readyRelay) notify() {
 	w := r.workers
 	w.mu.Lock()
 	if r.closed.Load() {
 		w.mu.Unlock()
 		return
 	}
-	// While a worker is probing, accumulate every edge. Filter only after
-	// it has published which source or destination blocked that turn.
 	if r.initializing || r.scheduled {
-		r.pending |= event
+		r.again = true
 		w.mu.Unlock()
 		return
 	}
-	if event&r.interest == 0 {
-		w.mu.Unlock()
-		return
-	}
-	r.pending = event
 	r.scheduled = true
 	w.appendLocked(r)
 	w.mu.Unlock()
@@ -240,22 +212,20 @@ func (w *relayWorkers) run() {
 		for {
 			w.mu.Lock()
 			r := w.head
-			var events relayEvent
 			if r != nil {
 				w.head = r.next
 				if w.head == nil {
 					w.tail = nil
 				}
-				events, r.next, r.pending = r.pending, nil, 0
+				r.next, r.again = nil, false
 			}
 			w.mu.Unlock()
 			if r == nil {
 				break
 			}
-			interest := r.step(scratch, events)
+			r.step(scratch)
 			w.mu.Lock()
-			r.interest = interest
-			if r.pending&interest != 0 && !r.closed.Load() {
+			if r.again && !r.closed.Load() {
 				w.appendLocked(r)
 			} else {
 				r.scheduled = false
@@ -278,7 +248,7 @@ func (f *Forwarder) startReadyRelay(ctx context.Context, r *readyRelay, remote p
 	c, wq := r.c, &r.queue
 	r.workers, r.initializing, r.ctx, r.remote, r.wq, r.app, r.forward = f.relays, true, f.ctx, remote, wq, app, f
 	r.cancelled.Store(ctx.Err() != nil)
-	watch, err := remote.Watch(func() { r.notify(socketReady) })
+	watch, err := remote.Watch(r.notify)
 	if err != nil {
 		return err
 	}
@@ -293,27 +263,13 @@ func (f *Forwarder) startReadyRelay(ctx context.Context, r *readyRelay, remote p
 	c.ready.Store(r)
 	f.relays.mu.Lock()
 	r.initializing = false
-	r.interest = retryBoth
 	f.relays.mu.Unlock()
-	r.notify(retryBoth)
+	r.notify()
 	return nil
 }
 
-func (r *readyRelay) cancel() { r.cancelled.Store(true); r.notify(retryBoth) }
-
-func (r *readyRelay) NotifyEvent(mask waiter.EventMask) {
-	var events relayEvent
-	if mask&(waiter.EventHUp|waiter.EventErr) != 0 {
-		events |= retryBoth
-	}
-	if mask&waiter.ReadableEvents != 0 {
-		events |= appReadable
-	}
-	if mask&waiter.WritableEvents != 0 {
-		events |= appWritable
-	}
-	r.notify(events)
-}
+func (r *readyRelay) cancel()                      { r.cancelled.Store(true); r.notify() }
+func (r *readyRelay) NotifyEvent(waiter.EventMask) { r.notify() }
 
 func (f *Forwarder) completeConnection(c *connection) {
 	f.relays.mu.Lock()
@@ -362,51 +318,52 @@ func stackError(err tcpip.Error) error {
 	}
 }
 
-func (r *readyRelay) discardUpload(n int, scratch *relayScratch) error {
-	for n > 0 {
-		scratch.discard = discardWriter{n: n}
-		result, err := r.c.ep.Read(&scratch.discard, tcpip.ReadOptions{})
-		if result.Count < 0 || result.Count > n {
+func (r *readyRelay) read(up bool, b []byte, scratch *relayScratch) (int, error) {
+	if !up {
+		return r.remote.TryPeek(b)
+	}
+	scratch.receive = tcpip.SliceWriter(b)
+	result, err := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{Peek: true})
+	scratch.receive = nil
+	return result.Count, stackError(err)
+}
+
+func (r *readyRelay) discard(up bool, b []byte, scratch *relayScratch) error {
+	for len(b) > 0 {
+		var n int
+		var err error
+		if up {
+			scratch.discard = discardWriter{n: len(b)}
+			result, e := r.c.ep.Read(&scratch.discard, tcpip.ReadOptions{})
+			n, err = result.Count, stackError(e)
+		} else {
+			n, err = r.remote.TryDiscard(b)
+		}
+		if n < 0 || n > len(b) {
 			return io.ErrShortBuffer
 		}
-		n -= result.Count
-		if n == 0 {
+		b = b[n:]
+		if len(b) == 0 {
 			return nil
 		}
 		if err != nil {
-			return stackError(err)
+			return err
 		}
-		if result.Count == 0 {
+		if n == 0 {
 			return io.ErrNoProgress
 		}
 	}
 	return nil
 }
 
-// transfer returns source and destination errors separately so the relay waits
-// on the side that actually stalled. Its caller holds one transient loan.
-func (r *readyRelay) transfer(up bool, scratch *relayScratch) (int, error, error) {
-	if !up {
-		n, readErr, writeErr := r.c.ep.(*gtcp.Endpoint).WriteFromNonblocking(r.remote, scratch.buffer[:])
-		return n, readErr, stackError(writeErr)
+func (r *readyRelay) write(up bool, b []byte, scratch *relayScratch) (int, error) {
+	if up {
+		return r.remote.TryWrite(b)
 	}
-	scratch.receive = tcpip.SliceWriter(scratch.buffer[:])
-	result, readErr := r.c.ep.Read(&scratch.receive, tcpip.ReadOptions{Peek: true})
-	scratch.receive = nil
-	if result.Count < 0 || result.Count > len(scratch.buffer) {
-		return 0, io.ErrShortBuffer, nil
-	}
-	if result.Count == 0 {
-		return 0, stackError(readErr), nil
-	}
-	n, writeErr := r.remote.TryWrite(scratch.buffer[:result.Count])
-	if n < 0 || n > result.Count {
-		return 0, nil, io.ErrShortWrite
-	}
-	if err := r.discardUpload(n, scratch); err != nil {
-		return 0, err, nil
-	}
-	return n, nil, writeErr
+	scratch.send.Reset(b)
+	n, err := r.c.ep.Write(&scratch.send, tcpip.WriteOptions{})
+	scratch.send.Reset(nil)
+	return int(n), stackError(err)
 }
 
 func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch) (bool, error) {
@@ -414,30 +371,53 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 		return false, nil
 	}
 	d.blocked = false
-	// Yield at a fixed quantum even if both endpoints stay ready.
+	// A busy flow yields after a bounded amount of work, so it cannot starve
+	// other readiness events, the ordered TUN reader, or process lookups.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
 		if !r.workers.borrow(r) {
 			return false, nil
 		}
-		n, readErr, writeErr := r.transfer(up, scratch)
-		r.workers.giveBack(r)
-		if n > 0 {
-			moved += n
-			if up {
-				r.c.up.Add(uint64(n))
-				r.c.ticket.Add(uint64(n), 0)
-			} else {
-				r.c.down.Add(uint64(n))
-				r.c.ticket.Add(0, uint64(n))
+		peeked, readErr := r.read(up, scratch.buffer[:], scratch)
+		if peeked < 0 || peeked > len(scratch.buffer) {
+			r.workers.giveBack(r)
+			return false, io.ErrShortBuffer
+		}
+		if peeked > 0 {
+			n, err := r.write(up, scratch.buffer[:peeked], scratch)
+			if n < 0 || n > peeked {
+				r.workers.giveBack(r)
+				return false, io.ErrShortWrite
 			}
+			if consumeErr := r.discard(up, scratch.buffer[:n], scratch); consumeErr != nil {
+				r.workers.giveBack(r)
+				return false, consumeErr
+			}
+			r.workers.giveBack(r)
+			if n > 0 {
+				moved += n
+				if up {
+					r.c.up.Add(uint64(n))
+					r.c.ticket.Add(uint64(n), 0)
+				} else {
+					r.c.down.Add(uint64(n))
+					r.c.ticket.Add(0, uint64(n))
+				}
+			}
+			if errors.Is(err, platform.ErrWouldBlock) {
+				d.blocked = true
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			if n == 0 {
+				return false, io.ErrNoProgress
+			}
+			// Re-peek even after a short successful write. EOF is propagated
+			// only once every byte before it has actually been consumed.
+			continue
 		}
-		if errors.Is(writeErr, platform.ErrWouldBlock) {
-			d.blocked = true
-			return false, nil
-		}
-		if writeErr != nil {
-			return false, writeErr
-		}
+		r.workers.giveBack(r)
 		if errors.Is(readErr, platform.ErrWouldBlock) {
 			return false, nil
 		}
@@ -447,7 +427,10 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 				if err := r.remote.CloseWrite(); err != nil {
 					return false, err
 				}
-				// TIME_WAIT may already have closed the receive side.
+				// Receive shutdown is cleanup, as in Splice. A peer's FIN can
+				// already have moved the endpoint into TIME_WAIT, where another
+				// ShutdownRead reports not-connected. It must not abort the
+				// lost-final-ACK protection we just established.
 				r.c.ep.Shutdown(tcpip.ShutdownRead)
 				return false, nil
 			}
@@ -461,53 +444,36 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 		if readErr != nil {
 			return false, readErr
 		}
-		if n == 0 {
-			return false, io.ErrNoProgress
-		}
+		return false, io.ErrNoProgress
 	}
 	return true, nil
 }
 
-func (r *readyRelay) step(scratch *relayScratch, events relayEvent) relayEvent {
+func (r *readyRelay) step(scratch *relayScratch) {
 	r.waitBuffer = false
 	if r.cancelled.Load() || r.ctx.Err() != nil {
 		r.close(true)
-		return 0
+		return
 	}
-	var more relayEvent
-	if events&r.up.interest(appReadable, socketReady, retryUpload) != 0 {
-		up, err := r.direction(&r.up, true, scratch)
-		if err != nil {
-			r.close(true)
-			return 0
-		}
-		if up {
-			more |= retryUpload
-		}
+	up, err := r.direction(&r.up, true, scratch)
+	if err != nil {
+		r.close(true)
+		return
 	}
-	if events&r.down.interest(socketReady, appWritable, retryDownload) != 0 {
-		down, err := r.direction(&r.down, false, scratch)
-		if err != nil {
-			r.close(true)
-			return 0
-		}
-		if down {
-			more |= retryDownload
-		}
+	down, err := r.direction(&r.down, false, scratch)
+	if err != nil {
+		r.close(true)
+		return
 	}
 	if r.up.finished && r.down.finished {
 		r.close(false)
-		return 0
+		return
 	}
-	if err := r.watch.Arm(more&retryDownload == 0 && !r.waitBuffer && !r.down.finished && !r.down.blocked, r.up.blocked); err != nil {
+	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && !r.down.blocked, r.up.blocked); err != nil {
 		r.close(true)
-		return 0
+		return
 	}
-	if r.waitBuffer {
-		return retryBoth
+	if up || down {
+		r.notify()
 	}
-	if more != 0 {
-		r.notify(more)
-	}
-	return r.up.interest(appReadable, socketReady, retryUpload) | r.down.interest(socketReady, appWritable, retryDownload)
 }

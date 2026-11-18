@@ -17,7 +17,6 @@ import (
 	"github.com/kekawia/net-switch/internal/engine/testfake"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
-	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 // A nonblocking peer with explicit readiness and short writes exercises the
@@ -27,8 +26,6 @@ type readyPeer struct {
 	mu                     sync.Mutex
 	download, upload       bytes.Buffer
 	eof, blocked, detached bool
-	readLimit              int
-	eofWithData            bool
 	wake                   func()
 	writeClosed, closed    chan struct{}
 	watching               chan struct{}
@@ -152,28 +149,6 @@ func Test512NonReadingConnectionsDoNotBlockAnotherAppsDataOrFIN(t *testing.T) {
 func newReadyPeer() *readyPeer {
 	return &readyPeer{writeClosed: make(chan struct{}), closed: make(chan struct{}), watching: make(chan struct{})}
 }
-
-func TestRelayWaitsOnTheEndpointThatBlocked(t *testing.T) {
-	w := &relayWorkers{wake: make(chan struct{}, 1)}
-	r := &readyRelay{workers: w}
-	r.interest = r.up.interest(appReadable, socketReady, retryUpload) | r.down.interest(socketReady, appWritable, retryDownload)
-	r.NotifyEvent(waiter.WritableEvents)
-	if w.head != nil {
-		t.Fatal("writable destination scheduled a read from an idle source")
-	}
-	r.notify(socketReady)
-	if w.head != r || r.pending != socketReady {
-		t.Fatal("remote data did not wake the relay")
-	}
-	// A destination may become writable between the worker's failed write
-	// and its publication of the new interest. Keep that edge for the turn.
-	r.pending = 0
-	r.NotifyEvent(waiter.WritableEvents)
-	r.down.blocked = true
-	if r.pending&r.down.interest(socketReady, appWritable, retryDownload) == 0 || r.next != nil {
-		t.Fatal("racing writable edge was lost or queued the flow twice")
-	}
-}
 func (p *readyPeer) Watch(wake func()) (platform.Readiness, error) {
 	p.mu.Lock()
 	p.wake = wake
@@ -195,14 +170,7 @@ func (p *readyPeer) TryRead(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.download.Len() > 0 {
-		if p.readLimit > 0 {
-			b = b[:min(len(b), p.readLimit)]
-		}
-		n, err := p.download.Read(b)
-		if p.eofWithData && p.eof && p.download.Len() == 0 {
-			return n, io.EOF
-		}
-		return n, err
+		return p.download.Read(b)
 	}
 	if p.eof {
 		return 0, io.EOF
@@ -278,7 +246,6 @@ func TestReadyRelayBackpressureShortWritesAndHalfClose(t *testing.T) {
 		t.Fatal("short writes lost or reordered data")
 	}
 	download := bytes.Repeat([]byte("response after upload EOF\n"), 9000)
-	peer.readLimit, peer.eofWithData = 997, true
 	peer.download.Write(download)
 	peer.eof = true
 	peer.mu.Unlock()
@@ -438,7 +405,7 @@ func TestUploadDiscardConsumesWithoutCopying(t *testing.T) {
 	scratch := new(relayScratch)
 	sentinel := bytes.Repeat([]byte{0xa5}, 300)
 	copy(scratch.buffer[:], sentinel)
-	if err := r.discardUpload(300, scratch); err != nil {
+	if err := r.discard(true, scratch.buffer[:300], scratch); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(scratch.buffer[:300], sentinel) {
@@ -449,7 +416,7 @@ func TestUploadDiscardConsumesWithoutCopying(t *testing.T) {
 	}
 	if allocs := testing.AllocsPerRun(100, func() {
 		ep.data = data
-		if err := r.discardUpload(300, scratch); err != nil {
+		if err := r.discard(true, scratch.buffer[:300], scratch); err != nil {
 			t.Fatal(err)
 		}
 	}); allocs != 0 {

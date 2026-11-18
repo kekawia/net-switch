@@ -39,3 +39,25 @@ func TestBulkReadNotificationsLeaveFreshSocketsImmediate(t *testing.T) {
 		t.Fatal("duplicate bulk notification")
 	}
 }
+
+func TestBulkReadRequiresRecentVolume(t *testing.T) {
+	c := &readySocket{watch: &socketWatch{}}
+	for i := range 128 {
+		c.noteRead(time.Duration(i)*bulkReadWindow, 1024)
+	}
+	if c.watch.bulkUntil.Load() != 0 {
+		t.Fatal("a low-rate stream acquired a batching delay")
+	}
+	now := 128 * bulkReadWindow
+	for range 64 {
+		c.noteRead(now, 1024)
+	}
+	expiry := c.watch.bulkUntil.Load()
+	if expiry != int64(now+bulkReadWindow) {
+		t.Fatal("a fragmented bulk transfer was not recognized")
+	}
+	c.noteRead(now+2*bulkReadWindow, 1)
+	if c.watch.bulkUntil.Load() != expiry {
+		t.Fatal("an interactive exchange after idle extended the batch window")
+	}
+}
