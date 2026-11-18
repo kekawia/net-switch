@@ -55,6 +55,7 @@ async function transfer(host, port, kind) {
   try {
     await once(socket, 'connect');
     const connectMs = performance.now() - start;
+    const localPort = socket.localPort;
     socket.write(kind + ' ' + marker);
     let seen = 0, bytes = 0;
     for await (let chunk of socket) {
@@ -70,7 +71,7 @@ async function transfer(host, port, kind) {
     assert.equal(seen,marker.length);
     assert.equal(bytes,kind === 'bulk' ? bytesPerStream : 0);
     if (bytes) assert.equal(hash.digest('hex'), expected);
-    return {connectMs, bytes};
+    return {connectMs, bytes, localPort};
   } finally { clearTimeout(timer); socket.destroy(); }
 }
 
@@ -92,6 +93,7 @@ export async function measure(host, port) {
     }
   }
   const connectBlocks = [];
+  const connectPorts = [];
   const tableAtBlocks = [];
   for (let block = 0; block < blockCount; block++) {
     const table = execFileSync(process.env.M6_TCP_READER, ['table', String(port), process.env.M6_TCP_UPLINK],
@@ -99,12 +101,14 @@ export async function measure(host, port) {
     tableAtBlocks.push(JSON.parse(table));
     const measurements = [];
     for (let i = 0; i < blockSize; i++) {
-      measurements.push((await transfer(host, port, 'ping')).connectMs);
+      const connection=await transfer(host, port, 'ping');
+      measurements.push(connection.connectMs);
+      connectPorts.push(connection.localPort);
     }
     connectBlocks.push(measurements);
   }
   const latency = latencySummary(connectBlocks);
-  return {samples, connectBlocks, tableAtBlocks, connectCount:latency.count, p95ms:latency.p95ms, p99ms:latency.p99ms,
+  return {samples, connectBlocks, connectPorts, tableAtBlocks, connectCount:latency.count, p95ms:latency.p95ms, p99ms:latency.p99ms,
     connections:1+latency.count+samples.reduce((n,r)=>n+r.connections,0)};
 }
 

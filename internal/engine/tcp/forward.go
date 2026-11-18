@@ -244,7 +244,11 @@ func (f *Forwarder) Handle(id stack.TransportEndpointID, p *stack.PacketBuffer) 
 		reject()
 		return true
 	}
-	f.pending[id] = &pendingOpen{ticket: ticket}
+	pending := &pendingOpen{ticket: ticket}
+	if a:=id.LocalAddress.AsSlice();len(a)==4 && [4]byte(a)==[4]byte{198,19,128,2} {
+		pending.m6Admitted=m6NowUS()
+	}
+	f.pending[id] = pending
 	f.wg.Add(1)
 	dropped := f.stack.Stats().TCP.ForwardMaxInFlightDrop.Value()
 	if !f.forwarder.HandlePacket(id, p) || f.stack.Stats().TCP.ForwardMaxInFlightDrop.Value() != dropped {
@@ -267,6 +271,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	pending := f.pending[id]
 	f.mu.RUnlock()
 	pending.request.Store(r)
+	opened:=m6NowUS()
 	ticket := pending.ticket
 	owned := true
 	defer func() {
@@ -312,6 +317,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	}
 	lookup, cancelLookup := context.WithTimeout(ctx, lookupBound)
 	lookupStart := time.Now()
+	lookupBegan:=m6NowUS()
 	var lookupErr error
 	if provLookup, ok := f.owners.(platform.ProvenanceOwnerLookup); ok {
 		owner, lookupErr = provLookup.TCPWithProvenance(lookup, t, prov)
@@ -319,6 +325,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		owner, lookupErr = f.owners.TCP(lookup, t)
 	}
 	provCost := platform.ProvenanceLookupDuration(prov)
+	identified:=m6NowUS()
 	prov = nil
 	if observer, ok := f.control.(interface {
 		Lookup(time.Duration, error, platform.Owner)
@@ -335,12 +342,14 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	dial, cancelDial := context.WithTimeout(ctx, DialTimeout)
+	dialBegan:=m6NowUS()
 	var remote platform.TCPConn
 	if f.flowDialer != nil {
 		remote, err = f.flowDialer.DialFlowTCP(dial, decision.Line, t.Destination, platform.FlowIdentity{Owner: owner, Source: t.Source, Destination: t.Destination})
 	} else {
 		remote, err = f.dialer.DialTCP(dial, decision.Line, t.Destination)
 	}
+	connected:=m6NowUS()
 	cancelDial()
 	if err != nil {
 		f.DialFailed.Add(1)
@@ -371,7 +380,11 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 	closed := waiter.NewFunctionEntry(waiter.EventHUp, func(waiter.EventMask) { pending.hungUp.Store(true) })
 	wq.EventRegister(&closed)
 	defer wq.EventUnregister(&closed)
+	handshake:=m6NowUS()
 	ep, errTCP := r.CreateEndpoint(wq)
+	if errTCP==nil && pending.m6Admitted!=0 {
+		recordM6Open(t.Source.Port(),t.Destination.Port(),pending.m6Admitted,opened,lookupBegan,identified,dialBegan,connected,handshake,m6NowUS())
+	}
 	if errTCP != nil {
 		// TCP already handled the failed handshake. In particular an app RST
 		// must not receive another reset from admission during deferred cleanup.

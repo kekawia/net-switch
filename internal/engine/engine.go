@@ -630,6 +630,7 @@ func (e *Engine) Stats() any {
 	}
 	if e.tcp != nil {
 		s["tcpRelayBytes"], s["tcpRelayPeakBytes"] = e.tcp.RelayBufferBytes()
+		s["m6Open"] = e.tcp.M6OpenRows()
 		s["tcpRejected"] = e.tcp.Rejected.Load()
 		s["tcpInvalid"] = e.tcp.Invalid.Load()
 		s["tcpDialFailed"] = e.tcp.DialFailed.Load()

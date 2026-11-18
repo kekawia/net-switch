@@ -137,6 +137,27 @@ func (r *Remote) nativeRefresh(ctx context.Context) error {
 	return nil
 }
 
+// Only a disposable post-measurement request reads the bounded timing ring.
+func (r *Remote) dumpM6OpenRows() {
+	dir:=DefaultData()
+	if _,err:=os.Stat(filepath.Join(dir,"m6-dump-opens"));err!=nil{return}
+	if CheckDirectory(dir)!=nil{return}
+	result:=filepath.Join(dir,"m6-open-data.json")
+	if _,err:=os.Stat(result);err==nil{return}
+	ctx,cancel:=context.WithTimeout(r.ctx,4*time.Second)
+	defer cancel()
+	var sample struct{Engine struct{ M6Open json.RawMessage }}
+	if err:=r.call(ctx,"stats",nil,"",&sample);err!=nil || len(sample.Engine.M6Open)==0{return}
+	tmp:=result+".tmp"
+	f,err:=os.OpenFile(tmp,os.O_WRONLY|os.O_CREATE|os.O_EXCL,0600)
+	if err!=nil{return}
+	_,writeErr:=f.Write(sample.Engine.M6Open)
+	closeErr:=f.Close()
+	if writeErr==nil && closeErr==nil {
+		_ = os.Rename(tmp,result)
+	}
+}
+
 // nativeLoad sends start or apply. An engine that is already on receives apply,
 // which the table answers idempotently; start is only for a fresh instance.
 func (r *Remote) nativeLoad(ctx context.Context, rpc *RPC, instance string, epoch uint64, revision ce.Revision, running bool) (ce.Acknowledgement, error) {

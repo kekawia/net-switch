@@ -17,6 +17,7 @@ import (
 const ClosingGrace = time.Second
 
 type pendingOpen struct {
+	m6Admitted int64
 	ticket    flowapi.Ticket
 	request   atomic.Pointer[gtcp.ForwarderRequest] // published once before endpoint creation
 	once      sync.Once

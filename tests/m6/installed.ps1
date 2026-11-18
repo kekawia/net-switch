@@ -60,6 +60,13 @@ try {
   Assert-RoutedEcho 'M6 installed candidate'
   if ($Qualification -eq 'compare') {
     Measure-M6Product 'candidate' $candidateVersion $setup100
+    $marker=Join-Path $machineData 'm6-dump-opens'
+    $rows=Join-Path $machineData 'm6-open-data.json'
+    [IO.File]::WriteAllText($marker,'capture')
+    try {
+      Wait-Until 'completed connection phase record' 20 {Test-Path -LiteralPath $rows -PathType Leaf} | Out-Null
+      Copy-Item -LiteralPath $rows -Destination "$diagDir/m6-open-data.json"
+    } finally {Remove-Item -LiteralPath $marker}
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {
