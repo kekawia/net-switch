@@ -43,6 +43,16 @@ type readiness struct {
 	batchMu     sync.Mutex
 	batch       map[*socketWatch]struct{}
 	batchWake   chan struct{}
+	batchAt     time.Duration
+	batchCount  atomic.Uint64
+	batchUS     atomic.Uint64
+	lateBatches atomic.Uint64
+	emptyWake   atomic.Uint64
+	fullWake    atomic.Uint64
+	readCount   atomic.Uint64
+	readBytes   atomic.Uint64
+	smallReads  atomic.Uint64
+	emptyReads  atomic.Uint64
 	wg          sync.WaitGroup
 	thread      atomic.Uint32
 	capture     bool
@@ -241,10 +251,32 @@ func (w *socketWatch) readable(wake func()) {
 		return
 	}
 	p := w.pool
+	// FIONREAD is only a scheduling hint. The relay still peeks and consumes
+	// precisely the accepted prefix under its existing lifetime rules.
+	if !w.socket.IsZero() {
+		w.mu.Lock()
+		if w.detached {
+			w.mu.Unlock()
+			return
+		}
+		var available uint32
+		code, _, _ := ioctlsocketProc.Call(uintptr(w.socket.Handle("TCP bulk available bytes")), 0x4004667f, uintptr(unsafe.Pointer(&available)))
+		w.mu.Unlock()
+		if int32(code) != 0 || available == 0 || available >= 24<<10 {
+			if available == 0 {
+				p.emptyWake.Add(1)
+			} else {
+				p.fullWake.Add(1)
+			}
+			wake()
+			return
+		}
+	}
 	p.batchMu.Lock()
 	first := len(p.batch) == 0
 	p.batch[w] = struct{}{}
 	if first {
+		p.batchAt = winclock.Now()
 		select {
 		case p.batchWake <- struct{}{}:
 		default:
@@ -271,6 +303,12 @@ func (p *readiness) deliverBulkReads() {
 		case <-timer.C:
 		}
 		p.batchMu.Lock()
+		elapsed := winclock.Since(p.batchAt)
+		p.batchUS.Add(uint64(elapsed.Microseconds()))
+		p.batchCount.Add(1)
+		if elapsed >= 2*time.Millisecond {
+			p.lateBatches.Add(1)
+		}
 		batch, p.batch = p.batch, batch
 		p.batchMu.Unlock()
 		for w := range batch {
@@ -618,7 +656,15 @@ func (c *readySocket) tryReceive(b []byte, flags uint32) (int, error) {
 		return 0, net.ErrClosed
 	}
 	n, err := socketIOFlags(c.handle, "recv", b, flags)
+	if flags != 0 && errors.Is(err, platform.ErrWouldBlock) {
+		c.pool.emptyReads.Add(1)
+	}
 	if flags == 0 && n > 0 {
+		c.pool.readBytes.Add(uint64(n))
+		c.pool.readCount.Add(1)
+		if n <= 1500 {
+			c.pool.smallReads.Add(1)
+		}
 		c.noteRead(time.Since(relayClockStart), n)
 	}
 	return n, err

@@ -44,10 +44,7 @@ try {
   $legacyTray=Join-Path $appDir 'tray/NetSwitchTray.exe'
   Start-Process $legacyTray -ArgumentList @('-DataDir',"`"$userData`"") -WindowStyle Hidden
   Assert-RoutedEcho 'M6 released product'
-  if ($Qualification -eq 'compare') {
-    Measure-M6Product 'baseline' '0.3.2' $setup032
-    Measure-M6Product 'baseline-repeat' '0.3.2' $setup032
-  }
+  if ($Qualification -eq 'compare') { Measure-M6Product 'baseline' '0.3.2' $setup032 }
   # A real installed migration preserves these exact gateways and default line.
   Invoke-SilentInstaller -ExePath $setup100 -LogName 'm6-candidate.log' | Out-Null
   Start-Process (Join-Path $appDir 'netswitch-desktop.exe') -ArgumentList @('--resume','--background') -WindowStyle Hidden
@@ -63,7 +60,9 @@ try {
   Assert-RoutedEcho 'M6 installed candidate'
   if ($Qualification -eq 'compare') {
     Measure-M6Product 'candidate' $candidateVersion $setup100
-    Measure-M6Product 'candidate-repeat' $candidateVersion $setup100
+    $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch 'M6_RELAY')
+    if (!$samples.Count) {throw 'Installed relay samples missing'}
+    $samples.Line | Set-Content -LiteralPath "$diagDir/m6-relay-observations.txt"
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {

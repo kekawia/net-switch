@@ -52,7 +52,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
       ForEach-Object { @{pid=[int]$_.ProcessId; image=$_.ExecutablePath; createdAt=$_.CreationDate.ToUniversalTime().ToString('o')} })
     $paths=@($members.ExecutablePath | Where-Object {$_} | Sort-Object -Unique)
     $images=@($paths | ForEach-Object { @{name=[IO.Path]::GetFileName($_);hash=(Get-FileHash -LiteralPath $_).Hash.ToLowerInvariant()} })
-    if ($release -eq '0.3.2') {
+    if ($label -eq 'baseline') {
       $enginePid=[int](Get-Content -Raw -LiteralPath (Join-Path $machineData 'engine.pid'))
       if ('node.exe' -notin $images.name -or 'NetSwitchTray.exe' -notin $images.name -or $enginePid -notin $roots.pid) {
         throw 'Missing installed legacy Control, engine or desktop'
