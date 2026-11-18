@@ -228,7 +228,7 @@ func (p *readiness) stats() map[string]any {
 
 var relayClockStart = time.Now()
 
-const bulkReadDelay = 400 * time.Microsecond
+const bulkReadDelay = 1200 * time.Microsecond
 const bulkReadWindow = 20 * time.Millisecond
 
 // An active bulk socket can generate a completion for each incoming segment.

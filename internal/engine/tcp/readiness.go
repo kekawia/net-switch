@@ -37,6 +37,7 @@ type relayWorkers struct {
 // FIFO reservations prevent a previous holder overtaking a waiting relay.
 const RelayHeldBudget = 16 << 20
 const RelayAppLoans = 32
+const maxBulkLoans = 4
 
 type relayDirection struct {
 	blocked, finished bool
@@ -102,6 +103,8 @@ func newRelayWorkers() *relayWorkers {
 	return w
 }
 
+// Additional loans are opportunistic. A reserved FIFO grant is exactly one
+// loan, and a newcomer cannot claim even a single slot ahead of a waiter.
 func (w *relayWorkers) borrow(r *readyRelay, want int) int {
 	w.bufferMu.Lock()
 	defer w.bufferMu.Unlock()
@@ -376,10 +379,9 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 	// A busy flow yields after a bounded amount of work, so it cannot starve
 	// other readiness events, the ordered TUN reader, or process lookups.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
-		const bulkLoans = 4
 		want := 1
 		if runtime.GOOS == "windows" && !up && r.c.down.Load() >= 512<<10 {
-			want = min(bulkLoans, ((256<<10)-moved+RelayBuffer-1)/RelayBuffer)
+			want = min(maxBulkLoans, ((256<<10)-moved+RelayBuffer-1)/RelayBuffer)
 		}
 		loans := r.workers.borrow(r, want)
 		if loans == 0 {
@@ -388,7 +390,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 		b := scratch.buffer[:]
 		if loans > 1 {
 			if scratch.bulk == nil {
-				scratch.bulk = make([]byte, bulkLoans*RelayBuffer)
+				scratch.bulk = make([]byte, maxBulkLoans*RelayBuffer)
 			}
 			b = scratch.bulk[:loans*RelayBuffer]
 		}
