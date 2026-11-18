@@ -1,0 +1,10 @@
+[Trigger]
+Type = Package
+Operation = Remove
+Target = netswitch-bin
+
+[Action]
+Description = Stopping Net Switch before package remove
+When = PreTransaction
+Exec = /usr/lib/netswitch/netswitchctl package remove arch
+AbortOnFail

@@ -42,6 +42,11 @@ jobs:
             done
             bash scripts/linux-aur.sh "$version" dist/linux
             mv dist/linux/aur "dist/linux/aur-$version"
+            docker run --rm --user nobody -e HOME=/tmp \
+              -v "$PWD/dist/linux/aur-$version:/recipe:ro" -w /tmp \
+              archlinux:base@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899 \
+              bash -ec 'cd "$(mktemp -d)"; cp /recipe/PKGBUILD /recipe/*.hook /recipe/*.install .; makepkg --printsrcinfo' \
+              > "dist/linux/aur-$version/.SRCINFO"
           done
       - name: Prepare Fedora signing tools
         run: |
@@ -69,6 +74,7 @@ jobs:
           name: linux-packages
           path: dist/linux/
           if-no-files-found: error
+          include-hidden-files: true
   smoke:
     needs: build
     if: inputs.version == ''
@@ -91,6 +97,11 @@ jobs:
         with:
           name: linux-packages
           path: dist/linux
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        if: matrix.family != 'deb'
+        with:
+          path: ${{ runner.temp }}/netswitch-package-images
+          key: package-guest-${{ matrix.family }}-${{ hashFiles('scripts/package-guest.sh') }}
       - name: Install, upgrade and remove with the distribution package manager
         env:
           FAMILY: ${{ matrix.family }}

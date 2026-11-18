@@ -6,17 +6,27 @@ family=${1:?rpm or arch}; files=$(realpath "${2:?artifacts}")
 case $family in
     rpm) image=https://download.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2
          sha=50bdc5e70f6a24f540932d15411c1c6ae9fcfa40fb990d876d83c5cc823b2ad0 ;;
-    arch) image=https://geo.mirror.pkgbuild.com/images/v20261115.625457/Arch-Linux-x86_64-cloudimg-20261115.625457.qcow2
+    arch) image=https://fastly.mirror.pkgbuild.com/images/v20261115.625457/Arch-Linux-x86_64-cloudimg-20261115.625457.qcow2
           sha=dbd02830f6eb0fe07ef6e5edaddbae8b577ce4296d9e79118904704cce0a1f60 ;;
     *) exit 2 ;;
 esac
+echo "PACKAGE_GUEST $family: installing virtualization tools"
 sudo apt-get update -qq
 sudo apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils cloud-image-utils ovmf ipxe-qemu
 work=$(mktemp -d); chmod 700 "$work"
 sudo setfacl -m u:"$(id -un)":rw /dev/kvm
-curl -fLsS "$image" -o "$work/disk"
-echo "$sha  $work/disk" | sha256sum -c -
-qemu-img resize -f qcow2 "$work/disk" 20G
+cache="$RUNNER_TEMP/netswitch-package-images"
+mkdir -p "$cache"
+base="$cache/$sha.qcow2"
+if [[ ! -f "$base" ]]; then
+    echo "PACKAGE_GUEST $family: downloading $image"
+    curl --fail --location --show-error --connect-timeout 20 --max-time 600 --speed-limit 1024 --speed-time 60 \
+        --write-out 'guest image bytes=%{size_download} seconds=%{time_total}\n' "$image" -o "$work/download"
+    echo "$sha  $work/download" | sha256sum -c -
+    mv "$work/download" "$base"
+fi
+echo "$sha  $base" | sha256sum -c -
+qemu-img create -f qcow2 -F qcow2 -b "$base" "$work/disk" 20G
 ssh-keygen -q -t ed25519 -N '' -f "$work/key"
 cat > "$work/user-data" <<EOF
 #cloud-config
@@ -31,6 +41,7 @@ EOF
 printf 'instance-id: ns-package-test\n' > "$work/meta-data"
 cloud-localds "$work/seed.img" "$work/user-data" "$work/meta-data"
 cp /usr/share/OVMF/OVMF_VARS_4M.fd "$work/vars"
+echo "PACKAGE_GUEST $family: booting verified disk"
 qemu-system-x86_64 -accel kvm -cpu host -smp 2 -m 3500 -display none -serial "file:$work/serial" -no-reboot \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd -drive "if=pflash,format=raw,file=$work/vars" \
     -drive "if=virtio,format=qcow2,file=$work/disk" -drive "if=virtio,format=raw,file=$work/seed.img" \
@@ -41,21 +52,24 @@ args=(-i "$work/key" -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=3 
 remote=(ssh "${args[@]}" -p 2222 nsrunner@127.0.0.1)
 end=$((SECONDS+240))
 until "${remote[@]}" true; do kill -0 "$vm"; (( SECONDS < end )) || exit 1; sleep 2; done
+echo "PACKAGE_GUEST $family: SSH connected, checking cloud-init"
 "${remote[@]}" 'sudo cloud-init status --wait && mkdir -p /tmp/ns-pkgs'
 scp -P 2222 "${args[@]}" scripts/package-smoke.sh nsrunner@127.0.0.1:/tmp/smoke
 if [[ $family == arch ]]; then
+    echo "PACKAGE_GUEST arch: preparing makepkg and building the two package versions"
     scp -P 2222 "${args[@]}" -r "$files"/aur-* "$files"/*-amd64.tar.gz nsrunner@127.0.0.1:/tmp/ns-pkgs/
     "${remote[@]}" 'set -e
         sudo pacman --noconfirm -Syu --needed base-devel sudo iproute2 xdg-utils
         for v in 1.0.1 1.0.2; do
             cd "/tmp/ns-pkgs/aur-$v"
             SRCDEST=/tmp/ns-pkgs PKGDEST=/tmp/ns-pkgs makepkg --noconfirm --cleanbuild
-            makepkg --printsrcinfo > .SRCINFO
+            makepkg --printsrcinfo | diff .SRCINFO -
         done'
 else
     scp -P 2222 "${args[@]}" -r "$files/repo" nsrunner@127.0.0.1:/tmp/ns-pkgs/
     "${remote[@]}" 'sudo dnf -y install rpm-sign'
 fi
+echo "PACKAGE_GUEST $family: starting installed package tests"
 "${remote[@]}" "sudo env NETSWITCH_PACKAGE_SMOKE=disposable bash /tmp/smoke $family /tmp/ns-pkgs" || {
     "${remote[@]}" 'sudo journalctl -u netswitch.service -u netswitch-engine.service -n 100 --no-pager'
     exit 1

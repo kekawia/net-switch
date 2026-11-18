@@ -19,6 +19,19 @@ const packageSocket = "netswitch.socket"
 const packageControl = "netswitch.service"
 const packageEngine = "netswitch-engine.service"
 
+// Reject manual install/uninstall before either can rewrite package config
+// or remove administrator overrides from /etc/systemd/system.
+func checkManualInstall() error {
+	_, err := os.Lstat(filepath.Join("/usr/lib/systemd/system", packageEngine))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return errors.New("manage this Net Switch installation with your Linux package manager")
+}
+
 type packageState struct {
 	Schema                   int
 	Operation                string
@@ -71,6 +84,11 @@ func packageCommand(args []string) error {
 	if len(args) != 2 || (args[1] != "deb" && args[1] != "rpm" && args[1] != "arch") {
 		return errors.New("usage: netswitchctl package unit NAME | configure|upgrade|remove|abort FORMAT")
 	}
+	switch args[0] {
+	case "configure", "abort", "upgrade", "remove":
+	default:
+		return fmt.Errorf("unknown package action %q", args[0])
+	}
 	data, err := PrepareStore(DefaultData())
 	if err != nil {
 		return err
@@ -83,13 +101,10 @@ func packageCommand(args []string) error {
 	}
 	defer release()
 	p := packageManager{ctx: ctx, format: args[1]}
-	switch args[0] {
-	case "configure", "abort":
+	if args[0] == "configure" || args[0] == "abort" {
 		return p.finish(args[0] == "abort")
-	case "upgrade", "remove":
-		return p.prepare(args[0])
 	}
-	return fmt.Errorf("unknown package action %q", args[0])
+	return p.prepare(args[0])
 }
 
 type packageManager struct {
@@ -153,6 +168,11 @@ func systemdRunning() bool {
 }
 
 func (p packageManager) prepare(op string) error {
+	if systemdRunning() {
+		if err := p.checkStopPolicy(); err != nil {
+			return err
+		}
+	}
 	marker := packageMarker()
 	s, err := readPackageState(marker)
 	if os.IsNotExist(err) {
@@ -179,21 +199,6 @@ func (p packageManager) prepare(op string) error {
 		return fmt.Errorf("unfinished package %s", s.Operation)
 	}
 	if systemdRunning() {
-		for _, unit := range []string{packageSocket, packageControl, packageEngine} {
-			active, err := p.active(unit)
-			if err != nil {
-				return err
-			}
-			if active {
-				ok, err := p.permitted(unit, "stop")
-				if err != nil {
-					return err
-				}
-				if !ok {
-					return fmt.Errorf("service policy prevents stopping %s for %s", unit, op)
-				}
-			}
-		}
 		if _, err := p.systemctl("stop", packageSocket, packageControl); err != nil {
 			return err
 		}
@@ -211,6 +216,26 @@ func (p packageManager) prepare(op string) error {
 	if op == "remove" && s.Enabled {
 		if _, err := p.systemctl("disable", packageSocket); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (p packageManager) checkStopPolicy() error {
+	for _, unit := range []string{packageSocket, packageControl, packageEngine} {
+		active, err := p.active(unit)
+		if err != nil {
+			return err
+		}
+		if !active {
+			continue
+		}
+		ok, err := p.permitted(unit, "stop")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("service policy prevents stopping %s", unit)
 		}
 	}
 	return nil

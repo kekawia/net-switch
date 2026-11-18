@@ -38,6 +38,18 @@ gpgcheck=1
 repo_gpgcheck=1
 gpgkey=file://$files/repo/netswitch.asc
 EOF
+    dnf -y --refresh --repo=netswitch-test makecache
+    xml="$files/repo/repodata/repomd.xml"
+    cp "$xml" "$xml.original"
+    printf '\n<!-- damaged metadata -->\n' >> "$xml"
+    if dnf -y --refresh --repo=netswitch-test --setopt=netswitch-test.skip_if_unavailable=False makecache > /tmp/ns-repo-check.log 2>&1; then
+        cat /tmp/ns-repo-check.log
+        echo 'DNF accepted changed repository metadata' >&2; exit 1
+    fi
+    cat /tmp/ns-repo-check.log
+    grep -Ei 'signature|OpenPGP|GPG' /tmp/ns-repo-check.log
+    mv "$xml.original" "$xml"
+    dnf -y --refresh --repo=netswitch-test makecache
 fi
 install_version() {
     case $family in
@@ -58,6 +70,10 @@ install_version 1.0.1
 test "$(stat -c '%a:%u' "$data")" = '700:0'
 systemctl is-active --quiet "$socket"
 test ! -e "$data/owner.json"
+if "$ctl" uninstall; then
+    echo 'Manual uninstall was allowed on a package-owned installation' >&2; exit 1
+fi
+systemctl is-active --quiet "$socket"
 if [[ "$family" == deb ]]; then
     proof=$files/package-$arch.test
     install -m755 "$proof" /usr/local/bin/ns-package-proof
@@ -69,11 +85,28 @@ if [[ "$family" == deb ]]; then
 fi
 "$ctl" enroll --owner "$owner"
 systemctl start "$unit"
+"$ctl" package upgrade "$family"
+test -s "$data/package-maintenance"
+systemctl start "$socket"
+if systemctl is-active --quiet "$socket"; then echo 'Bypassed the interrupted upgrade' >&2; exit 1; fi
+"$ctl" package abort "$family"
+systemctl is-active --quiet "$socket"
+systemctl is-active --quiet "$unit"
 before=$(systemctl show -p MainPID --value "$unit")
 test "$before" -gt 1
 test "$(systemctl show -p FragmentPath --value "$unit")" = "/usr/lib/systemd/system/$unit" || test "$(realpath "$(systemctl show -p FragmentPath --value "$unit")")" = "/usr/lib/systemd/system/$unit"
 systemctl show -p ExecStopPost netswitch-engine.service | grep -F 'cleanup --engine'
 ownerhash=$(sha256sum "$data/owner.json")
+if [[ "$family" == arch ]]; then
+    # A pre-upgrade .install script alone cannot veto a pacman transaction.
+    printf 'incomplete record\n' > "$data/package-maintenance"
+    if install_version 1.0.2; then
+        echo 'Arch replaced the programs after preparation failed' >&2; exit 1
+    fi
+    "$ctl" version | grep -F '1.0.1'
+    rm -- "$data/package-maintenance"
+    test "$(systemctl show -p MainPID --value "$unit")" = "$before"
+fi
 install -d /etc/systemd/system/netswitch.service.d
 printf '[Service]\nEnvironment=NETSWITCH_PACKAGE_TEST=yes\n' > /etc/systemd/system/netswitch.service.d/smoke.conf
 install_version 1.0.2

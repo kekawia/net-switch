@@ -2,6 +2,10 @@
 
 For a Net Switch release that includes Linux packages, choose the file for your processor. On Debian and Ubuntu, use the `.deb` file. On Fedora, use the signed RPM repository. On Arch, the `netswitch-bin` recipe builds a package from the release archive and verifies its SHA-512 checksum.
 
+On Debian or Ubuntu, open a terminal in the download directory and run `sudo apt install ./NAME.deb`, replacing `NAME.deb` with the downloaded filename. Use the same command with the new version's file to upgrade.
+
+Once the Fedora repository is published, add it with `sudo dnf5 config-manager addrepo --from-repofile=https://kekawia.github.io/net-switch/netswitch.repo`, then run `sudo dnf install netswitch`. Check the fingerprint offered by DNF against the release maintainer's fingerprint before accepting the key. Subsequent versions arrive with normal DNF upgrades.
+
 After installing, enroll the person who will control routing. From that person's terminal, run `sudo netswitchctl enroll "$USER"`. Then open Net Switch from the applications menu. The activation socket starts the service when you open the app. Your service settings and owner record live in the protected directory `/var/lib/netswitch`.
 
 Use your package manager for upgrades and removal. An upgrade briefly stops routing while it replaces the installed programs. It keeps your owner, settings and current routing choice. Removing the package stops its services and keeps your saved data for a later install.

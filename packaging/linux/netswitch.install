@@ -11,7 +11,5 @@ for unit in netswitch.socket netswitch.service netswitch-engine.service; do
 done
 }
 post_install() { /usr/lib/netswitch/netswitchctl package configure arch; }
-pre_upgrade() { /usr/lib/netswitch/netswitchctl package upgrade arch; }
 post_upgrade() { /usr/lib/netswitch/netswitchctl package configure arch; }
-pre_remove() { /usr/lib/netswitch/netswitchctl package remove arch; }
 post_remove() { if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi; }

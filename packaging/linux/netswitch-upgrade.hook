@@ -1,0 +1,10 @@
+[Trigger]
+Type = Package
+Operation = Upgrade
+Target = netswitch-bin
+
+[Action]
+Description = Stopping Net Switch before package upgrade
+When = PreTransaction
+Exec = /usr/lib/netswitch/netswitchctl package upgrade arch
+AbortOnFail
