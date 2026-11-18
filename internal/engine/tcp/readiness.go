@@ -423,13 +423,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 		r.workers.giveBack(r)
 		if n > 0 {
 			moved += n
-			if up {
-				r.c.up.Add(uint64(n))
-				r.c.ticket.Add(uint64(n), 0)
-			} else {
-				r.c.down.Add(uint64(n))
-				r.c.ticket.Add(0, uint64(n))
-			}
+			r.c.countTransfer(up, uint64(n))
 		}
 		if errors.Is(writeErr, platform.ErrWouldBlock) {
 			d.blocked = true
