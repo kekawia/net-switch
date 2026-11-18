@@ -52,6 +52,12 @@ func TestInstalledLinuxTwoHourSoak(t *testing.T) {
 	c := openClient(t, owner, false)
 	c.must(t, "routing", map[string]any{"on": true}, nil)
 	initial := waitRouting(t, c, "initial installed routing", 30*time.Second, func(s status) bool { return s.Routing == "on" && s.Instance != "" })
+	// The owner client is only needed to start routing. Check the installed
+	// CLI independently from each later checkpoint.
+	c.input.Close()
+	if err := c.wait(); err != nil {
+		t.Fatal(err)
+	}
 	held := routedStream(t, ctx, fixture)
 	defer held.Close()
 	fixture.exchange(t, held)
@@ -86,7 +92,16 @@ func TestInstalledLinuxTwoHourSoak(t *testing.T) {
 				fixture.exchange(t, fresh)
 				assertTUNCaptured(t, fresh, fixture)
 			}()
-			s := getStatus(t, c)
+			probe, cancelProbe := context.WithTimeout(ctx, 5*time.Second)
+			out, err := exec.CommandContext(probe, filepath.Join(dir, "netswitchctl"), "status").Output()
+			cancelProbe()
+			if err != nil {
+				t.Fatal("installed status command", err)
+			}
+			var s status
+			if err := json.Unmarshal(out, &s); err != nil {
+				t.Fatal("installed status response", err)
+			}
 			if s.Instance != initial.Instance || s.ControlPID != initial.ControlPID || s.Routing != "on" {
 				t.Fatal("installed lifetime changed", s)
 			}
