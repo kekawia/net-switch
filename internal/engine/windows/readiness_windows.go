@@ -38,6 +38,7 @@ type readiness struct {
 	next        uintptr
 	watches     map[uintptr]*socketWatch
 	writers     map[uintptr]*socketWatch
+	writeWake   chan struct{}
 	stop        chan struct{}
 	batchMu     sync.Mutex
 	batch       map[*socketWatch]struct{}
@@ -111,7 +112,7 @@ func newReadinessWithPolicy(policy tcpCompletionPolicy) (*readiness, error) {
 	}
 	p := &readiness{
 		port:    winhandle.Open(port, "TCP completion port open"),
-		watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{},
+		watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{}, writeWake: make(chan struct{}, 1),
 		stop: make(chan struct{}), capture: hostedTraceEnabled(), poll: pollWritable,
 		batch: make(map[*socketWatch]struct{}), batchWake: make(chan struct{}, 1),
 		policy: policy, cancel: windows.CancelIoEx, providerIFS: socketProviderIFS,
@@ -313,13 +314,23 @@ func (p *readiness) pollWrites() {
 	var rows []pollFD
 	var watches []*socketWatch
 	for {
-		if !winclock.System.WaitDone(p.stop, 2*time.Millisecond) {
-			return
-		}
 		// The backing array outlives this snapshot. Release detached watches
 		// and their relay callbacks before shortening it, including idle passes.
 		clear(watches)
 		rows, watches = rows[:0], watches[:0]
+		p.mu.Lock()
+		idle := len(p.writers) == 0
+		p.mu.Unlock()
+		if idle {
+			select {
+			case <-p.stop:
+				return
+			case <-p.writeWake:
+			}
+		}
+		if !winclock.System.WaitDone(p.stop, 2*time.Millisecond) {
+			return
+		}
 		p.mu.Lock()
 		for _, w := range p.writers {
 			rows = append(rows, pollFD{Socket: w.socket.Handle("TCP write poll snapshot"), Events: pollWrNorm})
@@ -413,14 +424,23 @@ func (w *socketWatch) Arm(read, write bool) error {
 		w.mu.Unlock()
 		return net.ErrClosed
 	}
-	w.write = write
-	w.pool.mu.Lock()
-	if write {
-		w.pool.writers[w.key] = w
-	} else {
-		delete(w.pool.writers, w.key)
+	if write != w.write {
+		w.write = write
+		p := w.pool
+		p.mu.Lock()
+		if write {
+			if len(p.writers) == 0 {
+				select {
+				case p.writeWake <- struct{}{}:
+				default:
+				}
+			}
+			p.writers[w.key] = w
+		} else {
+			delete(p.writers, w.key)
+		}
+		p.mu.Unlock()
 	}
-	w.pool.mu.Unlock()
 	if !read || w.pending {
 		w.mu.Unlock()
 		return nil

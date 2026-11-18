@@ -61,3 +61,31 @@ func TestBulkReadRequiresRecentVolume(t *testing.T) {
 		t.Fatal("an interactive exchange after idle extended the batch window")
 	}
 }
+
+func TestFirstBlockedWriterWakesIdlePoller(t *testing.T) {
+	p := &readiness{writers: make(map[uintptr]*socketWatch), writeWake: make(chan struct{}, 1)}
+	a, b := &socketWatch{pool: p, key: 1}, &socketWatch{pool: p, key: 2}
+	arm := func(w *socketWatch, write bool) {
+		t.Helper()
+		if err := w.Arm(false, write); err != nil {
+			t.Fatal(err)
+		}
+	}
+	arm(a, true)
+	select {
+	case <-p.writeWake:
+	default:
+		t.Fatal("first blocked writer left poller asleep")
+	}
+	arm(a, true)
+	arm(b, true)
+	if len(p.writeWake) != 0 || len(p.writers) != 2 {
+		t.Fatal("already-active poller received a redundant wake")
+	}
+	arm(a, false)
+	arm(b, false)
+	arm(b, true)
+	if len(p.writeWake) != 1 || len(p.writers) != 1 {
+		t.Fatal("poller did not wake after the writer set had emptied")
+	}
+}
