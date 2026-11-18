@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Author="Net Switch" Version="1.0">
+  <Profiles>
+    <SystemCollector Id="Collector" Name="NT Kernel Logger">
+      <BufferSize Value="512"/>
+      <Buffers Value="128"/>
+    </SystemCollector>
+    <SystemProvider Id="Scheduling">
+      <Keywords>
+        <Keyword Value="ProcessThread"/>
+        <Keyword Value="Loader"/>
+        <Keyword Value="CSwitch"/>
+      </Keywords>
+    </SystemProvider>
+    <Profile Id="NetSwitchCPU.Light.File" Name="NetSwitchCPU" Description="Process lifetime and scheduling" LoggingMode="File" DetailLevel="Light">
+      <Collectors>
+        <SystemCollectorId Value="Collector"><SystemProviderId Value="Scheduling"/></SystemCollectorId>
+      </Collectors>
+    </Profile>
+  </Profiles>
+</WindowsPerformanceRecorder>

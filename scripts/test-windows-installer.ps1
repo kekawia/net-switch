@@ -3,7 +3,8 @@
 # installers on disposable GitHub-hosted x64 and ARM64 runners.
 [CmdletBinding()]
 param(
-  [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64'
+  [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64',
+  [ValidateSet('installer', 'compare', 'soak')] [string] $Qualification = 'installer'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -195,10 +196,12 @@ function Invoke-SilentUninstaller([string] $LogName) {
 Write-Host "=== Warming up Windows PowerShell 5.1 before timed migration checks ==="
 & (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()' | Write-Host
 
-Write-Host "=== Building Net Switch 1.0.0 and 1.0.1 $Arch installers ==="
-& (Join-Path $PSScriptRoot 'build-windows-installer.ps1') -Arch $Arch -Version '1.0.0'
-& (Join-Path $PSScriptRoot 'build-windows-installer.ps1') -Arch $Arch -Version '1.0.1'
-$setup100 = Join-Path $dist "NetSwitch-Setup-1.0.0-$Arch.exe"
+$candidateVersion = if ($Qualification -ne 'installer' -and $env:NETSWITCH_M6_VERSION) { $env:NETSWITCH_M6_VERSION } else { '1.0.0' }
+& (Join-Path $PSScriptRoot 'build-windows-installer.ps1') -Arch $Arch -Version $candidateVersion
+$setup100 = Join-Path $dist "NetSwitch-Setup-$candidateVersion-$Arch.exe"
+if ($Qualification -eq 'installer') {
+  & (Join-Path $PSScriptRoot 'build-windows-installer.ps1') -Arch $Arch -Version '1.0.1'
+}
 $setup101 = Join-Path $dist "NetSwitch-Setup-1.0.1-$Arch.exe"
 
 $legacyPins = @{
@@ -219,8 +222,10 @@ $legacyPins = @{
   }
 }
 
-$setup030 = Get-Artifact $legacyPins['0.3.0'] $cache
-$setup031 = Get-Artifact $legacyPins['0.3.1'] $cache
+if ($Qualification -eq 'installer') {
+  $setup030 = Get-Artifact $legacyPins['0.3.0'] $cache
+  $setup031 = Get-Artifact $legacyPins['0.3.1'] $cache
+}
 $setup032 = Get-Artifact $legacyPins['0.3.2'] $cache
 
 $goRoot = Join-Path (Join-Path $cache "go-$($pins.go.version)") $pins.go.archiveRoot
@@ -247,7 +252,7 @@ try {
 } finally {
   foreach ($k in $savedGoEnv.Keys) { [Environment]::SetEnvironmentVariable($k, $savedGoEnv[$k], 'Process') }
 }
-Copy-Item -LiteralPath (Join-Path $dist "stage-1.0.0-$Arch\wintun.dll") -Destination (Join-Path $ispBinDir 'wintun.dll') -Force
+Copy-Item -LiteralPath (Join-Path $dist "stage-$candidateVersion-$Arch\wintun.dll") -Destination (Join-Path $ispBinDir 'wintun.dll') -Force
 
 $ispProcs = @()
 $echoProc = $null
@@ -362,6 +367,10 @@ setInterval(() => {}, 60000);
     Write-Host "[$Tag] Verified live routed HTTP traffic via $($Isp.alias) ($beforeCount -> $afterCount)"
   }
 
+  if ($Qualification -ne 'installer') {
+    . (Join-Path $repoRoot 'tests/m6/installed.ps1')
+    return
+  }
   $passedCases = 0
   $utf8NoBom = [Text.UTF8Encoding]::new($false)
 

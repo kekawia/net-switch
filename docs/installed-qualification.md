@@ -1,0 +1,9 @@
+# Installed performance and soak tests
+
+The Installed performance and soak workflow uses disposable hosted machines. The Windows comparison installs the published 0.3.2 installer, measures it, then migrates that installation to the candidate and repeats the same workload. Each pair uses the same runner, CPU architecture, TestISP gateways and responder. The report records the installer and running program hashes, including the installed legacy server entry point.
+
+For each product the client measures three rounds of one-stream and eight-stream downloads. Every transfer checks its nonce, byte count and SHA-256. The runner also opens 400 separate TCP connections for the p95 and p99 connection setup times. The gateway must count the expected connections to the benchmark destination.
+
+The CPU figures are scheduled process time per decimal GB of verified data. The reader includes descendants and exited processes and rejects known event loss. Before either product is measured, a short-lived child burns a measured amount of CPU and exits. A trace that misses its work fails calibration. Memory is the peak sampled sum of process working sets in each round. The comparison reports the median across the three rounds for each stream count. A throughput drop or a CPU, memory or latency increase above 10% fails the comparison and leaves the reports available for investigation.
+
+The two-hour Windows runs send verified traffic through the installed candidate on x64 and ARM64 and watch the routing service and engine identity. The Linux run installs the candidate Debian package and exercises held and fresh connections in network namespaces. It checks the live engine flow inventory during the run. An incomplete exposure record cannot pass. The release workflow requires these tests on the tagged source and verifies the scheduled Windows integrity night records before publication.
