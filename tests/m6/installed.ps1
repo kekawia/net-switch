@@ -62,6 +62,20 @@ try {
     Measure-M6Product 'candidate' $candidateVersion $setup100
     & $m6Node (Join-Path $m6Root 'sample-symbols.mjs') $goExe (Join-Path (Split-Path $ctl) 'netswitch-engine.exe') "$diagDir/m6-candidate/cpu.json"
     if ($LASTEXITCODE -ne 0) {throw 'Could not resolve sampled engine stacks'}
+    $env:NETSWITCH_M6_BATCH='1'
+    try { & (Join-Path $PSScriptRoot '../../scripts/build-windows-installer.ps1') -Arch $Arch -Version '1.0.1' } finally { Remove-Item Env:NETSWITCH_M6_BATCH }
+    $trial=Join-Path $dist "NetSwitch-Setup-1.0.1-$Arch.exe"
+    Invoke-SilentInstaller -ExePath $trial -LogName 'm6-read-batch.log' | Out-Null
+    $trialCtl=Join-Path $appDir 'app-1.0.1/netswitchctl.exe'
+    & $trialCtl start
+    if ($LASTEXITCODE -ne 0) {throw 'Trial candidate could not start'}
+    Start-Process (Join-Path $appDir 'netswitch-desktop.exe') -ArgumentList @('--resume','--background') -WindowStyle Hidden
+    Wait-Until 'batch routing and tray ready' 45 {
+      $s=(& $trialCtl status | ConvertFrom-Json)
+      return ($s.routing -eq 'on' -and $s.desktopPID -gt 0)
+    } | Out-Null
+    Assert-RoutedEcho 'M6 ordered ingress batch trial'
+    Measure-M6Product 'read-batch' '1.0.1' $trial
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {
