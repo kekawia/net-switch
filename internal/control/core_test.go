@@ -415,6 +415,10 @@ func testCoreWithFilesMode(t *testing.T, files *memoryFiles, clock *fakeClock, s
 }
 
 func testCoreWithFilesLocation(t *testing.T, files *memoryFiles, clock *fakeClock, serviceMode bool, location *time.Location) (*Core, *fakeEngine, *fakeClock, *memoryFiles) {
+	return testCoreWithFilesBoot(t, files, clock, serviceMode, location, "")
+}
+
+func testCoreWithFilesBoot(t *testing.T, files *memoryFiles, clock *fakeClock, serviceMode bool, location *time.Location, bootID string) (*Core, *fakeEngine, *fakeClock, *memoryFiles) {
 	t.Helper()
 	var serial atomic.Uint64
 	id := func() string { return fmt.Sprintf("%012x", serial.Add(1)) }
@@ -462,7 +466,7 @@ func testCoreWithFilesLocation(t *testing.T, files *memoryFiles, clock *fakeCloc
 		files.outsideCloses = append(files.outsideCloses, decoded)
 		files.recordOrder("outside-close")
 	}}
-	c, err := New(context.Background(), Options{ServiceMode: serviceMode, Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: location, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, LineID: func() string { return fmt.Sprintf("%06x", serial.Add(1)) }, Background: func(fn func()) { fn() }, Log: func(s string) {
+	c, err := New(context.Background(), Options{ServiceMode: serviceMode, BootID: bootID, Engine: f, Platform: p, Settings: store, Undo: us, Journal: j, IO: io, Clock: clock, Location: location, Mode: "tun", Version: "0.3.1", UserDir: "/test", ID: id, LineID: func() string { return fmt.Sprintf("%06x", serial.Add(1)) }, Background: func(fn func()) { fn() }, Log: func(s string) {
 		files.mu.Lock()
 		files.logs = append(files.logs, s)
 		files.order = append(files.order, traceLogKey(s))

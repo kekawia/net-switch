@@ -1316,17 +1316,7 @@ func (c *Core) SaveUsage() error {
 	defer c.usageWrite.Unlock()
 	return c.saveUsage(false)
 }
-func (c *Core) Shutdown(ctx context.Context) error {
-	return c.shutdown(ctx, false)
-}
-
-// ShutdownForService preserves only the update's durable routing choice. Quit
-// still commits an explicit stop through Shutdown, even during an update.
-func (c *Core) ShutdownForService(ctx context.Context) error {
-	return c.shutdown(ctx, true)
-}
-
-func (c *Core) shutdown(ctx context.Context, preserveUpdate bool) error {
+func (c *Core) shutdown(ctx context.Context, reason shutdownReason) error {
 	// quitting holds off new starts while the stop intent is written. It is
 	// not intent: a refused write puts it back and leaves wanted untouched.
 	c.mu.Lock()
@@ -1334,10 +1324,7 @@ func (c *Core) shutdown(ctx context.Context, preserveUpdate bool) error {
 	c.quitting = true
 	c.mu.Unlock()
 	if c.op.ServiceMode {
-		c.applyMu.Lock()
-		err := c.commitIntent(routingIntent{wanted: false, preserveUpdate: preserveUpdate})
-		c.applyMu.Unlock()
-		if err != nil {
+		if err := c.commitShutdownIntent(reason); err != nil {
 			c.mu.Lock()
 			c.quitting = wasQuitting
 			c.mu.Unlock()
