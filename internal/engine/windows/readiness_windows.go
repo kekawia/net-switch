@@ -229,6 +229,7 @@ func (p *readiness) stats() map[string]any {
 var relayClockStart = time.Now()
 
 const bulkReadDelay = 400 * time.Microsecond
+var m6BulkVariant string
 const bulkReadWindow = 20 * time.Millisecond
 
 // An active bulk socket can generate a completion for each incoming segment.
@@ -264,7 +265,11 @@ func (p *readiness) deliverBulkReads() {
 			return
 		case <-p.batchWake:
 		}
-		timer.Reset(bulkReadDelay)
+		delay := bulkReadDelay
+		if m6BulkVariant == "wide-long" {
+			delay = 1200 * time.Microsecond
+		}
+		timer.Reset(delay)
 		select {
 		case <-p.stop:
 			return

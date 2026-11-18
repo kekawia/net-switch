@@ -32,6 +32,15 @@ function Get-M6Count {
   $record = $stats.destinations.PSObject.Properties[$m6Target]
   if ($null -eq $record) { return [long]0 }; return [long]$record.Value
 }
+function Get-M6Interfaces {
+  $sample = @{}
+  foreach ($adapter in [Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces()) {
+    if ($adapter.Name -notin @('NetSwitch',$primaryIsp.alias)) {continue}
+    $c=$adapter.GetIPStatistics()
+    $sample[$adapter.Name]=@{id=$adapter.Id;rxBytes=$c.BytesReceived;txBytes=$c.BytesSent;rxPackets=$c.UnicastPacketsReceived;txPackets=$c.UnicastPacketsSent}
+  }
+  return $sample
+}
 function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $out = Join-Path $diagDir "m6-$label"
   $null=New-Item -ItemType Directory -Path $out -Force
@@ -41,6 +50,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   $usage=Join-Path $out 'cpu.json'
   $memory=[Collections.Generic.List[object]]::new()
   $before=Get-M6Count
+  $ifBefore=Get-M6Interfaces
   & wpr.exe -start "$m6Profile!NetSwitchCPU.Light" -filemode
   if ($LASTEXITCODE -ne 0) { throw "WPR start failed ($LASTEXITCODE)" }
   $finished=$false
@@ -79,6 +89,7 @@ function Measure-M6Product([string]$label,[string]$release,[string]$setup) {
   }
   $t=Get-Content -Raw -LiteralPath $traffic | ConvertFrom-Json
   $connections=(Get-M6Count)-$before
+  @{before=$ifBefore;after=(Get-M6Interfaces)} | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $out 'interfaces.json')
   if ($connections -ne $t.connections) { throw "TestISP saw $connections benchmark connections, expected $($t.connections)" }
   @{rootsFrom=$rootsFrom;rootsAt=$rootsAt;roots=$roots;installDirectory=$appDir;samples=$t.samples} | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM $inputData
   & $m6Reader $trace $inputData $usage

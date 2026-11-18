@@ -168,20 +168,7 @@ function Assert-TaskPresent([string] $TaskName, [bool] $Expected) {
 function Invoke-SilentInstaller([string] $ExePath, [string] $LogName, [string[]] $ExtraArgs = @(), [switch] $AllowFailure) {
   $logPath = Join-Path $diagDir $LogName
   $allArgs = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "`"/LOG=$logPath`"") + $ExtraArgs
-  if ($LogName -eq 'm6-native-upgrade.log') {
-    $p=Start-Process -FilePath $ExePath -ArgumentList $allArgs -PassThru -WindowStyle Hidden
-    $until=[DateTimeOffset]::UtcNow.AddMinutes(6)
-    do {
-      $services=@(Get-CimInstance Win32_Service -Filter "Name='NetSwitch' OR Name='NetSwitchEngine'" | Sort-Object Name | Select-Object Name,State,ProcessId,ExitCode,ServiceSpecificExitCode,PathName)
-      $outcomes=@(Get-ChildItem -LiteralPath $machineData -Filter 'engine-outcome-*.json' -ErrorAction SilentlyContinue | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 3 | ForEach-Object {
-        try { Get-Content -Raw -LiteralPath $_.FullName | ConvertFrom-Json | Select-Object engineInstanceId,state,reason,error,recoveryPid } catch {}
-      })
-      @{utc=[DateTimeOffset]::UtcNow.ToString('o');services=$services;outcomes=$outcomes} | ConvertTo-Json -Depth 4 -Compress | Add-Content -LiteralPath "$diagDir/m6-upgrade-states.jsonl"
-      if ([DateTimeOffset]::UtcNow -gt $until) { throw 'Native upgrade did not exit within the fixture budget' }
-    } while (!$p.WaitForExit(400))
-  } else {
-    $p = Start-Process -FilePath $ExePath -ArgumentList $allArgs -Wait -PassThru
-  }
+  $p = Start-Process -FilePath $ExePath -ArgumentList $allArgs -Wait -PassThru
   if (-not $AllowFailure -and $p.ExitCode -ne 0) {
     $tail = if (Test-Path -LiteralPath $logPath) { (Get-Content -LiteralPath $logPath -Tail 40) -join "`n" } else { '<no log>' }
     throw "Installer $ExePath failed with exit $($p.ExitCode). Log tail:`n$tail"

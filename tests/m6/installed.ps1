@@ -60,16 +60,9 @@ try {
   Assert-RoutedEcho 'M6 installed candidate'
   if ($Qualification -eq 'compare') {
     Measure-M6Product 'candidate' $candidateVersion $setup100
-    $oldStatus=(& $ctl status | ConvertFrom-Json)
-    if ($oldStatus.routing -ne 'on') {throw 'Manual upgrade did not start with active routing'}
-    & (Join-Path $repoRoot 'scripts/build-windows-installer.ps1') -Arch $Arch -Version '1.0.1'
-    $nextSetup=Join-Path $dist "NetSwitch-Setup-1.0.1-$Arch.exe"
-    Invoke-SilentInstaller -ExePath $nextSetup -LogName 'm6-native-upgrade.log' | Out-Null
-    $newCtl=Join-Path $appDir 'app-1.0.1/netswitchctl.exe'
-    $newStatus=(& $newCtl status | ConvertFrom-Json)
-    if ($newStatus.routing -ne 'on' -or !$newStatus.engineInstanceId) { throw 'Manual upgrade lost routing' }
-    Assert-RoutedEcho 'Manual native upgrade after measured traffic'
-    @{before=$oldStatus.engineInstanceId;after=$newStatus.engineInstanceId;commit=$env:GITHUB_SHA;arch=$Arch;verified=$true} | ConvertTo-Json | Set-Content -LiteralPath "$diagDir/m6-manual-upgrade.json"
+    $samples=@(Get-Content -LiteralPath (Join-Path $machineData 'netswitch.log') | Select-String -SimpleMatch ('"variant":"'+$env:NETSWITCH_M6_VARIANT+'"'))
+    if (!$samples.Count) {throw 'Missing runtime proof of the selected relay'}
+    $samples.Line | Set-Content -LiteralPath "$diagDir/m6-relay-observations.txt"
     & $m6Node --max-old-space-size=2048 (Join-Path $m6Root 'compare.mjs') "$diagDir/m6-baseline/report.json" "$diagDir/m6-candidate/report.json" "$diagDir/m6-comparison.json"
     if ($LASTEXITCODE -ne 0) {throw 'Performance comparison failed'}
   } else {

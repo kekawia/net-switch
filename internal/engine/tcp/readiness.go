@@ -37,6 +37,7 @@ type relayWorkers struct {
 // FIFO reservations prevent a previous holder overtaking a waiting relay.
 const RelayHeldBudget = 16 << 20
 const RelayAppLoans = 32
+var m6ReadGroup string
 
 type relayDirection struct {
 	blocked, finished bool
@@ -49,6 +50,7 @@ type relayScratch struct {
 	discard discardWriter
 	send    bytes.Reader
 	buffer  [RelayBuffer]byte
+	bulk    []byte
 }
 
 // discardWriter consumes up to n bytes from the app's endpoint without
@@ -101,12 +103,12 @@ func newRelayWorkers() *relayWorkers {
 	return w
 }
 
-func (w *relayWorkers) borrow(r *readyRelay) bool {
+func (w *relayWorkers) borrow(r *readyRelay, want int) int {
 	w.bufferMu.Lock()
 	defer w.bufferMu.Unlock()
 	if r.granted {
 		r.granted = false
-		return true
+		return 1
 	}
 	if r.queued || len(w.waiting) != 0 || w.loans == RelayHeldBudget/RelayBuffer || w.appLoans[r.app] == RelayAppLoans {
 		if !r.queued {
@@ -115,31 +117,32 @@ func (w *relayWorkers) borrow(r *readyRelay) bool {
 		}
 		r.waitBuffer = true
 		w.grantLocked()
-		return false
+		return 0
 	}
-	w.reserveLocked(r)
-	return true
+	n := min(want, RelayHeldBudget/RelayBuffer-w.loans, RelayAppLoans-w.appLoans[r.app])
+	w.reserveLocked(r, n)
+	return n
 }
 
-func (w *relayWorkers) reserveLocked(r *readyRelay) {
+func (w *relayWorkers) reserveLocked(r *readyRelay, n int) {
 	if w.appLoans == nil {
 		w.appLoans = make(map[string]int)
 	}
-	w.appLoans[r.app]++
-	w.loans++
+	w.appLoans[r.app] += n
+	w.loans += n
 	w.bufferPeak = max(w.bufferPeak, w.loans)
 }
 
-func (w *relayWorkers) giveBack(r *readyRelay) {
+func (w *relayWorkers) giveBack(r *readyRelay, n int) {
 	w.bufferMu.Lock()
-	w.returnLocked(r)
+	w.returnLocked(r, n)
 	w.grantLocked()
 	w.bufferMu.Unlock()
 }
 
-func (w *relayWorkers) returnLocked(r *readyRelay) {
-	w.loans--
-	w.appLoans[r.app]--
+func (w *relayWorkers) returnLocked(r *readyRelay, n int) {
+	w.loans -= n
+	w.appLoans[r.app] -= n
 	if w.appLoans[r.app] == 0 {
 		delete(w.appLoans, r.app)
 	}
@@ -153,7 +156,7 @@ func (w *relayWorkers) grantLocked() {
 			continue
 		}
 		if w.loans < RelayHeldBudget/RelayBuffer && w.appLoans[r.app] < RelayAppLoans {
-			w.reserveLocked(r)
+			w.reserveLocked(r, 1)
 			r.queued, r.granted = false, true
 			r.notify()
 		} else {
@@ -287,7 +290,7 @@ func (r *readyRelay) close(abort bool) {
 	r.workers.bufferMu.Lock()
 	if r.granted {
 		r.granted = false
-		r.workers.returnLocked(r)
+		r.workers.returnLocked(r, 1)
 	}
 	r.workers.grantLocked()
 	r.workers.bufferMu.Unlock()
@@ -374,25 +377,39 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 	// A busy flow yields after a bounded amount of work, so it cannot starve
 	// other readiness events, the ordered TUN reader, or process lookups.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
-		if !r.workers.borrow(r) {
+		const bulkLoans = 4
+		want := 1
+		if m6ReadGroup != "" && runtime.GOOS == "windows" && !up && r.c.down.Load() >= 512<<10 {
+			want = min(bulkLoans, ((256<<10)-moved+RelayBuffer-1)/RelayBuffer)
+		}
+		loans := r.workers.borrow(r, want)
+		if loans == 0 {
 			return false, nil
 		}
-		peeked, readErr := r.read(up, scratch.buffer[:], scratch)
-		if peeked < 0 || peeked > len(scratch.buffer) {
-			r.workers.giveBack(r)
+		b := scratch.buffer[:]
+		if loans > 1 {
+			if scratch.bulk == nil {
+				scratch.bulk = make([]byte, bulkLoans*RelayBuffer)
+			}
+			b = scratch.bulk[:loans*RelayBuffer]
+		}
+		b = b[:min(len(b), (256<<10)-moved)]
+		peeked, readErr := r.read(up, b, scratch)
+		if peeked < 0 || peeked > len(b) {
+			r.workers.giveBack(r, loans)
 			return false, io.ErrShortBuffer
 		}
 		if peeked > 0 {
-			n, err := r.write(up, scratch.buffer[:peeked], scratch)
+			n, err := r.write(up, b[:peeked], scratch)
 			if n < 0 || n > peeked {
-				r.workers.giveBack(r)
+				r.workers.giveBack(r, loans)
 				return false, io.ErrShortWrite
 			}
-			if consumeErr := r.discard(up, scratch.buffer[:n], scratch); consumeErr != nil {
-				r.workers.giveBack(r)
+			if consumeErr := r.discard(up, b[:n], scratch); consumeErr != nil {
+				r.workers.giveBack(r, loans)
 				return false, consumeErr
 			}
-			r.workers.giveBack(r)
+			r.workers.giveBack(r, loans)
 			if n > 0 {
 				moved += n
 				if up {
@@ -417,7 +434,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			// only once every byte before it has actually been consumed.
 			continue
 		}
-		r.workers.giveBack(r)
+		r.workers.giveBack(r, loans)
 		if errors.Is(readErr, platform.ErrWouldBlock) {
 			return false, nil
 		}
