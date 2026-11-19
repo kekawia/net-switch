@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/kekawia/net-switch/internal/buildinfo"
@@ -39,6 +41,15 @@ func main() {
 		}
 		fmt.Println(value)
 		return
+	}
+	if os.Getenv("GOMAXPROCS") == "" {
+		runtime.GOMAXPROCS(2)
+	}
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(50)
+	}
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(32 << 20)
 	}
 	lifecycle.SetDesktopUIFactory(host.New)
 	run := lifecycle.Desktop

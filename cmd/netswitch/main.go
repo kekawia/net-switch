@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 
 	"github.com/kekawia/net-switch/internal/lifecycle"
 	win "github.com/kekawia/net-switch/internal/platform/windows"
@@ -15,6 +17,15 @@ import (
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "service" {
+		if os.Getenv("GOMAXPROCS") == "" {
+			runtime.GOMAXPROCS(2)
+		}
+		if os.Getenv("GOGC") == "" {
+			debug.SetGCPercent(50)
+		}
+		if os.Getenv("GOMEMLIMIT") == "" {
+			debug.SetMemoryLimit(32 << 20)
+		}
 		if err := lifecycle.ServiceCommand(service.Control, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
