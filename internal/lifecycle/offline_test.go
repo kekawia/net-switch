@@ -465,3 +465,236 @@ vm.runInNewContext(appCode, sandbox);
 		t.Fatalf("node runtime check failed: %v\n%s", err, out)
 	}
 }
+
+func TestServiceAppJSClearsResolvedRoutingActionError(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	source, err := assets.UI.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transformed := ServiceAsset("app.js", source)
+	harness := `
+const fs = require('node:fs');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const appCode = fs.readFileSync(0, 'utf8');
+
+class Node {}
+function matchesSimple(el, sel) {
+  if (!el || !el.attributes) return false;
+  const parts = sel.split(/\s+/).filter(Boolean);
+  const last = parts[parts.length - 1];
+  const tagMatch = /^[a-z0-9-]+/i.exec(last);
+  if (tagMatch && el.tagName !== tagMatch[0].toUpperCase()) return false;
+  for (const m of last.matchAll(/\.([a-z0-9_-]+)/gi)) {
+    const classes = String(el.className || '').split(/\s+/);
+    if (!classes.includes(m[1])) return false;
+  }
+  for (const m of last.matchAll(/\[([^\]=]+)(?:=['"]?([^\]'"]*)['"]?)?\]/g)) {
+    if (m[2] !== undefined) {
+      if (String(el.attributes[m[1]] ?? '') !== m[2]) return false;
+    } else if (!(m[1] in el.attributes)) {
+      return false;
+    }
+  }
+  return true;
+}
+function findAll(root, sel, out = []) {
+  for (const child of root.children || []) {
+    if (matchesSimple(child, sel)) out.push(child);
+    findAll(child, sel, out);
+  }
+  return out;
+}
+function makeElement(tag) {
+  const listeners = new Map();
+  const children = [];
+  const dataset = {};
+  const attrs = {};
+  let text = '';
+  const el = Object.assign(new Node(), {
+    tagName: tag.toUpperCase(),
+    dataset,
+    attributes: attrs,
+    children,
+    style: { setProperty() {} },
+    className: '',
+    hidden: false,
+    disabled: false,
+    open: false,
+    innerHTML: '',
+    classList: {
+      toggle(c, force) {
+        const set = new Set(String(el.className || '').split(/\s+/).filter(Boolean));
+        const on = force === undefined ? !set.has(c) : Boolean(force);
+        if (on) set.add(c); else set.delete(c);
+        el.className = [...set].join(' ');
+      },
+      add(...cs) { cs.forEach((c) => el.classList.toggle(c, true)); },
+      remove(...cs) { cs.forEach((c) => el.classList.toggle(c, false)); },
+      contains(c) { return String(el.className || '').split(/\s+/).includes(c); },
+    },
+    setAttribute(k, v) {
+      attrs[k] = String(v);
+      if (k === 'data-kind') dataset.kind = String(v);
+      if (k === 'class') el.className = String(v);
+    },
+    removeAttribute(k) {
+      delete attrs[k];
+      if (k === 'data-kind') delete dataset.kind;
+    },
+    hasAttribute(k) { return k in attrs; },
+    hasChildNodes() { return children.length > 0; },
+    getAttribute(k) { return attrs[k] ?? null; },
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    dispatchEvent(type, ev = {}) {
+      for (const fn of listeners.get(type) ?? []) fn(ev);
+    },
+    insertBefore(node, ref) {
+      const idx = children.indexOf(node);
+      if (idx >= 0) children.splice(idx, 1);
+      if (!ref) { children.push(node); return node; }
+      const refIdx = children.indexOf(ref);
+      if (refIdx >= 0) children.splice(refIdx, 0, node);
+      else children.push(node);
+      return node;
+    },
+    append(...items) { for (const item of items) children.push(item); },
+    appendChild(child) { children.push(child); return child; },
+    replaceChildren(...items) { children.splice(0, children.length, ...items); },
+    remove() {},
+    focus() {},
+    contains() { return false; },
+    closest() { return null; },
+    showModal() { el.open = true; },
+    close() { el.open = false; },
+    querySelector(sel) { return findAll(el, sel)[0] || null; },
+    querySelectorAll(sel) { return findAll(el, sel); },
+  });
+  Object.defineProperty(el, 'textContent', {
+    get() { return children.length ? children.map((c) => c.textContent || '').join('') : text; },
+    set(v) { children.length = 0; text = String(v ?? ''); },
+  });
+  return el;
+}
+
+const byId = new Map();
+for (const id of ['routing-status','routing-toggle','lines','combine','notices','apps','empty','list-message','footer-note','open-settings','add-app','quit','panel']) {
+  const e = makeElement('div');
+  e.id = id;
+  byId.set(id, e);
+}
+const document = {
+  body: makeElement('body'),
+  activeElement: null,
+  getElementById(id) { return byId.get(id) || makeElement('div'); },
+  querySelector() { return makeElement('div'); },
+  createElement(tag) { return makeElement(tag); },
+  createElementNS(_ns, tag) { return makeElement(tag); },
+  createDocumentFragment() { return makeElement('#fragment'); },
+  createTextNode(t) { return Object.assign(new Node(), { nodeType: 3, textContent: String(t) }); },
+};
+
+const wvListeners = [];
+const storage = new Map([['token', 'tok1']]);
+const timers = new Map();
+let nextTimer = 1;
+const windowObj = {
+  chrome: { webview: { postMessage() {}, addEventListener(type, fn) { if (type === 'message') wvListeners.push(fn); } } },
+  addEventListener() {},
+  matchMedia() { return { matches: false, addEventListener() {} }; },
+};
+windowObj.window = windowObj;
+
+const setupState = { wifiBlocked: false, cableNotDefault: false, keepBothConnected: false, changed: { cableDefault: false, keepBoth: false } };
+const sampleLine = {
+  id: 'l1', alias: 'Ethernet', label: 'Cable', kind: 'wired', main: true,
+  connected: true, problem: null, ping: 12, connections: 1, carrying: true,
+  target: 'l1', rate: { down: 1024, up: 512 }, ssid: null, metered: false,
+  strict: false, cap: null, usage: { bytes: 0, periodStart: '2026-11-01T00:00:00.000Z' },
+  exhausted: false, weight: 1, share: null,
+};
+let currentRouting = { status: 'off', wanted: false, measuring: false, error: null, retryAt: null };
+function makeState() {
+  return {
+    mode: 'tun', version: '1.0.0', elevated: true, routing: currentRouting,
+    lines: [sampleLine], combine: { on: false, active: false, mode: 'auto', shares: {} },
+    setup: setupState, settings: { checkForUpdates: false, ipv6: 'off' },
+    apps: [], outside: [], events: [], usageError: null,
+  };
+}
+function noticeTexts() {
+  return byId.get('notices').children.map((c) => c.textContent);
+}
+async function tickPoll() {
+  const fn = Array.from(timers.values()).pop();
+  assert(fn, 'expected scheduled poll timer');
+  timers.clear();
+  fn();
+  await new Promise((r) => setTimeout(r, 20));
+}
+
+const sandbox = {
+  Node, window: windowObj, document,
+  sessionStorage: {
+    getItem(k) { return storage.has(k) ? storage.get(k) : null; },
+    setItem(k, v) { storage.set(k, String(v)); },
+    removeItem(k) { storage.delete(k); },
+  },
+  location: { hash: '', pathname: '/', replace() {} },
+  history: { replaceState() {} },
+  matchMedia: windowObj.matchMedia,
+  URL: { createObjectURL() { return 'blob:1'; }, revokeObjectURL() {} },
+  setTimeout(fn) { const id = nextTimer++; timers.set(id, fn); return id; },
+  clearTimeout(id) { timers.delete(id); },
+  Map, Set, Date, Math, Number, String, Boolean, Array, Object, JSON, Error, RegExp, Promise, console,
+  fetch: async (path) => {
+    if (path === '/api/routing') {
+      return { ok: false, status: 500, async json() { return { error: 'Something went wrong. Try again.' }; } };
+    }
+    return { ok: true, status: 200, async json() { return makeState(); } };
+  },
+};
+
+vm.runInNewContext(appCode, sandbox);
+
+(async () => {
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(noticeTexts(), []);
+
+  // Attempt 1 of turning routing on fails with HTTP 500.
+  byId.get('routing-toggle').dispatchEvent('click');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(noticeTexts(), ['Something went wrong. Try again.']);
+
+  // While Control shows its own routing error notice, do not duplicate the generic actionError underneath.
+  currentRouting = { status: 'error', wanted: true, measuring: false, error: 'Routing failed to start.', retryAt: Date.now() + 2000 };
+  await tickPoll();
+  assert.equal(noticeTexts().length, 1);
+  assert.match(noticeTexts()[0], /Routing failed to start\./);
+
+  // Automatic retry succeeds: routing reaches "on", clearing the stale actionError completely.
+  currentRouting = { status: 'on', wanted: true, measuring: true, error: null, retryAt: null };
+  await tickPoll();
+  assert.deepEqual(noticeTexts(), []);
+
+  // Same recovery check for a transient routing-off error once routing reaches "off".
+  byId.get('routing-toggle').dispatchEvent('click');
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(noticeTexts(), ['Something went wrong. Try again.']);
+  currentRouting = { status: 'off', wanted: false, measuring: false, error: null, retryAt: null };
+  await tickPoll();
+  assert.deepEqual(noticeTexts(), []);
+})().catch((err) => { console.error(err); process.exit(1); });
+`
+	cmd := exec.Command("node", "--max-old-space-size=2048", "-e", harness)
+	cmd.Stdin = strings.NewReader(string(transformed))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node runtime check failed: %v\n%s", err, out)
+	}
+}
