@@ -438,7 +438,7 @@ ordering as a negative control (it must destroy the witnessed replacement, or
 the handlecheck tripwire must stop it) and applies the same injection to the
 production teardown with a device-less fixture registrar, which must close
 only its own objects. `TestRegistrarRefusesWithoutInheritedCapabilities` needs
-no adapter. Hosted: `TestWintunRegistrarSession` (8 MiB rings; no non-pipe file
+no adapter. Hosted: `TestWintunRegistrarSession` (4 MiB rings; no non-pipe file
 handle added to the engine, including the DLL's adapter creation),
 `TestWintunRegistrarLoss` (registrar termination, job termination,
 query-remove, creator death; a parked reader with no write traffic must wake and

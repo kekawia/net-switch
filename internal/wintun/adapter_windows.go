@@ -54,7 +54,9 @@ func (c Config) defaults() Config {
 		c.MTU = 9000
 	}
 	if c.Capacity == 0 {
-		c.Capacity = 0x800000
+		// 4 MiB per ring (8 MiB total section) holds >16 ms at 2 Gbit/s while
+		// halving the non-paged section mapped in both engine and registrar.
+		c.Capacity = 0x400000
 	}
 	return c
 }
