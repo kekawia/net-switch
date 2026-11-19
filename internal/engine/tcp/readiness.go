@@ -91,10 +91,9 @@ type readyRelay struct {
 }
 
 func newRelayWorkers() *relayWorkers {
-	// Leave scheduling capacity for ordered ingress, the TUN writer and
-	// ACK processing. Relay work alone must not occupy every processor while
-	// its writes wait for those same consumers to make progress.
-	n := min(8, max(1, (runtime.GOMAXPROCS(0)+1)/2))
+	// Cap the pool at eight workers (at least four on smaller hosts) so
+	// parallel bulk streams make progress while keeping worker scratch bounded.
+	n := min(8, max(4, runtime.GOMAXPROCS(0)))
 	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{}), appLoans: make(map[string]int)}
 	w.finished = sync.NewCond(&w.mu)
 	for range n {
@@ -235,11 +234,14 @@ func (w *relayWorkers) run() {
 			} else {
 				r.scheduled = false
 			}
+			more := w.head != nil
 			w.mu.Unlock()
 			// A continuously readable connection must not keep every P until
 			// Go's preemption interval (longer than the owner lookup budget).
-			// Yield between bounded I/O quanta so admission and TUN ingress run.
-			runtime.Gosched()
+			// Yield between bounded I/O quanta when more relay work is queued.
+			if more {
+				runtime.Gosched()
+			}
 		}
 	}
 }
@@ -371,11 +373,102 @@ func (r *readyRelay) write(up bool, b []byte, scratch *relayScratch) (int, error
 	return int(n), stackError(err)
 }
 
+type bufferUsageEndpoint interface {
+	BufferUsage() (int, int)
+}
+
+type burstOutput interface {
+	BeginWriteBurst()
+	EndWriteBurst()
+}
+
+func (r *readyRelay) finishReadEOF(d *relayDirection, up bool) error {
+	d.finished = true
+	if up {
+		if err := r.remote.CloseWrite(); err != nil {
+			return err
+		}
+		// Receive shutdown is cleanup, as in Splice. A peer's FIN can
+		// already have moved the endpoint into TIME_WAIT, where another
+		// ShutdownRead reports not-connected. It must not abort the
+		// lost-final-ACK protection we just established.
+		r.c.ep.Shutdown(tcpip.ShutdownRead)
+		return nil
+	}
+	if err := stackError(r.c.ep.Shutdown(tcpip.ShutdownWrite)); err != nil {
+		return err
+	}
+	r.c.releaseAdmission()
+	r.remote.CloseRead()
+	return nil
+}
+
+// directDown moves bytes from the OS socket straight into gVisor's send queue
+// without a second MSG_PEEK copy. resizeMu prevents idle shrink between the
+// space check and ep.Write, so every byte consumed fits unless the endpoint
+// has closed or reset (which aborts both sides).
+func (r *readyRelay) directDown(d *relayDirection, b []byte, loans int, usage bufferUsageEndpoint, scratch *relayScratch) (moved int, cont, fallback bool, err error) {
+	r.c.resizeMu.Lock()
+	_, txUsed := usage.BufferUsage()
+	avail := int(r.c.ep.SocketOptions().GetSendBufferSize()) - txUsed
+	if avail <= 0 {
+		r.c.resizeMu.Unlock()
+		if r.c.ep.Readiness(waiter.EventErr|waiter.EventHUp)&(waiter.EventErr|waiter.EventHUp) == 0 {
+			r.workers.giveBack(r, loans)
+			d.blocked = true
+			return 0, false, false, nil
+		}
+		return 0, false, true, nil
+	}
+	readBuf := b[:min(len(b), avail)]
+	got, readErr := r.remote.TryRead(readBuf)
+	if got < 0 || got > len(readBuf) {
+		r.c.resizeMu.Unlock()
+		r.workers.giveBack(r, loans)
+		return 0, false, false, io.ErrShortBuffer
+	}
+	if got > 0 {
+		n, writeErr := r.write(false, readBuf[:got], scratch)
+		r.c.resizeMu.Unlock()
+		r.workers.giveBack(r, loans)
+		if n > 0 {
+			r.c.countTransfer(false, uint64(n))
+		}
+		if writeErr != nil {
+			return n, false, false, writeErr
+		}
+		if n != got {
+			return n, false, false, io.ErrShortWrite
+		}
+		return n, true, false, nil
+	}
+	r.c.resizeMu.Unlock()
+	r.workers.giveBack(r, loans)
+	if errors.Is(readErr, platform.ErrWouldBlock) {
+		return 0, false, false, nil
+	}
+	if errors.Is(readErr, io.EOF) {
+		return 0, false, false, r.finishReadEOF(d, false)
+	}
+	if readErr != nil {
+		return 0, false, false, readErr
+	}
+	return 0, false, false, io.ErrNoProgress
+}
+
 func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch) (bool, error) {
 	if d.finished {
 		return false, nil
 	}
 	d.blocked = false
+	var usage bufferUsageEndpoint
+	if !up {
+		usage, _ = r.c.ep.(bufferUsageEndpoint)
+		if burst, ok := r.forward.out.(burstOutput); ok {
+			burst.BeginWriteBurst()
+			defer burst.EndWriteBurst()
+		}
+	}
 	// A busy flow yields after a bounded amount of work, so it cannot starve
 	// other readiness events, the ordered TUN reader, or process lookups.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
@@ -395,6 +488,19 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			b = scratch.bulk[:loans*RelayBuffer]
 		}
 		b = b[:min(len(b), (256<<10)-moved)]
+		if usage != nil {
+			n, cont, fallback, err := r.directDown(d, b, loans, usage, scratch)
+			moved += n
+			if !fallback {
+				if err != nil {
+					return false, err
+				}
+				if cont {
+					continue
+				}
+				return false, nil
+			}
+		}
 		peeked, readErr := r.read(up, b, scratch)
 		if peeked < 0 || peeked > len(b) {
 			r.workers.giveBack(r, loans)
@@ -413,13 +519,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			r.workers.giveBack(r, loans)
 			if n > 0 {
 				moved += n
-				if up {
-					r.c.up.Add(uint64(n))
-					r.c.ticket.Add(uint64(n), 0)
-				} else {
-					r.c.down.Add(uint64(n))
-					r.c.ticket.Add(0, uint64(n))
-				}
+				r.c.countTransfer(up, uint64(n))
 			}
 			if errors.Is(err, platform.ErrWouldBlock) {
 				d.blocked = true
@@ -440,24 +540,7 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			return false, nil
 		}
 		if errors.Is(readErr, io.EOF) {
-			d.finished = true
-			if up {
-				if err := r.remote.CloseWrite(); err != nil {
-					return false, err
-				}
-				// Receive shutdown is cleanup, as in Splice. A peer's FIN can
-				// already have moved the endpoint into TIME_WAIT, where another
-				// ShutdownRead reports not-connected. It must not abort the
-				// lost-final-ACK protection we just established.
-				r.c.ep.Shutdown(tcpip.ShutdownRead)
-				return false, nil
-			}
-			if err := stackError(r.c.ep.Shutdown(tcpip.ShutdownWrite)); err != nil {
-				return false, err
-			}
-			r.c.releaseAdmission()
-			r.remote.CloseRead()
-			return false, nil
+			return false, r.finishReadEOF(d, up)
 		}
 		if readErr != nil {
 			return false, readErr
@@ -487,7 +570,7 @@ func (r *readyRelay) step(scratch *relayScratch) {
 		r.close(false)
 		return
 	}
-	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && !r.down.blocked, r.up.blocked); err != nil {
+	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && !r.down.blocked && !down, r.up.blocked && !up); err != nil {
 		r.close(true)
 		return
 	}

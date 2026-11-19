@@ -43,22 +43,53 @@ func TestBulkReadNotificationsLeaveFreshSocketsImmediate(t *testing.T) {
 func TestBulkReadRequiresRecentVolume(t *testing.T) {
 	c := &readySocket{watch: &socketWatch{}}
 	for i := range 128 {
-		c.noteRead(time.Duration(i)*bulkReadWindow, 1024)
+		c.noteRead(time.Duration(i)*bulkReadWindow, 1024, 32<<10)
 	}
 	if c.watch.bulkUntil.Load() != 0 {
 		t.Fatal("a low-rate stream acquired a batching delay")
 	}
 	now := 128 * bulkReadWindow
+	// Reads that completely fill a small caller buffer (n == requested) reflect
+	// destination backpressure, not a fragmented peer stream.
 	for range 64 {
-		c.noteRead(now, 1024)
+		c.noteRead(now, 1024, 1024)
+	}
+	if c.watch.bulkUntil.Load() != 0 {
+		t.Fatal("backpressure-capped reads acquired a batching delay")
+	}
+	now += bulkReadWindow
+	for range 64 {
+		c.noteRead(now, 1024, 32<<10)
 	}
 	expiry := c.watch.bulkUntil.Load()
 	if expiry != int64(now+bulkReadWindow) {
 		t.Fatal("a fragmented bulk transfer was not recognized")
 	}
-	c.noteRead(now+2*bulkReadWindow, 1)
+	c.noteRead(now+2*bulkReadWindow, 1, 32<<10)
 	if c.watch.bulkUntil.Load() != expiry {
 		t.Fatal("an interactive exchange after idle extended the batch window")
+	}
+}
+
+func TestBulkReadArmDefersWhenDataWasRead(t *testing.T) {
+	p := &readiness{stop: make(chan struct{}), batch: make(map[*socketWatch]struct{}), batchWake: make(chan struct{}, 1)}
+	w := &socketWatch{pool: p, wake: func() {}}
+	w.bulkUntil.Store(int64(time.Since(relayClockStart) + time.Minute))
+	w.didRead.Store(true)
+	if err := w.Arm(true, false); err != nil {
+		t.Fatalf("deferred bulk Arm failed: %v", err)
+	}
+	if w.pending {
+		t.Fatal("deferred bulk Arm posted an immediate WSARecv")
+	}
+	if w.didRead.Load() {
+		t.Fatal("deferred bulk Arm did not clear didRead")
+	}
+	p.batchMu.Lock()
+	_, queued := p.batch[w]
+	p.batchMu.Unlock()
+	if !queued {
+		t.Fatal("deferred bulk Arm did not queue the watch on the shared batch timer")
 	}
 }
 

@@ -37,6 +37,12 @@ type TunCloseStarter interface{ BeginClose() }
 // remove the TUN. Cancelling sibling contexts alone does not order their work.
 type RouteQuiescer interface{ Quiesce() }
 
+// BatchReader reads packets already available in the TUN receive path without
+// waiting to fill a batch. It preserves wire order and returns the count read.
+type BatchReader interface {
+	ReadBatch(context.Context, [][]byte, []int) (int, error)
+}
+
 // BatchWriter accepts packets already available in the link queue, without
 // waiting to fill a batch. The return count excludes packets dropped under load.
 type BatchWriter interface {

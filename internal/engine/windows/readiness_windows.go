@@ -95,6 +95,7 @@ type socketWatch struct {
 	pin                      runtime.Pinner
 	pending, detached, write bool
 	bulkUntil                atomic.Int64
+	didRead                  atomic.Bool
 	drained                  chan struct{}
 	detachDone               chan struct{}
 	detachErr                error
@@ -228,18 +229,15 @@ func (p *readiness) stats() map[string]any {
 
 var relayClockStart = time.Now()
 
-const bulkReadDelay = 1200 * time.Microsecond
+const bulkReadDelay = 600 * time.Microsecond
 const bulkReadWindow = 20 * time.Millisecond
 
-// An active bulk socket can generate a completion for each incoming segment.
-// Give these notifications one short shared batch. The bytes stay in Winsock,
-// so there is no outstanding payload operation, buffer loan or per-flow timer.
-func (w *socketWatch) readable(wake func()) {
+func (w *socketWatch) inBulkMode() bool {
 	until := w.bulkUntil.Load()
-	if until == 0 || int64(time.Since(relayClockStart)) >= until {
-		wake()
-		return
-	}
+	return until != 0 && int64(time.Since(relayClockStart)) < until
+}
+
+func (w *socketWatch) queueBulk() {
 	p := w.pool
 	p.batchMu.Lock()
 	first := len(p.batch) == 0
@@ -251,6 +249,17 @@ func (w *socketWatch) readable(wake func()) {
 		}
 	}
 	p.batchMu.Unlock()
+}
+
+// An active bulk socket can generate a completion for each incoming segment.
+// Give these notifications one short shared batch. The bytes stay in Winsock,
+// so there is no outstanding payload operation, buffer loan or per-flow timer.
+func (w *socketWatch) readable(wake func()) {
+	if !w.inBulkMode() {
+		wake()
+		return
+	}
+	w.queueBulk()
 }
 
 func (p *readiness) deliverBulkReads() {
@@ -277,7 +286,7 @@ func (p *readiness) deliverBulkReads() {
 			w.mu.Lock()
 			wake, detached := w.wake, w.detached
 			w.mu.Unlock()
-			if !detached {
+			if !detached && wake != nil {
 				wake()
 			}
 		}
@@ -443,6 +452,11 @@ func (w *socketWatch) Arm(read, write bool) error {
 	}
 	if !read || w.pending {
 		w.mu.Unlock()
+		return nil
+	}
+	if w.inBulkMode() && w.didRead.Swap(false) {
+		w.mu.Unlock()
+		w.queueBulk()
 		return nil
 	}
 	w.op = windows.Overlapped{}
@@ -619,19 +633,22 @@ func (c *readySocket) tryReceive(b []byte, flags uint32) (int, error) {
 	}
 	n, err := socketIOFlags(c.handle, "recv", b, flags)
 	if flags == 0 && n > 0 {
-		c.noteRead(time.Since(relayClockStart), n)
+		if c.watch != nil {
+			c.watch.didRead.Store(true)
+		}
+		c.noteRead(time.Since(relayClockStart), n, len(b))
 	}
 	return n, err
 }
 
 // Count only bytes consumed from the socket. A long-lived interactive flow
 // must not acquire a batching delay merely by accumulating bytes over time.
-func (c *readySocket) noteRead(now time.Duration, n int) {
+func (c *readySocket) noteRead(now time.Duration, n, requested int) {
 	if now-c.readWindow >= bulkReadWindow {
 		c.readWindow, c.windowBytes = now, 0
 	}
 	c.windowBytes += n
-	if c.windowBytes >= 64<<10 && n < 16<<10 {
+	if c.windowBytes >= 64<<10 && n < 16<<10 && n < requested {
 		c.watch.bulkUntil.Store(int64(now + bulkReadWindow))
 	}
 }

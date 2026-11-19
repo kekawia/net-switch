@@ -1,6 +1,7 @@
 package tcp
 
 import (
+	"math/bits"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -12,17 +13,19 @@ import (
 )
 
 type connection struct {
-	id               stack.TransportEndpointID
-	completed        atomic.Bool
-	ready            atomic.Pointer[readyRelay]
-	ep               tcpip.Endpoint
-	ticket           flowapi.Ticket
-	forward          *Forwarder
-	up, down         atomic.Uint64
-	lastUp, lastDown uint64
-	last             time.Time
-	clock            tcpip.Clock
-	overflowDeadline atomic.Int64
+	id                 stack.TransportEndpointID
+	completed          atomic.Bool
+	ready              atomic.Pointer[readyRelay]
+	ep                 tcpip.Endpoint
+	ticket             flowapi.Ticket
+	forward            *Forwarder
+	up, down           atomic.Uint64
+	resizeMu           sync.Mutex
+	lastUp, lastDown   uint64
+	grownUp, grownDown uint64
+	last               time.Time
+	clock              tcpip.Clock
+	overflowDeadline   atomic.Int64
 }
 
 // One clock for all flows. Socket limits disable unaccounted autotuning.
@@ -112,6 +115,24 @@ func (f *Forwarder) sweep(now time.Time) {
 }
 
 func (c *connection) resize(now time.Time) {
+	c.resizeAt(now, true)
+}
+
+func (c *connection) countTransfer(up bool, n uint64) {
+	var total uint64
+	if up {
+		total = c.up.Add(n)
+		c.ticket.Add(n, 0)
+	} else {
+		total = c.down.Add(n)
+		c.ticket.Add(0, n)
+	}
+	if total >= MinimumBuffer && total-n < 8<<20 && bits.Len64(total) != bits.Len64(total-n) && c.clock != nil {
+		c.resizeAt(c.clock.Now(), false)
+	}
+}
+
+func (c *connection) resizeAt(now time.Time, periodic bool) {
 	b, ok := c.ticket.(interface {
 		Grow(int, int) bool
 		Shrink(int, int)
@@ -119,9 +140,11 @@ func (c *connection) resize(now time.Time) {
 	if !ok {
 		return
 	}
+	c.resizeMu.Lock()
+	defer c.resizeMu.Unlock()
 	u, d := c.up.Load(), c.down.Load()
 	rx, tx := c.ticket.Buffers()
-	if u == c.lastUp && d == c.lastDown {
+	if periodic && u == c.lastUp && d == c.lastDown {
 		if rx == MinimumBuffer && tx == MinimumBuffer {
 			return
 		}
@@ -134,18 +157,34 @@ func (c *connection) resize(now time.Time) {
 				rxUsed, txUsed := ep.BufferUsage()
 				b.Shrink(min(rx, max(MinimumBuffer, rxUsed)), min(tx, max(MinimumBuffer, txUsed)))
 			}
+			c.grownUp, c.grownDown = u, d
 		}
 		return
 	}
 	nextRX, nextTX := rx, tx
-	if u-c.lastUp >= uint64(rx) {
+	if u-c.grownUp >= uint64(rx) {
 		nextRX = min(rx*2, 8<<20)
 	}
-	if d-c.lastDown >= uint64(tx) {
+	if d-c.grownDown >= uint64(tx) {
 		nextTX = min(tx*2, 6<<20)
 	}
-	c.last, c.lastUp, c.lastDown = now, u, d
+	if periodic {
+		if u-c.lastUp < uint64(rx) {
+			c.grownUp = u
+		}
+		if d-c.lastDown < uint64(tx) {
+			c.grownDown = d
+		}
+		c.lastUp, c.lastDown = u, d
+	}
+	c.last = now
 	if (nextRX != rx || nextTX != tx) && b.Grow(nextRX, nextTX) {
+		if nextRX != rx {
+			c.grownUp = u
+		}
+		if nextTX != tx {
+			c.grownDown = d
+		}
 		c.ep.SocketOptions().SetReceiveBufferSize(int64(nextRX), true)
 		c.ep.SocketOptions().SetSendBufferSize(int64(nextTX), true)
 	}

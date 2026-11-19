@@ -230,6 +230,53 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 				return
 			}
 		}
+		verified, hasVerifier := tun.(platform.ChecksumVerifier)
+		if provTun == nil {
+			if batchReader, ok := tun.(platform.BatchReader); ok {
+				const readBatchSize = 64
+				backing := make([]byte, readBatchSize*ns.MTU)
+				bufs := make([][]byte, readBatchSize)
+				sizes := make([]int, readBatchSize)
+				for i := range bufs {
+					bufs[i] = backing[i*ns.MTU : (i+1)*ns.MTU : (i+1)*ns.MTU]
+				}
+				for {
+					n, err := batchReader.ReadBatch(run, bufs, sizes)
+					if n > 0 {
+						link.BeginWriteBurst()
+						for i := range n {
+							sz := sizes[i]
+							if sz <= 0 || sz > len(bufs[i]) {
+								continue
+							}
+							pkt := bufs[i][:sz]
+							if echo.handle(pkt) {
+								continue
+							}
+							proto := header.IPv4ProtocolNumber
+							if pkt[0]>>4 == 6 {
+								proto = header.IPv6ProtocolNumber
+							} else if pkt[0]>>4 != 4 {
+								continue
+							}
+							p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(pkt)})
+							if hasVerifier {
+								p.RXChecksumValidated = verified.RXChecksumVerified(pkt)
+							}
+							link.InjectInbound(proto, p)
+							p.DecRef()
+						}
+						link.EndWriteBurst()
+					}
+					if err != nil {
+						if run.Err() == nil {
+							e.fail(link, err)
+						}
+						return
+					}
+				}
+			}
+		}
 		b := make([]byte, ns.MTU)
 		for {
 			var (
@@ -265,7 +312,7 @@ func (e *Engine) Start(ctx context.Context, r policy.Revision) (policy.Applied, 
 			p := gv.NewPacketBuffer(gv.PacketBufferOptions{Payload: buffer.MakeWithData(b[:n])})
 			p.NetSwitchProvenance = prov
 			prov = nil
-			if verified, ok := tun.(platform.ChecksumVerifier); ok {
+			if hasVerifier {
 				p.RXChecksumValidated = verified.RXChecksumVerified(b[:n])
 			}
 			link.InjectInbound(proto, p)

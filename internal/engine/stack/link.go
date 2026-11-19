@@ -175,6 +175,7 @@ type Link struct {
 	mtu           atomic.Uint32
 	closed        bool
 	onClose       func()
+	burstDepth    atomic.Int32
 	ready         chan struct{}
 	done          chan struct{}
 	Dropped       atomic.Uint64
@@ -222,9 +223,11 @@ func (l *Link) enqueue(size int, kind packetClass, bulk bool, copyInto func([]by
 	l.queue[(l.head+l.count)%QueuePackets] = p
 	l.count++
 	l.peak = max(l.peak, l.count)
-	select {
-	case l.ready <- struct{}{}:
-	default:
+	if l.burstDepth.Load() == 0 || l.count >= 64 {
+		select {
+		case l.ready <- struct{}{}:
+		default:
+		}
 	}
 	depth := l.count
 	l.mu.Unlock()
@@ -236,6 +239,28 @@ func (l *Link) enqueue(size int, kind packetClass, bulk bool, copyInto func([]by
 		runtime.Gosched()
 	}
 	return true
+}
+
+// BeginWriteBurst and EndWriteBurst let a producer that emits a multi-packet
+// TCP burst (such as a bulk write or ACK batch) coalesce its ready signal so
+// the TUN writer drains the burst in one WriteBatch instead of waking on the
+// first segment. Queue depth >= 64 still wakes immediately.
+func (l *Link) BeginWriteBurst() {
+	l.burstDepth.Add(1)
+}
+
+func (l *Link) EndWriteBurst() {
+	if l.burstDepth.Add(-1) == 0 {
+		l.mu.Lock()
+		has := l.count > 0
+		l.mu.Unlock()
+		if has {
+			select {
+			case l.ready <- struct{}{}:
+			default:
+			}
+		}
+	}
 }
 
 func (l *Link) Send(p []byte) bool {

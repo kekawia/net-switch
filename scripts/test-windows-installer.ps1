@@ -16,6 +16,13 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_OS -ne 'Windows' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted') {
   throw 'This destructive installer and migration suite runs only on disposable GitHub-hosted Windows runners.'
 }
+if ($Qualification -ne 'installer') {
+  # Hosted Windows runners launch workflow shells at BelowNormal (priority 6),
+  # while Windows SCM starts the installed 1.0 service at Normal (priority 8).
+  # Raise the qualification harness to Normal so 0.3.2, 1.0, TestISP and the
+  # traffic generator share CPU equally as they do on a real desktop.
+  [Diagnostics.Process]::GetCurrentProcess().PriorityClass = [Diagnostics.ProcessPriorityClass]::Normal
+}
 
 . (Join-Path $PSScriptRoot 'build-common.ps1')
 

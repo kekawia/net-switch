@@ -2,11 +2,15 @@ package tcp
 
 import (
 	"context"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kekawia/net-switch/internal/engine/flows"
+	"github.com/kekawia/net-switch/internal/engine/platform"
+	"github.com/kekawia/net-switch/internal/engine/policy"
 	ns "github.com/kekawia/net-switch/internal/engine/stack"
 	"github.com/kekawia/net-switch/internal/engine/testfake"
 	"gvisor.dev/gvisor/pkg/buffer"
@@ -15,6 +19,7 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 	gv "gvisor.dev/gvisor/pkg/tcpip/stack"
 	gtcp "gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
+	"gvisor.dev/gvisor/pkg/waiter"
 )
 
 type heldSweepEndpoint struct {
@@ -82,4 +87,64 @@ func TestHandleDuring65536FlowSweep(t *testing.T) {
 		}
 	})
 	t.Log("Handle completed admission while the 65,536-flow sweep was held inside endpoint work")
+}
+
+func TestEarlyTransferGrowthAndTrickleProtection(t *testing.T) {
+	l := ns.NewLink()
+	s, err := ns.New(l, ns.DefaultOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { s.Close(); s.Wait(); l.Close() }()
+
+	// Use a real gVisor TCP endpoint and flow ticket so SetSendBufferSize and
+	// budget accounting run end-to-end.
+	ctrl := flows.New(flows.Defaults(), nil)
+	cfg := policy.Config{Lines: []platform.Line{{ID: "A"}}}
+	if _, err := ctrl.Apply(policy.Revision{N: 1, Hash: policy.Hash(cfg), Config: cfg}); err != nil {
+		t.Fatal(err)
+	}
+	ticket, err := ctrl.Begin("tcp", platform.Tuple{
+		Source:      netip.MustParseAddrPort("198.18.0.2:40000"),
+		Destination: netip.MustParseAddrPort("203.0.113.7:443"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ticket.Close()
+	if _, err := ticket.Resolve(platform.Owner{AppID: "test.exe"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ep, terr := s.NewEndpoint(gtcp.ProtocolNumber, header.IPv4ProtocolNumber, new(waiter.Queue))
+	if terr != nil {
+		t.Fatal(terr)
+	}
+	defer ep.Close()
+	ep.SocketOptions().SetReceiveBufferSize(MinimumBuffer, true)
+	ep.SocketOptions().SetSendBufferSize(MinimumBuffer, true)
+
+	c := &connection{ep: ep, ticket: ticket, clock: s.Clock(), last: s.Clock().Now()}
+
+	// A burst of MinimumBuffer bytes grows immediately on the power-of-two
+	// crossing without waiting for the 250 ms sweep.
+	c.countTransfer(false, MinimumBuffer)
+	_, tx := ticket.Buffers()
+	if tx != 2*MinimumBuffer {
+		t.Fatalf("send buffer after %d bytes = %d, want %d", MinimumBuffer, tx, 2*MinimumBuffer)
+	}
+
+	// A low-rate trickle spread across periodic ticks must reset grownDown and
+	// must not grow when cumulative bytes cross the next power of two.
+	now := s.Clock().Now()
+	for i := range 8 {
+		now = now.Add(250 * time.Millisecond)
+		c.countTransfer(false, 16<<10)
+		c.resize(now)
+		_ = i
+	}
+	_, txAfterTrickle := ticket.Buffers()
+	if txAfterTrickle != 2*MinimumBuffer {
+		t.Fatalf("trickle falsely grew send buffer to %d, want %d", txAfterTrickle, 2*MinimumBuffer)
+	}
 }

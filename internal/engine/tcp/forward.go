@@ -474,7 +474,14 @@ func (f *Forwarder) relay(ctx context.Context, c *connection, app *onceCloseConn
 	defer func() { app.Close(); c.releaseAdmission() }()
 	defer stopRemote()
 	defer stopApp()
-	count := func(u, d uint64) { c.up.Add(u); c.down.Add(d); c.ticket.Add(u, d) }
+	count := func(u, d uint64) {
+		if u > 0 {
+			c.countTransfer(true, u)
+		}
+		if d > 0 {
+			c.countTransfer(false, d)
+		}
+	}
 	if err := Splice(ctx, app, remote, count, abort); err != nil {
 		abort()
 	}

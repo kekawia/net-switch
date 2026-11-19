@@ -171,6 +171,7 @@ func (p *readyPeer) Arm(read, write bool) error {
 func (p *readyPeer) TryRead(b []byte) (int, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.maxPeek = max(p.maxPeek, len(b))
 	if p.download.Len() > 0 {
 		return p.download.Read(b)
 	}
@@ -267,8 +268,8 @@ func TestReadyRelayBackpressureShortWritesAndHalfClose(t *testing.T) {
 	}
 	peer.mu.Lock()
 	defer peer.mu.Unlock()
-	if runtime.GOOS == "windows" && peer.maxPeek != 4*RelayBuffer {
-		t.Fatalf("bulk transfer requested only %d bytes per peek", peer.maxPeek)
+	if runtime.GOOS == "windows" && peer.maxPeek != min(4*RelayBuffer, MinimumBuffer) {
+		t.Fatalf("bulk transfer requested only %d bytes per read", peer.maxPeek)
 	}
 }
 
