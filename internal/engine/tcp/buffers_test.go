@@ -154,9 +154,9 @@ func TestEarlyTransferGrowthAndTrickleProtection(t *testing.T) {
 		t.Fatalf("trickle falsely grew send buffer to %d, want %d", txAfterTrickle, earlyBufferCap)
 	}
 
-	// Sustained high throughput grows every two 250 ms ticks and reaches the
-	// full 6 MiB send cap within 2.5 s (well inside the 5 s budget test).
-	for range 10 {
+	// Sustained high throughput grows every three 250 ms ticks and reaches the
+	// full 6 MiB send cap within 3.75 s (well inside the 5 s budget test).
+	for range 15 {
 		now = now.Add(250 * time.Millisecond)
 		c.countTransfer(false, 6<<20)
 		c.resize(now)

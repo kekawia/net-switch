@@ -91,9 +91,9 @@ type readyRelay struct {
 }
 
 func newRelayWorkers() *relayWorkers {
-	// Cap the pool at eight workers (at least four on smaller hosts) so
-	// parallel bulk streams make progress while keeping worker scratch bounded.
-	n := min(8, max(4, runtime.GOMAXPROCS(0)))
+	// Leave scheduling capacity for ordered ingress, the TUN writer and
+	// ACK processing while keeping worker scratch and concurrent send queues bounded.
+	n := min(8, max(2, (runtime.GOMAXPROCS(0)+1)/2))
 	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{}), appLoans: make(map[string]int)}
 	w.finished = sync.NewCond(&w.mu)
 	for range n {

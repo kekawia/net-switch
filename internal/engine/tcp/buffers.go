@@ -123,10 +123,10 @@ const (
 	// Short high-speed flows need room above the 64 KiB floor immediately,
 	// without allocating multi-megabyte send queues that stay idle in Go's heap.
 	earlyBufferCap = 256 << 10
-	// Above earlyBufferCap, require sustained demand across two 250 ms ticks
-	// (450 ms tolerates minor timer jitter) so full 6 MiB/8 MiB grants still
-	// arrive within 2.5 s while short parallel bursts stay compact.
-	sustainedGrowInterval = 450 * time.Millisecond
+	// Above earlyBufferCap, require sustained demand across three 250 ms ticks
+	// (700 ms tolerates minor timer jitter) so full 6 MiB/8 MiB grants still
+	// arrive within 3.75 s while short parallel bursts stay within 512 KiB/flow.
+	sustainedGrowInterval = 700 * time.Millisecond
 )
 
 func (c *connection) countTransfer(up bool, n uint64) {
