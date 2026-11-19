@@ -7,12 +7,20 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/kekawia/net-switch/internal/platform/windows/observer"
 	"golang.org/x/sys/windows"
 )
 
 const ipUnicastIf = 31
 
-func probe(opts options) probeResult {
+func runProbeOptions(opts probeOptions) int {
+	if err := observer.WriteLine(probe(opts)); err != nil {
+		return 1
+	}
+	return 0
+}
+
+func probe(opts probeOptions) probeResult {
 	targets, err := probeTargets(opts.targets)
 	if err != nil {
 		return probeResult{Error: err.Error()}

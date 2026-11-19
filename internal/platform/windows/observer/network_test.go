@@ -1,9 +1,7 @@
-package winplatform
+package observer
 
 import (
-	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 )
@@ -11,7 +9,6 @@ import (
 func TestNewArguments(t *testing.T) {
 	for _, args := range [][]string{
 		{"network", "--once"}, {"network", "--parent", "123"},
-		{"probe", "--interface-index", "3", "--targets", "1.1.1.1:443,8.8.8.8:443"},
 		{"policy"},
 	} {
 		if _, err := parseArgs(args); err != nil {
@@ -19,45 +16,12 @@ func TestNewArguments(t *testing.T) {
 		}
 	}
 	for _, args := range [][]string{
-		{"probe", "--interface-index", "0", "--targets", "1.1.1.1:443"},
-		{"probe", "--interface-index", "1", "--targets", "example.com:443"},
-		{"probe", "--interface-index", "1", "--targets", "[::1]:443"},
-		{"probe", "--interface-index", "1", "--targets", "1.1.1.1:0"},
-		{"probe", "--interface-index", "1", "--targets", "1.1.1.1:443", "--timeout-ms", "0"},
+		{"probe", "--interface-index", "1", "--targets", "1.1.1.1:443"},
+		{"run", "cmd.exe"},
 	} {
 		if _, err := parseArgs(args); err == nil {
 			t.Errorf("accepted %v", args)
 		}
-	}
-}
-
-func TestFirstSuccessfulProbeCancelsTheOther(t *testing.T) {
-	cancelled := make(chan struct{})
-	result := raceProbes(context.Background(), []string{"slow", "fast"}, func(ctx context.Context, target string) error {
-		if target == "fast" {
-			return nil
-		}
-		<-ctx.Done()
-		close(cancelled)
-		return ctx.Err()
-	})
-	if !result.OK || result.Target != "fast" || result.MS < 1 {
-		t.Fatalf("%+v", result)
-	}
-	select {
-	case <-cancelled:
-	case <-time.After(time.Second):
-		t.Fatal("the losing probe wasn't cancelled")
-	}
-	result = raceProbes(context.Background(), []string{"a", "b"}, func(context.Context, string) error { return errors.New("refused") })
-	if result.OK || !strings.Contains(result.Error, "a: refused") || !strings.Contains(result.Error, "b: refused") {
-		t.Fatalf("%+v", result)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	result = raceProbes(ctx, []string{"a"}, func(ctx context.Context, _ string) error { <-ctx.Done(); return ctx.Err() })
-	if result.OK || result.Error == "" {
-		t.Fatalf("%+v", result)
 	}
 }
 

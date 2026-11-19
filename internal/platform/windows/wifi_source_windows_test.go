@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -12,32 +13,39 @@ import (
 )
 
 // The privacy fallback is deliberately stronger than banning opcode 7:
-// The 1.0 Windows reader package must have no Native Wi-Fi entry point at all.
-// Include build-constrained files, not the frozen 0.3.x helper.
+// The 1.0 Windows reader packages must have no Native Wi-Fi entry point at all.
+// Include build-constrained files and the extracted observer subpackage, not
+// the frozen 0.3.x helper.
 func TestSSIDNoLocationAPIs(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatal(err)
-	}
 	files := 0
-	for _, entry := range entries {
-		path := filepath.Join(".", entry.Name())
+	observerFiles := 0
+	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
 		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			continue
+			return nil
 		}
 		files++
+		if filepath.Dir(path) == "observer" {
+			observerFiles++
+		}
 		body, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		if symbol := locationAPISymbol(body); symbol != "" {
 			t.Errorf("%s imports or resolves location API %q", path, symbol)
 		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if files < 10 {
-		t.Fatalf("source guard visited only %d files", files)
+	if files < 10 || observerFiles < 5 {
+		t.Fatalf("source guard visited only %d files (%d in observer)", files, observerFiles)
 	}
-	t.Logf("checked %d production files; no Native Wi-Fi/location API symbols", files)
+	t.Logf("checked %d production files (%d in observer); no Native Wi-Fi/location API symbols", files, observerFiles)
 }
 
 func locationAPISymbol(body []byte) string {

@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 import (
 	"errors"
@@ -12,17 +12,12 @@ import (
 func runOptions(opts options) int {
 	switch opts.mode {
 	case "policy":
-		policy, err := readPolicy()
+		policy, err := ReadPolicy()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
 		if err := writeLine(map[string]any{"policy": policy}); err != nil {
-			return 1
-		}
-		return 0
-	case "probe":
-		if err := writeLine(probe(opts)); err != nil {
 			return 1
 		}
 		return 0

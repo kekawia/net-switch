@@ -14,7 +14,7 @@ const cases = {
   // Only Markdown at the repository root is documentation-only.
   docs: ['README.md', 'CHANGELOG.md', 'CONTRIBUTING.md', 'SECURITY.md'],
   frozen: ['lib/engine.mjs', 'server.mjs', 'lib/tray.cs', 'lib/tray.manifest', 'helper/main.go', 'test/engine.test.mjs', 'lib/README.md'],
-  go_shared: ['internal/engine/stack/stack.go', 'cmd/netswitch/main.go', 'internal/platform/windows/meters.go', 'internal/usage/GO-LICENSE.txt'],
+  go_shared: ['internal/engine/stack/stack.go', 'cmd/netswitch/main.go', 'internal/platform/windows/observer/meters.go', 'internal/usage/GO-LICENSE.txt'],
   go_windows: ['internal/wintun/ring_windows.go', 'internal/platform/windows/com_windows_test.go', 'internal/wintun/README.md'],
   go_linux: ['internal/platform/linux/socket_linux.go', 'cmd/netswitch/main_linux_arm64.go'],
   tests_linux: ['tests/linux/wire/wire.go', 'tests/linux/suite/suite.go', 'tests/linux/snap-inputs.sh', 'tests/linux/suite/snap-inputs.json'],

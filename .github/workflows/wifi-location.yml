@@ -34,7 +34,7 @@ jobs:
           cache: false
       - name: Pure parsing, null, lifetime and forbidden API regressions
         run: |
-          go test -v -count=1 -run 'TestSSID' ./internal/platform/windows
+          go test -v -count=1 -run 'TestSSID' ./internal/platform/windows ./internal/platform/windows/observer
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build distinct binary identities for the reader and positive control
         id: probes

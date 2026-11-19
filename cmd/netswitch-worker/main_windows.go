@@ -7,12 +7,12 @@ import (
 	"os"
 
 	"github.com/kekawia/net-switch/internal/buildinfo"
-	win "github.com/kekawia/net-switch/internal/platform/windows"
+	"github.com/kekawia/net-switch/internal/platform/windows/observer"
 )
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "worker" {
-		os.Exit(win.RunStream(os.Args[2:]))
+		os.Exit(observer.RunStream(os.Args[2:]))
 	}
 	if len(os.Args) == 2 && os.Args[1] == "version" {
 		fmt.Println("netswitch-worker", buildinfo.String())

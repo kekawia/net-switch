@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 import (
 	"fmt"
@@ -7,6 +7,7 @@ import (
 	"unicode/utf16"
 	"unsafe"
 
+	"github.com/kekawia/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -26,7 +27,7 @@ func newHString(value string) (uintptr, error) {
 	}
 	var handle uintptr
 	hr, _, _ := winrt.NewProc("WindowsCreateString").Call(uintptr(unsafe.Pointer(data)), uintptr(len(units)), uintptr(unsafe.Pointer(&handle)))
-	return handle, hresult(hr)
+	return handle, winapi.HRESULT(hr)
 }
 
 func deleteHString(handle uintptr) {
@@ -51,7 +52,7 @@ func readSSIDs() (map[string]string, error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	hr, _, _ := winrt.NewProc("RoInitialize").Call(1) // RO_INIT_MULTITHREADED
-	if err := hresult(hr); err != nil {
+	if err := winapi.HRESULT(hr); err != nil {
 		return nil, fmt.Errorf("initialize WinRT: %w", err)
 	}
 	defer winrt.NewProc("RoUninitialize").Call() // Also balances S_FALSE.
@@ -60,34 +61,34 @@ func readSSIDs() (map[string]string, error) {
 		return nil, err
 	}
 	defer deleteHString(name)
-	var factory *comObject
+	var factory *winapi.COMInterface
 	hr, _, _ = winrt.NewProc("RoGetActivationFactory").Call(name, uintptr(unsafe.Pointer(&iidNetworkInformationStatics)), uintptr(unsafe.Pointer(&factory)))
-	if err := hresult(hr); err != nil {
+	if err := winapi.HRESULT(hr); err != nil {
 		return nil, fmt.Errorf("activate NetworkInformation: %w", err)
 	}
-	defer factory.release()
-	var profiles *comObject
-	if _, err := factory.invokeSlot(6, uintptr(unsafe.Pointer(&profiles))); err != nil { // GetConnectionProfiles
+	defer factory.Release()
+	var profiles *winapi.COMInterface
+	if _, err := factory.InvokeSlot(6, uintptr(unsafe.Pointer(&profiles))); err != nil { // GetConnectionProfiles
 		return nil, fmt.Errorf("enumerate connection profiles: %w", err)
 	}
 	if profiles == nil {
 		return nil, nil
 	}
-	defer profiles.release()
+	defer profiles.Release()
 	var count uint32
-	if _, err := profiles.invokeSlot(7, uintptr(unsafe.Pointer(&count))); err != nil { // IVectorView.Size
+	if _, err := profiles.InvokeSlot(7, uintptr(unsafe.Pointer(&count))); err != nil { // IVectorView.Size
 		return nil, err
 	}
 	result := map[string]string{}
 	var firstError error
 	for i := uint32(0); i < count; i++ {
-		var profile *comObject
-		_, err := profiles.invokeSlot(6, uintptr(i), uintptr(unsafe.Pointer(&profile))) // IVectorView.GetAt
+		var profile *winapi.COMInterface
+		_, err := profiles.InvokeSlot(6, uintptr(i), uintptr(unsafe.Pointer(&profile))) // IVectorView.GetAt
 		if err == nil && profile != nil {
 			var id windows.GUID
 			var ssid string
 			id, ssid, err = connectedSSID(profile)
-			profile.release()
+			profile.Release()
 			if err == nil && id != (windows.GUID{}) && ssid != "" {
 				result[strings.ToLower(id.String())] = ssid
 			}
@@ -99,48 +100,48 @@ func readSSIDs() (map[string]string, error) {
 	return result, firstError
 }
 
-func connectedSSID(profile *comObject) (windows.GUID, string, error) {
+func connectedSSID(profile *winapi.COMInterface) (windows.GUID, string, error) {
 	var id windows.GUID
 	var level uint32
-	if _, err := profile.invokeSlot(7, uintptr(unsafe.Pointer(&level))); err != nil { // GetNetworkConnectivityLevel
+	if _, err := profile.InvokeSlot(7, uintptr(unsafe.Pointer(&level))); err != nil { // GetNetworkConnectivityLevel
 		return id, "", err
 	}
 	if level == 0 { // Known profiles include disconnected networks.
 		return id, "", nil
 	}
-	var details *comObject
-	if _, err := profile.invokeSlot(0, uintptr(unsafe.Pointer(&iidConnectionProfile2)), uintptr(unsafe.Pointer(&details))); err != nil {
+	var details *winapi.COMInterface
+	if _, err := profile.InvokeSlot(0, uintptr(unsafe.Pointer(&iidConnectionProfile2)), uintptr(unsafe.Pointer(&details))); err != nil {
 		return id, "", err
 	}
-	defer details.release()
+	defer details.Release()
 	var isWlan uint8 // WinRT boolean is one byte, not a Win32 BOOL.
-	if _, err := details.invokeSlot(7, uintptr(unsafe.Pointer(&isWlan))); err != nil {
+	if _, err := details.InvokeSlot(7, uintptr(unsafe.Pointer(&isWlan))); err != nil {
 		return id, "", err
 	}
 	if isWlan == 0 {
 		return id, "", nil
 	}
-	var adapter *comObject
-	if _, err := profile.invokeSlot(11, uintptr(unsafe.Pointer(&adapter))); err != nil { // NetworkAdapter
+	var adapter *winapi.COMInterface
+	if _, err := profile.InvokeSlot(11, uintptr(unsafe.Pointer(&adapter))); err != nil { // NetworkAdapter
 		return id, "", err
 	}
 	if adapter == nil {
 		return id, "", nil
 	}
-	defer adapter.release()
-	if _, err := adapter.invokeSlot(10, uintptr(unsafe.Pointer(&id))); err != nil { // NetworkAdapterId
+	defer adapter.Release()
+	if _, err := adapter.InvokeSlot(10, uintptr(unsafe.Pointer(&id))); err != nil { // NetworkAdapterId
 		return id, "", err
 	}
-	var wlanDetails *comObject
-	if _, err := details.invokeSlot(9, uintptr(unsafe.Pointer(&wlanDetails))); err != nil { // WlanConnectionProfileDetails
+	var wlanDetails *winapi.COMInterface
+	if _, err := details.InvokeSlot(9, uintptr(unsafe.Pointer(&wlanDetails))); err != nil { // WlanConnectionProfileDetails
 		return id, "", err
 	}
 	if wlanDetails == nil {
 		return id, "", nil
 	}
-	defer wlanDetails.release()
+	defer wlanDetails.Release()
 	var ssid uintptr
-	if _, err := wlanDetails.invokeSlot(6, uintptr(unsafe.Pointer(&ssid))); err != nil { // GetConnectedSsid
+	if _, err := wlanDetails.InvokeSlot(6, uintptr(unsafe.Pointer(&ssid))); err != nil { // GetConnectedSsid
 		return id, "", err
 	}
 	defer deleteHString(ssid)

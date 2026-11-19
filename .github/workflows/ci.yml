@@ -165,7 +165,7 @@ jobs:
         run: |
           $race = @()
           if ($env:PROCESSOR_ARCHITECTURE -eq 'AMD64') { $race = @('-race') }
-          go test @race -v -count=1 ./internal/platform/windows ./internal/platform/worker
+          go test @race -v -count=1 ./internal/platform/windows ./internal/platform/windows/observer ./internal/platform/winapi ./internal/platform/worker
       - name: Worker isolation as SYSTEM
         if: always()
         shell: pwsh
