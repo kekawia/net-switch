@@ -218,6 +218,7 @@ func replayNativeStartup(t *testing.T, name string) {
 	}
 	if name == "combiningNoOpenLine" || name == "reconnectShared" {
 		e.want.Combine = true
+		e.want.AutoBalance = true
 	}
 	c.op.Engine = e
 	construction := []string{"read:settings.json:ok", "read:control-journal.json:missing", "read:windows-undo.json:missing"}
