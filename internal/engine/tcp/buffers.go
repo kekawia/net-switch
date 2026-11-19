@@ -13,19 +13,20 @@ import (
 )
 
 type connection struct {
-	id                 stack.TransportEndpointID
-	completed          atomic.Bool
-	ready              atomic.Pointer[readyRelay]
-	ep                 tcpip.Endpoint
-	ticket             flowapi.Ticket
-	forward            *Forwarder
-	up, down           atomic.Uint64
-	resizeMu           sync.Mutex
-	lastUp, lastDown   uint64
-	grownUp, grownDown uint64
-	last               time.Time
-	clock              tcpip.Clock
-	overflowDeadline   atomic.Int64
+	id                       stack.TransportEndpointID
+	completed                atomic.Bool
+	ready                    atomic.Pointer[readyRelay]
+	ep                       tcpip.Endpoint
+	ticket                   flowapi.Ticket
+	forward                  *Forwarder
+	up, down                 atomic.Uint64
+	resizeMu                 sync.Mutex
+	lastUp, lastDown         uint64
+	grownUp, grownDown       uint64
+	lastGrowUp, lastGrowDown time.Time
+	last                     time.Time
+	clock                    tcpip.Clock
+	overflowDeadline         atomic.Int64
 }
 
 // One clock for all flows. Socket limits disable unaccounted autotuning.
@@ -118,6 +119,16 @@ func (c *connection) resize(now time.Time) {
 	c.resizeAt(now, true)
 }
 
+const (
+	// Short high-speed flows need room above the 64 KiB floor immediately,
+	// without allocating multi-megabyte send queues that stay idle in Go's heap.
+	earlyBufferCap = 256 << 10
+	// Above earlyBufferCap, require sustained demand across two 250 ms ticks
+	// (450 ms tolerates minor timer jitter) so full 6 MiB/8 MiB grants still
+	// arrive within 2.5 s while short parallel bursts stay compact.
+	sustainedGrowInterval = 450 * time.Millisecond
+)
+
 func (c *connection) countTransfer(up bool, n uint64) {
 	var total uint64
 	if up {
@@ -127,7 +138,7 @@ func (c *connection) countTransfer(up bool, n uint64) {
 		total = c.down.Add(n)
 		c.ticket.Add(0, n)
 	}
-	if total >= MinimumBuffer && total-n < 8<<20 && bits.Len64(total) != bits.Len64(total-n) && c.clock != nil {
+	if total >= MinimumBuffer && total-n < earlyBufferCap && bits.Len64(total) != bits.Len64(total-n) && c.clock != nil {
 		c.resizeAt(c.clock.Now(), false)
 	}
 }
@@ -158,21 +169,32 @@ func (c *connection) resizeAt(now time.Time, periodic bool) {
 				b.Shrink(min(rx, max(MinimumBuffer, rxUsed)), min(tx, max(MinimumBuffer, txUsed)))
 			}
 			c.grownUp, c.grownDown = u, d
+			c.lastGrowUp, c.lastGrowDown = time.Time{}, time.Time{}
 		}
 		return
 	}
-	nextRX, nextTX := rx, tx
-	if u-c.grownUp >= uint64(rx) {
-		nextRX = min(rx*2, 8<<20)
+	upDelta, downDelta := u-c.grownUp, d-c.grownDown
+	if periodic {
+		upDelta, downDelta = u-c.lastUp, d-c.lastDown
 	}
-	if d-c.grownDown >= uint64(tx) {
-		nextTX = min(tx*2, 6<<20)
+	maxRX, maxTX := 8<<20, 6<<20
+	if !periodic {
+		maxRX, maxTX = earlyBufferCap, earlyBufferCap
+	}
+	nextRX, nextTX := rx, tx
+	canGrowUp := !periodic || rx < earlyBufferCap || c.lastGrowUp.IsZero() || now.Sub(c.lastGrowUp) >= sustainedGrowInterval
+	if canGrowUp && rx < maxRX && upDelta >= uint64(rx) {
+		nextRX = min(rx*2, maxRX)
+	}
+	canGrowDown := !periodic || tx < earlyBufferCap || c.lastGrowDown.IsZero() || now.Sub(c.lastGrowDown) >= sustainedGrowInterval
+	if canGrowDown && tx < maxTX && downDelta >= uint64(tx) {
+		nextTX = min(tx*2, maxTX)
 	}
 	if periodic {
-		if u-c.lastUp < uint64(rx) {
+		if upDelta < uint64(rx) {
 			c.grownUp = u
 		}
-		if d-c.lastDown < uint64(tx) {
+		if downDelta < uint64(tx) {
 			c.grownDown = d
 		}
 		c.lastUp, c.lastDown = u, d
@@ -181,9 +203,11 @@ func (c *connection) resizeAt(now time.Time, periodic bool) {
 	if (nextRX != rx || nextTX != tx) && b.Grow(nextRX, nextTX) {
 		if nextRX != rx {
 			c.grownUp = u
+			c.lastGrowUp = now
 		}
 		if nextTX != tx {
 			c.grownDown = d
+			c.lastGrowDown = now
 		}
 		c.ep.SocketOptions().SetReceiveBufferSize(int64(nextRX), true)
 		c.ep.SocketOptions().SetSendBufferSize(int64(nextTX), true)

@@ -126,25 +126,43 @@ func TestEarlyTransferGrowthAndTrickleProtection(t *testing.T) {
 
 	c := &connection{ep: ep, ticket: ticket, clock: s.Clock(), last: s.Clock().Now()}
 
-	// A burst of MinimumBuffer bytes grows immediately on the power-of-two
-	// crossing without waiting for the 250 ms sweep.
+	// A burst grows immediately up to earlyBufferCap (256 KiB) on power-of-two
+	// crossings without waiting for the 250 ms sweep, and stops there so short
+	// transfers do not reserve multi-megabyte queues.
 	c.countTransfer(false, MinimumBuffer)
 	_, tx := ticket.Buffers()
 	if tx != 2*MinimumBuffer {
 		t.Fatalf("send buffer after %d bytes = %d, want %d", MinimumBuffer, tx, 2*MinimumBuffer)
 	}
+	c.countTransfer(false, 2*MinimumBuffer)
+	c.countTransfer(false, 2<<20)
+	_, tx = ticket.Buffers()
+	if tx != earlyBufferCap {
+		t.Fatalf("early growth reached %d, want cap %d", tx, earlyBufferCap)
+	}
 
 	// A low-rate trickle spread across periodic ticks must reset grownDown and
-	// must not grow when cumulative bytes cross the next power of two.
+	// must not grow past earlyBufferCap.
 	now := s.Clock().Now()
-	for i := range 8 {
+	for range 8 {
 		now = now.Add(250 * time.Millisecond)
 		c.countTransfer(false, 16<<10)
 		c.resize(now)
-		_ = i
 	}
 	_, txAfterTrickle := ticket.Buffers()
-	if txAfterTrickle != 2*MinimumBuffer {
-		t.Fatalf("trickle falsely grew send buffer to %d, want %d", txAfterTrickle, 2*MinimumBuffer)
+	if txAfterTrickle != earlyBufferCap {
+		t.Fatalf("trickle falsely grew send buffer to %d, want %d", txAfterTrickle, earlyBufferCap)
+	}
+
+	// Sustained high throughput grows every two 250 ms ticks and reaches the
+	// full 6 MiB send cap within 2.5 s (well inside the 5 s budget test).
+	for range 10 {
+		now = now.Add(250 * time.Millisecond)
+		c.countTransfer(false, 6<<20)
+		c.resize(now)
+	}
+	_, txSustained := ticket.Buffers()
+	if txSustained != 6<<20 {
+		t.Fatalf("sustained transfer reached %d, want %d", txSustained, 6<<20)
 	}
 }
