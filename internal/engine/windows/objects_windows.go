@@ -132,6 +132,9 @@ func interfaceMatches(fp journal.Fingerprint) (bool, error) {
 	var index uint32
 	luid := uintField(fp, "luid")
 	err = api("ConvertInterfaceLuidToIndex", uintptr(unsafe.Pointer(&luid)), uintptr(unsafe.Pointer(&index)))
+	if missing(err) {
+		return false, nil
+	}
 	return err == nil && uint64(index) == uintField(fp, "index"), err
 }
 
