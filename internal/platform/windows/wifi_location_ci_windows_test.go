@@ -7,6 +7,7 @@ import (
 	"testing"
 	"unsafe"
 
+	"github.com/kekawia/net-switch/internal/platform/windows/observer"
 	"golang.org/x/sys/windows"
 )
 
@@ -23,7 +24,7 @@ func TestWiFiLocationProbeCI(t *testing.T) {
 	}
 	switch *wifiLocationMode {
 	case "reader":
-		line, err := readNetwork()
+		line, err := observer.ReadNetwork()
 		if err != nil {
 			t.Fatal(err)
 		}

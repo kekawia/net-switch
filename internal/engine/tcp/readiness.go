@@ -37,6 +37,7 @@ type relayWorkers struct {
 // FIFO reservations prevent a previous holder overtaking a waiting relay.
 const RelayHeldBudget = 16 << 20
 const RelayAppLoans = 32
+const maxBulkLoans = 4
 
 type relayDirection struct {
 	blocked, finished bool
@@ -49,6 +50,7 @@ type relayScratch struct {
 	discard discardWriter
 	send    bytes.Reader
 	buffer  [RelayBuffer]byte
+	bulk    []byte
 }
 
 // discardWriter consumes up to n bytes from the app's endpoint without
@@ -90,9 +92,8 @@ type readyRelay struct {
 
 func newRelayWorkers() *relayWorkers {
 	// Leave scheduling capacity for ordered ingress, the TUN writer and
-	// ACK processing. Relay work alone must not occupy every processor while
-	// its writes wait for those same consumers to make progress.
-	n := min(8, max(1, (runtime.GOMAXPROCS(0)+1)/2))
+	// ACK processing while keeping worker scratch and concurrent send queues bounded.
+	n := min(8, max(2, (runtime.GOMAXPROCS(0)+1)/2))
 	w := &relayWorkers{wake: make(chan struct{}, n), stop: make(chan struct{}), appLoans: make(map[string]int)}
 	w.finished = sync.NewCond(&w.mu)
 	for range n {
@@ -101,12 +102,14 @@ func newRelayWorkers() *relayWorkers {
 	return w
 }
 
-func (w *relayWorkers) borrow(r *readyRelay) bool {
+// Additional loans are opportunistic. A reserved FIFO grant is exactly one
+// loan, and a newcomer cannot claim even a single slot ahead of a waiter.
+func (w *relayWorkers) borrow(r *readyRelay, want int) int {
 	w.bufferMu.Lock()
 	defer w.bufferMu.Unlock()
 	if r.granted {
 		r.granted = false
-		return true
+		return 1
 	}
 	if r.queued || len(w.waiting) != 0 || w.loans == RelayHeldBudget/RelayBuffer || w.appLoans[r.app] == RelayAppLoans {
 		if !r.queued {
@@ -115,31 +118,32 @@ func (w *relayWorkers) borrow(r *readyRelay) bool {
 		}
 		r.waitBuffer = true
 		w.grantLocked()
-		return false
+		return 0
 	}
-	w.reserveLocked(r)
-	return true
+	n := min(want, RelayHeldBudget/RelayBuffer-w.loans, RelayAppLoans-w.appLoans[r.app])
+	w.reserveLocked(r, n)
+	return n
 }
 
-func (w *relayWorkers) reserveLocked(r *readyRelay) {
+func (w *relayWorkers) reserveLocked(r *readyRelay, n int) {
 	if w.appLoans == nil {
 		w.appLoans = make(map[string]int)
 	}
-	w.appLoans[r.app]++
-	w.loans++
+	w.appLoans[r.app] += n
+	w.loans += n
 	w.bufferPeak = max(w.bufferPeak, w.loans)
 }
 
-func (w *relayWorkers) giveBack(r *readyRelay) {
+func (w *relayWorkers) giveBack(r *readyRelay, n int) {
 	w.bufferMu.Lock()
-	w.returnLocked(r)
+	w.returnLocked(r, n)
 	w.grantLocked()
 	w.bufferMu.Unlock()
 }
 
-func (w *relayWorkers) returnLocked(r *readyRelay) {
-	w.loans--
-	w.appLoans[r.app]--
+func (w *relayWorkers) returnLocked(r *readyRelay, n int) {
+	w.loans -= n
+	w.appLoans[r.app] -= n
 	if w.appLoans[r.app] == 0 {
 		delete(w.appLoans, r.app)
 	}
@@ -153,7 +157,7 @@ func (w *relayWorkers) grantLocked() {
 			continue
 		}
 		if w.loans < RelayHeldBudget/RelayBuffer && w.appLoans[r.app] < RelayAppLoans {
-			w.reserveLocked(r)
+			w.reserveLocked(r, 1)
 			r.queued, r.granted = false, true
 			r.notify()
 		} else {
@@ -230,11 +234,14 @@ func (w *relayWorkers) run() {
 			} else {
 				r.scheduled = false
 			}
+			more := w.head != nil
 			w.mu.Unlock()
 			// A continuously readable connection must not keep every P until
 			// Go's preemption interval (longer than the owner lookup budget).
-			// Yield between bounded I/O quanta so admission and TUN ingress run.
-			runtime.Gosched()
+			// Yield between bounded I/O quanta when more relay work is queued.
+			if more {
+				runtime.Gosched()
+			}
 		}
 	}
 }
@@ -287,7 +294,7 @@ func (r *readyRelay) close(abort bool) {
 	r.workers.bufferMu.Lock()
 	if r.granted {
 		r.granted = false
-		r.workers.returnLocked(r)
+		r.workers.returnLocked(r, 1)
 	}
 	r.workers.grantLocked()
 	r.workers.bufferMu.Unlock()
@@ -366,42 +373,153 @@ func (r *readyRelay) write(up bool, b []byte, scratch *relayScratch) (int, error
 	return int(n), stackError(err)
 }
 
+type bufferUsageEndpoint interface {
+	BufferUsage() (int, int)
+}
+
+type burstOutput interface {
+	BeginWriteBurst()
+	EndWriteBurst()
+}
+
+func (r *readyRelay) finishReadEOF(d *relayDirection, up bool) error {
+	d.finished = true
+	if up {
+		if err := r.remote.CloseWrite(); err != nil {
+			return err
+		}
+		// Receive shutdown is cleanup, as in Splice. A peer's FIN can
+		// already have moved the endpoint into TIME_WAIT, where another
+		// ShutdownRead reports not-connected. It must not abort the
+		// lost-final-ACK protection we just established.
+		r.c.ep.Shutdown(tcpip.ShutdownRead)
+		return nil
+	}
+	if err := stackError(r.c.ep.Shutdown(tcpip.ShutdownWrite)); err != nil {
+		return err
+	}
+	r.c.releaseAdmission()
+	r.remote.CloseRead()
+	return nil
+}
+
+// directDown moves bytes from the OS socket straight into gVisor's send queue
+// without a second MSG_PEEK copy. resizeMu prevents idle shrink between the
+// space check and ep.Write, so every byte consumed fits unless the endpoint
+// has closed or reset (which aborts both sides).
+func (r *readyRelay) directDown(d *relayDirection, b []byte, loans int, usage bufferUsageEndpoint, scratch *relayScratch) (moved int, cont, fallback bool, err error) {
+	r.c.resizeMu.Lock()
+	_, txUsed := usage.BufferUsage()
+	avail := int(r.c.ep.SocketOptions().GetSendBufferSize()) - txUsed
+	if avail <= 0 {
+		r.c.resizeMu.Unlock()
+		if r.c.ep.Readiness(waiter.EventErr|waiter.EventHUp)&(waiter.EventErr|waiter.EventHUp) == 0 {
+			r.workers.giveBack(r, loans)
+			d.blocked = true
+			return 0, false, false, nil
+		}
+		return 0, false, true, nil
+	}
+	readBuf := b[:min(len(b), avail)]
+	got, readErr := r.remote.TryRead(readBuf)
+	if got < 0 || got > len(readBuf) {
+		r.c.resizeMu.Unlock()
+		r.workers.giveBack(r, loans)
+		return 0, false, false, io.ErrShortBuffer
+	}
+	if got > 0 {
+		n, writeErr := r.write(false, readBuf[:got], scratch)
+		r.c.resizeMu.Unlock()
+		r.workers.giveBack(r, loans)
+		if n > 0 {
+			r.c.countTransfer(false, uint64(n))
+		}
+		if writeErr != nil {
+			return n, false, false, writeErr
+		}
+		if n != got {
+			return n, false, false, io.ErrShortWrite
+		}
+		return n, true, false, nil
+	}
+	r.c.resizeMu.Unlock()
+	r.workers.giveBack(r, loans)
+	if errors.Is(readErr, platform.ErrWouldBlock) {
+		return 0, false, false, nil
+	}
+	if errors.Is(readErr, io.EOF) {
+		return 0, false, false, r.finishReadEOF(d, false)
+	}
+	if readErr != nil {
+		return 0, false, false, readErr
+	}
+	return 0, false, false, io.ErrNoProgress
+}
+
 func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch) (bool, error) {
 	if d.finished {
 		return false, nil
 	}
 	d.blocked = false
+	var usage bufferUsageEndpoint
+	if !up {
+		usage, _ = r.c.ep.(bufferUsageEndpoint)
+		if burst, ok := r.forward.out.(burstOutput); ok {
+			burst.BeginWriteBurst()
+			defer burst.EndWriteBurst()
+		}
+	}
 	// A busy flow yields after a bounded amount of work, so it cannot starve
 	// other readiness events, the ordered TUN reader, or process lookups.
 	for moved, operations := 0, 0; moved < 256<<10 && operations < 32; operations++ {
-		if !r.workers.borrow(r) {
+		want := 1
+		if runtime.GOOS == "windows" && !up && r.c.down.Load() >= 512<<10 {
+			want = min(maxBulkLoans, ((256<<10)-moved+RelayBuffer-1)/RelayBuffer)
+		}
+		loans := r.workers.borrow(r, want)
+		if loans == 0 {
 			return false, nil
 		}
-		peeked, readErr := r.read(up, scratch.buffer[:], scratch)
-		if peeked < 0 || peeked > len(scratch.buffer) {
-			r.workers.giveBack(r)
+		b := scratch.buffer[:]
+		if loans > 1 {
+			if scratch.bulk == nil {
+				scratch.bulk = make([]byte, maxBulkLoans*RelayBuffer)
+			}
+			b = scratch.bulk[:loans*RelayBuffer]
+		}
+		b = b[:min(len(b), (256<<10)-moved)]
+		if usage != nil {
+			n, cont, fallback, err := r.directDown(d, b, loans, usage, scratch)
+			moved += n
+			if !fallback {
+				if err != nil {
+					return false, err
+				}
+				if cont {
+					continue
+				}
+				return false, nil
+			}
+		}
+		peeked, readErr := r.read(up, b, scratch)
+		if peeked < 0 || peeked > len(b) {
+			r.workers.giveBack(r, loans)
 			return false, io.ErrShortBuffer
 		}
 		if peeked > 0 {
-			n, err := r.write(up, scratch.buffer[:peeked], scratch)
+			n, err := r.write(up, b[:peeked], scratch)
 			if n < 0 || n > peeked {
-				r.workers.giveBack(r)
+				r.workers.giveBack(r, loans)
 				return false, io.ErrShortWrite
 			}
-			if consumeErr := r.discard(up, scratch.buffer[:n], scratch); consumeErr != nil {
-				r.workers.giveBack(r)
+			if consumeErr := r.discard(up, b[:n], scratch); consumeErr != nil {
+				r.workers.giveBack(r, loans)
 				return false, consumeErr
 			}
-			r.workers.giveBack(r)
+			r.workers.giveBack(r, loans)
 			if n > 0 {
 				moved += n
-				if up {
-					r.c.up.Add(uint64(n))
-					r.c.ticket.Add(uint64(n), 0)
-				} else {
-					r.c.down.Add(uint64(n))
-					r.c.ticket.Add(0, uint64(n))
-				}
+				r.c.countTransfer(up, uint64(n))
 			}
 			if errors.Is(err, platform.ErrWouldBlock) {
 				d.blocked = true
@@ -417,29 +535,12 @@ func (r *readyRelay) direction(d *relayDirection, up bool, scratch *relayScratch
 			// only once every byte before it has actually been consumed.
 			continue
 		}
-		r.workers.giveBack(r)
+		r.workers.giveBack(r, loans)
 		if errors.Is(readErr, platform.ErrWouldBlock) {
 			return false, nil
 		}
 		if errors.Is(readErr, io.EOF) {
-			d.finished = true
-			if up {
-				if err := r.remote.CloseWrite(); err != nil {
-					return false, err
-				}
-				// Receive shutdown is cleanup, as in Splice. A peer's FIN can
-				// already have moved the endpoint into TIME_WAIT, where another
-				// ShutdownRead reports not-connected. It must not abort the
-				// lost-final-ACK protection we just established.
-				r.c.ep.Shutdown(tcpip.ShutdownRead)
-				return false, nil
-			}
-			if err := stackError(r.c.ep.Shutdown(tcpip.ShutdownWrite)); err != nil {
-				return false, err
-			}
-			r.c.releaseAdmission()
-			r.remote.CloseRead()
-			return false, nil
+			return false, r.finishReadEOF(d, up)
 		}
 		if readErr != nil {
 			return false, readErr
@@ -469,7 +570,7 @@ func (r *readyRelay) step(scratch *relayScratch) {
 		r.close(false)
 		return
 	}
-	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && !r.down.blocked, r.up.blocked); err != nil {
+	if err := r.watch.Arm(!r.waitBuffer && !r.down.finished && !r.down.blocked && !down, r.up.blocked && !up); err != nil {
 		r.close(true)
 		return
 	}

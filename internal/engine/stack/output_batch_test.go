@@ -52,3 +52,57 @@ func TestBatchQueueReservationIsAtomic(t *testing.T) {
 		t.Fatal("rejected batch retained a fragment or its byte lease")
 	}
 }
+
+func TestWriteBurstCoalescesReadySignal(t *testing.T) {
+	l := NewLink()
+	defer l.Close()
+
+	// Nested burst holds ready signals until the outermost EndWriteBurst.
+	l.BeginWriteBurst()
+	l.BeginWriteBurst()
+	for range 10 {
+		if !l.Send([]byte{1, 2, 3}) {
+			t.Fatal("Send refused during burst")
+		}
+	}
+	select {
+	case <-l.ready:
+		t.Fatal("ready fired before burst ended")
+	default:
+	}
+	l.EndWriteBurst()
+	select {
+	case <-l.ready:
+		t.Fatal("ready fired before outermost burst ended")
+	default:
+	}
+	l.EndWriteBurst()
+	select {
+	case <-l.ready:
+	default:
+		t.Fatal("EndWriteBurst did not signal queued packets")
+	}
+	var drained [64]OutputPacket
+	n := l.ReadOwnedBatch(context.Background(), drained[:])
+	if n != 10 {
+		t.Fatalf("drained %d packets, want 10", n)
+	}
+	for i := range n {
+		drained[i].Release()
+	}
+
+	// Once depth reaches 64 during a burst, ready fires immediately so the
+	// TUN writer can start draining without waiting for EndWriteBurst.
+	l.BeginWriteBurst()
+	for range 64 {
+		if !l.Send([]byte{4, 5, 6}) {
+			t.Fatal("Send refused while reaching threshold")
+		}
+	}
+	select {
+	case <-l.ready:
+	default:
+		t.Fatal("ready did not fire when burst reached 64 queued packets")
+	}
+	l.EndWriteBurst()
+}

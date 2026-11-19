@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/kekawia/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -19,7 +20,7 @@ var oleaut = windows.NewLazySystemDLL("oleaut32.dll")
 var iidDispatch = windows.GUID{Data1: 0x00020400, Data4: [8]byte{0xc0, 0, 0, 0, 0, 0, 0, 0x46}}
 var iidNull windows.GUID
 
-type comObject struct{ vt *[32]uintptr }
+type comObject winapi.COMInterface
 type variant struct {
 	vt       uint16
 	reserved [3]uint16
@@ -27,30 +28,21 @@ type variant struct {
 	extra    uintptr
 }
 
-type comError struct{ Code uint32 }
-
-func (e *comError) Error() string { return fmt.Sprintf("COM HRESULT 0x%08x", e.Code) }
+type comError = winapi.COMError
 func missingCOM(err error) bool {
 	var e *comError
 	return errors.As(err, &e) && (e.Code == 0x80070002 || e.Code == 0x80070003)
 }
 func hresult(hr uintptr) error {
-	if int32(uint32(hr)) < 0 {
-		return &comError{Code: uint32(hr)}
-	}
-	return nil
+	return winapi.HRESULT(hr)
 }
 
 //go:uintptrescapes
 func (o *comObject) invokeSlot(slot int, args ...uintptr) (uintptr, error) {
-	all := append([]uintptr{uintptr(unsafe.Pointer(o))}, args...)
-	r, _, _ := syscall.SyscallN(o.vt[slot], all...)
-	return r, hresult(r)
+	return (*winapi.COMInterface)(o).InvokeSlot(slot,args...)
 }
 func (o *comObject) release() {
-	if o != nil {
-		_, _ = o.invokeSlot(2)
-	}
+	(*winapi.COMInterface)(o).Release()
 }
 func comThread(run func() (any, error)) (any, error) {
 	runtime.LockOSThread()

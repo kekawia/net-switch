@@ -104,6 +104,11 @@ type Session struct {
 	// waitHandles is the reader's native wait array, guarded by readMu. It
 	// lives in this heap object so no stack copy can move it under the kernel.
 	waitHandles [4]windows.Handle
+	ioCtxMu     sync.Mutex
+	ioClosed    bool
+	ioDone      <-chan struct{}
+	ioStop      func() bool
+	ioFinished  chan struct{}
 
 	read, written, dropped            atomic.Uint64
 	corruptions, recoveries, failures atomic.Uint64
@@ -166,6 +171,26 @@ func (a *Adapter) startSession(open func() (*rings, error)) (*Session, error) {
 func (s *Session) MTU() int             { return s.adapter.MTU() }
 func (s *Session) LUID() uint64         { return s.adapter.LUID() }
 func (s *Session) Events() <-chan Event { return s.events }
+
+// BindIOContext installs one forwarding-lifetime cancellation hook for ReadBatch
+// so parking on the engine's run context allocates no per-wait AfterFunc or channel.
+func (s *Session) BindIOContext(ctx context.Context) {
+	if ctx == nil || ctx.Done() == nil {
+		return
+	}
+	s.ioCtxMu.Lock()
+	defer s.ioCtxMu.Unlock()
+	if s.ioClosed || s.closed.Load() || s.ioDone != nil {
+		return
+	}
+	finished := make(chan struct{})
+	s.ioDone = ctx.Done()
+	s.ioFinished = finished
+	s.ioStop = context.AfterFunc(ctx, func() {
+		windows.SetEvent(s.cancelOwner.Handle("Wintun cancellation callback"))
+		close(finished)
+	})
+}
 
 // RXChecksumVerified is called only for an unmodified packet returned by Read.
 // validIP already checked TCP/UDP and the IPv4 header. Keep stack verification
@@ -286,6 +311,14 @@ func (s *Session) maintain() {
 				s.rings = nil
 			}
 			started = winclock.Now()
+			s.ioCtxMu.Lock()
+			s.ioClosed = true
+			ioStop, ioFinished := s.ioStop, s.ioFinished
+			s.ioStop, s.ioFinished, s.ioDone = nil, nil, nil
+			s.ioCtxMu.Unlock()
+			if ioStop != nil && !ioStop() {
+				<-ioFinished
+			}
 			s.closeErr = errors.Join(s.closeErr, s.wakeOwner.HandleClose("Wintun session wake close"), s.cancelOwner.HandleClose("Wintun cancellation event close"))
 			profile.EventsNanos += uint64(winclock.Since(started))
 			profile.QueueNanos, profile.ReadLockNanos, profile.StateLockNanos = queued, readLock, stateLock
@@ -535,19 +568,24 @@ func (s *Session) ReadBatch(ctx context.Context, buffers [][]byte, sizes []int) 
 		// publishes Tail. Send.Alertable is unused. Never reset this event:
 		// a signal between the empty check and Wait must remain pending.
 		// A ready batch needs no native wait or cancellation callback allocation.
-		// Install the callback only when parking, and join it before readMu is
-		// released so Close can safely destroy the event.
+		// Install a per-call callback only when parking on an unbound context,
+		// and join it before readMu is released so Close can safely destroy the event.
 		if cancelEvent == 0 && ctx.Done() != nil {
+			s.ioCtxMu.Lock()
+			bound := s.ioDone != nil && ctx.Done() == s.ioDone
+			s.ioCtxMu.Unlock()
 			event := s.cancelOwner.Handle("Wintun read cancellation")
 			cancelEvent = event
-			finished := make(chan struct{})
-			stop := context.AfterFunc(ctx, func() { windows.SetEvent(s.cancelOwner.Handle("Wintun cancellation callback")); close(finished) })
-			defer func() {
-				if !stop() {
-					<-finished
-					windows.ResetEvent(s.cancelOwner.Handle("Wintun cancellation reset"))
-				}
-			}()
+			if !bound {
+				finished := make(chan struct{})
+				stop := context.AfterFunc(ctx, func() { windows.SetEvent(s.cancelOwner.Handle("Wintun cancellation callback")); close(finished) })
+				defer func() {
+					if !stop() {
+						<-finished
+						windows.ResetEvent(s.cancelOwner.Handle("Wintun cancellation reset"))
+					}
+				}()
+			}
 		}
 		handles := s.waitHandles[:0]
 		handles = append(handles, s.wakeOwner.Handle("Wintun read wake"), s.rings.readHandle())

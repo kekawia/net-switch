@@ -70,25 +70,50 @@ func TestWorkerNativeReads(t *testing.T) {
 	}
 	for _, mode := range []string{"meters", "network", "outside", "policy"} {
 		t.Run("stream-"+mode, func(t *testing.T) {
-			p, err := worker.Start(exe, []string{"worker", mode, "--once"})
-			if err != nil {
+			readWorkerOnce(t, exe, mode)
+		})
+	}
+}
+
+func readWorkerOnce(t *testing.T, exe, mode string) []byte {
+	t.Helper()
+	p, err := worker.Start(exe, []string{"worker", mode, "--once"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stop := context.AfterFunc(ctx, func() { _ = p.Kill() })
+	defer stop()
+	p.Input().Close()
+	b, err := io.ReadAll(io.LimitReader(p.Output(), 4*1024*1024))
+	e, _ := io.ReadAll(io.LimitReader(p.Errors(), 65536))
+	if waitErr := p.Wait(); err != nil || waitErr != nil {
+		t.Fatalf("read=%v exit=%v stderr=%s", err, waitErr, e)
+	}
+	if !json.Valid(b) {
+		t.Fatalf("invalid native result: %s stderr=%s", b, e)
+	}
+	t.Logf("native result: %s", b)
+	return b
+}
+
+func TestInstalledStreamImageReads(t *testing.T) {
+	dir := os.Getenv("NETSWITCH_STREAM_TEST_DIR")
+	if dir == "" || os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Skip("requires the hosted installed worker image")
+	}
+	exe := filepath.Join(dir, "netswitch-worker.exe")
+	for _, tc := range []struct{ mode, field string }{{"meters", "adapters"}, {"network", "defaultRoutes"}, {"outside", "outside"}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			var row map[string]json.RawMessage
+			if err := json.Unmarshal(readWorkerOnce(t, exe, tc.mode), &row); err != nil {
 				t.Fatal(err)
 			}
-			defer p.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			stop := context.AfterFunc(ctx, func() { _ = p.Kill() })
-			defer stop()
-			p.Input().Close()
-			b, err := io.ReadAll(io.LimitReader(p.Output(), 4*1024*1024))
-			e, _ := io.ReadAll(io.LimitReader(p.Errors(), 65536))
-			if waitErr := p.Wait(); err != nil || waitErr != nil {
-				t.Fatalf("read=%v exit=%v stderr=%s", err, waitErr, e)
+			if _, ok := row[tc.field]; !ok {
+				t.Fatalf("%s worker missing %s", tc.mode, tc.field)
 			}
-			if !json.Valid(b) {
-				t.Fatalf("invalid native result: %s stderr=%s", b, e)
-			}
-			t.Logf("native result: %s", b)
 		})
 	}
 }

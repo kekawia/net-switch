@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 import (
 	"encoding/binary"
@@ -22,32 +22,32 @@ type outsideLine = outside.Line
 func ignored(local, remote string) bool { return outside.Ignored(local, remote) }
 
 // One row of the connection table.
-type tcpConnection struct {
-	state      uint32
-	local      [4]byte
-	localPort  uint16
-	remote     [4]byte
-	remotePort uint16
-	pid        uint32
+type TCPConnection struct {
+	State      uint32
+	Local      [4]byte
+	LocalPort  uint16
+	Remote     [4]byte
+	RemotePort uint16
+	PID        uint32
 	// A FILETIME: 100 ns steps since 1601-01-01 UTC.
-	created int64
+	Created int64
 }
 
 // The row Windows' statistics calls take: the PowerShell version built it the
 // same way, with the addresses and ports in network byte order.
-func (c tcpConnection) row() mibTcpRow {
+func (c TCPConnection) NativeRow() mibTcpRow {
 	return mibTcpRow{
-		State:      tcpStateEstablished,
-		LocalAddr:  binary.LittleEndian.Uint32(c.local[:]),
-		LocalPort:  uint32(bits.ReverseBytes16(c.localPort)),
-		RemoteAddr: binary.LittleEndian.Uint32(c.remote[:]),
-		RemotePort: uint32(bits.ReverseBytes16(c.remotePort)),
+		State:      TCPStateEstablished,
+		LocalAddr:  binary.LittleEndian.Uint32(c.Local[:]),
+		LocalPort:  uint32(bits.ReverseBytes16(c.LocalPort)),
+		RemoteAddr: binary.LittleEndian.Uint32(c.Remote[:]),
+		RemotePort: uint32(bits.ReverseBytes16(c.RemotePort)),
 	}
 }
 
 // Like .NET's DateTime.ToString("o") for a UTC time, which the PowerShell
 // version used: seven fractional digits and a Z.
-func formatCreated(filetime int64) string {
+func FormatCreated(filetime int64) string {
 	const ticksPerSecond = 10_000_000
 	// Seconds from 1601-01-01 to 1970-01-01.
 	const unixEpoch = 11_644_473_600
@@ -64,7 +64,7 @@ func connectionID(local string, localPort uint16, remote string, remotePort uint
 // What the watcher asks Windows. Tests replace it.
 type tcpSystem struct {
 	estats       bool
-	connections  func() ([]tcpConnection, error)
+	connections  func() ([]TCPConnection, error)
 	processPath  func(pid uint32) string
 	processStart func(pid uint32) string
 	// Returns Windows' result code: 0 means collection is on.
@@ -93,14 +93,14 @@ func newOutsideWatcher(engine string, system tcpSystem) *outsideWatcher {
 				out := make([]outside.Connection[mibTcpRow], len(rows))
 				for i, c := range rows {
 					out[i] = outside.Connection[mibTcpRow]{
-						Established: c.state == tcpStateEstablished,
-						Local:       c.local,
-						LocalPort:   c.localPort,
-						Remote:      c.remote,
-						RemotePort:  c.remotePort,
-						PID:         c.pid,
-						Created:     formatCreated(c.created),
-						Row:         c.row(),
+						Established: c.State == TCPStateEstablished,
+						Local:       c.Local,
+						LocalPort:   c.LocalPort,
+						Remote:      c.Remote,
+						RemotePort:  c.RemotePort,
+						PID:         c.PID,
+						Created:     FormatCreated(c.Created),
+						Row:         c.NativeRow(),
 					}
 				}
 				return out, nil
@@ -119,7 +119,7 @@ const (
 	afInet = 2
 	// Connected rows only, with the owning process and creation time.
 	tcpTableOwnerModuleConnections = 7
-	tcpStateEstablished            = 5
+	TCPStateEstablished            = 5
 	tcpConnectionEstatsData        = 1
 )
 
@@ -178,7 +178,7 @@ const (
 // Reads a MIB_TCPTABLE_OWNER_MODULE. Addresses are stored as their four bytes
 // in order; ports in network byte order in the low 16 bits (Windows says the
 // upper 16 bits may hold anything).
-func parseTcpTable(table []byte) ([]tcpConnection, error) {
+func parseTcpTable(table []byte) ([]TCPConnection, error) {
 	if len(table) < tcpTableHeaderSize {
 		return nil, errors.New("the connection table is cut short")
 	}
@@ -186,17 +186,17 @@ func parseTcpTable(table []byte) ([]tcpConnection, error) {
 	if uint64(count) > uint64(len(table)-tcpTableHeaderSize)/tcpTableRowSize {
 		return nil, fmt.Errorf("the connection table says %d rows but holds %d bytes", count, len(table))
 	}
-	connections := make([]tcpConnection, count)
+	connections := make([]TCPConnection, count)
 	for i := range connections {
 		row := table[tcpTableHeaderSize+i*tcpTableRowSize:]
-		connections[i] = tcpConnection{
-			state:      binary.LittleEndian.Uint32(row[0:]),
-			local:      [4]byte(row[4:8]),
-			localPort:  binary.BigEndian.Uint16(row[8:]),
-			remote:     [4]byte(row[12:16]),
-			remotePort: binary.BigEndian.Uint16(row[16:]),
-			pid:        binary.LittleEndian.Uint32(row[20:]),
-			created:    int64(binary.LittleEndian.Uint64(row[24:])),
+		connections[i] = TCPConnection{
+			State:      binary.LittleEndian.Uint32(row[0:]),
+			Local:      [4]byte(row[4:8]),
+			LocalPort:  binary.BigEndian.Uint16(row[8:]),
+			Remote:     [4]byte(row[12:16]),
+			RemotePort: binary.BigEndian.Uint16(row[16:]),
+			PID:        binary.LittleEndian.Uint32(row[20:]),
+			Created:    int64(binary.LittleEndian.Uint64(row[24:])),
 		}
 	}
 	return connections, nil

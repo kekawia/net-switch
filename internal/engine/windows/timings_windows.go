@@ -145,6 +145,18 @@ func (s *measuredTun) ReadPacket(ctx context.Context, packet []byte) (int, error
 	return n, err
 }
 
+func (s *measuredTun) ReadBatch(ctx context.Context, packets [][]byte, sizes []int) (int, error) {
+	n, err := s.Session.ReadBatch(ctx, packets, sizes)
+	if s.trace != nil {
+		for i := range n {
+			if sz := sizes[i]; sz > 0 && sz <= len(packets[i]) {
+				s.trace.record("from-app", packets[i][:sz], 0, 0, err)
+			}
+		}
+	}
+	return n, err
+}
+
 func (s *measuredTun) WriteBatch(packets [][]byte) (int, error) {
 	n, err := s.Session.WriteBatch(packets)
 	if s.trace != nil {

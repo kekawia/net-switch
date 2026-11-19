@@ -1,0 +1,126 @@
+name: Installed performance and soak
+on:
+  pull_request:
+    paths: ['tests/m6/**','tests/lifecycle/m6_soak_linux_test.go','.github/workflows/m6.yml']
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: m6-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  windows:
+    name: Windows ${{ matrix.arch }} / ${{ matrix.mode }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        arch: [x64, arm64]
+        mode: [compare, soak]
+    runs-on: ${{ matrix.arch == 'arm64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: ${{ matrix.mode == 'soak' && 175 || 50 }}
+    env:
+      NODE_OPTIONS: --max-old-space-size=2048
+      NETSWITCH_M6_VERSION: ${{ inputs.version || '1.0.0' }}
+      PRODUCT_ARCH: ${{ matrix.arch }}
+      MODE: ${{ matrix.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: go
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: wintun
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: webview2
+      - uses: ./.github/actions/cache-pinned-archive
+        with:
+          artifact: inno
+      - name: Build test-only CPU trace reader
+        if: matrix.mode == 'compare'
+        shell: pwsh
+        run: |
+          dotnet publish tests/m6/accounting/M6Cpu.csproj -c Release -r "win-$env:PRODUCT_ARCH" --self-contained true "-p:Platform=$env:PRODUCT_ARCH" "-p:PlatformTarget=$env:PRODUCT_ARCH" -o dist/m6-reader
+          exit $LASTEXITCODE
+      - name: Test the installed products through the real TestISP data path
+        shell: pwsh
+        run: ./scripts/test-windows-installer.ps1 -Arch $env:PRODUCT_ARCH -Qualification $env:MODE
+      - name: Require the completed measurement record
+        env:
+          PRODUCT_ARCH: ${{ matrix.arch }}
+        shell: pwsh
+        run: |
+          $result = if ($env:MODE -eq 'soak') { 'm6-soak-proof.json' } else { 'm6-comparison.json' }
+          $r = Get-Content -LiteralPath "dist/installer-logs-$env:PRODUCT_ARCH/$result" -Raw | ConvertFrom-Json
+          if ($r.commit -ne $env:GITHUB_SHA -or $r.arch -ne $env:PRODUCT_ARCH) {throw 'Wrong measurement identity'}
+          if ($env:MODE -eq 'soak' -and (!$r.exposure.complete -or $r.exposure.seconds -lt 7200)) {throw 'Two hours not proved'}
+          if ($env:MODE -eq 'compare' -and ($r.failures.Count -ne 0 -or $r.results.Count -ne 8 -or $r.latency.count -ne 2400 -or $r.latency.first400.Count -ne 2)) {throw 'Performance gate incomplete'}
+          if ($env:MODE -eq 'compare' -and ($r.gatewayHash -notmatch '^[a-f0-9]{64}$' -or $r.initialTables.baseline.after.TargetRows -ne 0 -or $r.initialTables.candidate.after.TargetRows -ne 0)) {throw 'Benchmark input state differs'}
+          if ($env:MODE -eq 'compare' -and ($r.cpuCoverage.baseline -lt 1 -or $r.cpuCoverage.candidate -lt 1)) {throw 'Missing observed process coverage'}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: m6-windows-${{ matrix.arch }}-${{ matrix.mode }}
+          path: |
+            dist/installer-logs-${{ matrix.arch }}/m6*
+            dist/installer-logs-${{ matrix.arch }}/failure/netswitch*.log
+            dist/installer-logs-${{ matrix.arch }}/failure/migration-journal.json
+          if-no-files-found: warn
+  linux-soak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 165
+    env:
+      GOTOOLCHAIN: local
+      GOMAXPROCS: '2'
+      GOFLAGS: -mod=vendor -p=2
+      NODE_OPTIONS: --max-old-space-size=2048
+      VERSION: ${{ inputs.version || '1.0.0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Build and install the candidate Debian package
+        run: |
+          set -euo pipefail
+          bash scripts/build-linux-packages.sh "$VERSION" dist/m6-linux amd64 deb
+          sudo apt-get install -y "./dist/m6-linux/netswitch-$VERSION-amd64.deb"
+          go test -c -o "$RUNNER_TEMP/soak.test" ./tests/lifecycle
+          sudo install -D -m755 "$RUNNER_TEMP/soak.test" /usr/local/libexec/netswitch-soak.test
+      - name: Two hours of held connections and new transfers
+        run: |
+          set -euo pipefail
+          sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted GITHUB_SHA="$GITHUB_SHA" NETSWITCH_LIFECYCLE_CI=1 NETSWITCH_M6_SOAK=1 M6_RESULT="$PWD/dist/m6-linux/exposure.json" \
+            /usr/local/libexec/netswitch-soak.test -test.v -test.timeout=135m -test.run='^TestInstalledLinuxTwoHourSoak$'
+      - name: Give the runner its exposure report
+        if: always()
+        run: |
+          if [[ -f dist/m6-linux/exposure.json ]]; then
+            sudo chown -- "$(id -u):$(id -g)" dist/m6-linux/exposure.json
+            test -r dist/m6-linux/exposure.json
+          fi
+      - name: Verify the completed Linux exposure
+        run: |
+          node -e "const r=require('./dist/m6-linux/exposure.json'); if(!r.complete || r.seconds<7200 || r.commit!==process.env.GITHUB_SHA) throw Error('incomplete exposure')"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: m6-linux-amd64-soak
+          path: dist/m6-linux/exposure.json
+          if-no-files-found: warn

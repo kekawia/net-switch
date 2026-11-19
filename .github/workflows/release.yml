@@ -14,6 +14,9 @@ concurrency:
 jobs:
   release-gate:
     name: Verify 1.0 release gates
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -45,6 +48,16 @@ jobs:
         run: go run ./tests/linux/cmd/nsaccept release-gate
       - name: Require the production offline root public key
         run: go run ./cmd/netswitchctl update-check-root
+      - name: Require the scheduled Windows integrity streak
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node tests/m6/night-gate.mjs
+
+  qualification:
+    needs: release-gate
+    uses: ./.github/workflows/m6.yml
+    with:
+      version: ${{ needs.release-gate.outputs.version }}
 
   windows-installers:
     name: Build Windows ${{ matrix.arch }} installer
@@ -99,7 +112,7 @@ jobs:
 
   signed-release:
     name: Sign, verify and publish release
-    needs: [release-gate, windows-installers, linux-packages]
+    needs: [release-gate, windows-installers, linux-packages, qualification]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

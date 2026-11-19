@@ -66,6 +66,9 @@ remove_package() {
       arch) pacman --noconfirm -R netswitch-bin ;;
     esac
 }
+if [[ "$family" == deb ]]; then
+    apt-get update -qq
+fi
 install_version 1.0.1
 test "$(stat -c '%a:%u' "$data")" = '700:0'
 systemctl is-active --quiet "$socket"

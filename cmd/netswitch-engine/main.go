@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"runtime/debug"
 
 	"github.com/kekawia/net-switch/internal/buildinfo"
 	"github.com/kekawia/net-switch/internal/lifecycle"
@@ -22,6 +24,17 @@ func main() {
 		os.Exit(lifecycle.Worker(os.Args[2:]))
 	}
 	if len(os.Args) > 1 && os.Args[1] == "service" {
+		// Keep the idle supervisor host compact; the forwarding native-child
+		// process sets its own GOMEMLIMIT=512MiB and default GOGC.
+		if os.Getenv("GOMAXPROCS") == "" {
+			runtime.GOMAXPROCS(1)
+		}
+		if os.Getenv("GOGC") == "" {
+			debug.SetGCPercent(25)
+		}
+		if os.Getenv("GOMEMLIMIT") == "" {
+			debug.SetMemoryLimit(16 << 20)
+		}
 		if err := lifecycle.ServiceCommand(service.Engine, os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(exitCode(err))

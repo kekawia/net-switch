@@ -456,6 +456,40 @@ func TestRingDLLLoadRetriesFailure(t *testing.T) {
 	}
 }
 
+func TestSessionBindIOContextCancelsAndClosesCleanly(t *testing.T) {
+	s, _ := newLossSession(t, &lossOwner{})
+	ctx, cancel := context.WithCancel(context.Background())
+	s.BindIOContext(ctx)
+
+	// Parking on the bound context cancels promptly without per-wait callbacks.
+	done := make(chan error, 1)
+	go func() {
+		buffers, sizes := [][]byte{make([]byte, 9000)}, make([]int, 1)
+		_, err := s.ReadBatch(ctx, buffers, sizes)
+		done <- err
+	}()
+	deadline := time.Now().Add(time.Second)
+	for s.Stats().ReadWaits == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if s.Stats().ReadWaits == 0 {
+		cancel()
+		t.Fatal("ReadBatch did not park before cancel")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("bound cancel returned %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("bound ReadBatch did not wake on context cancel")
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Session.Close after BindIOContext: %v", err)
+	}
+}
+
 func FuzzRingEntry(f *testing.F) {
 	f.Add(uint32(0), uint32(8), uint32(1), []byte{1})
 	f.Add(uint32(MinCapacity-4), uint32(4), uint32(65536), []byte{0x45})

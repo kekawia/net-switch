@@ -20,7 +20,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-var winsock = windows.NewLazySystemDLL("ws2_32.dll")
+var (
+	winsock   = windows.NewLazySystemDLL("ws2_32.dll")
+	relayRecv = winsock.NewProc("recv")
+	relaySend = winsock.NewProc("send")
+	relayPoll = winsock.NewProc("WSAPoll")
+)
 
 // The shared relay consumes readiness, not blocking reads. Every outbound TCP
 // socket is associated with this one completion port when it is created: its
@@ -33,7 +38,11 @@ type readiness struct {
 	next        uintptr
 	watches     map[uintptr]*socketWatch
 	writers     map[uintptr]*socketWatch
+	writeWake   chan struct{}
 	stop        chan struct{}
+	batchMu     sync.Mutex
+	batch       map[*socketWatch]struct{}
+	batchWake   chan struct{}
 	wg          sync.WaitGroup
 	thread      atomic.Uint32
 	capture     bool
@@ -85,6 +94,8 @@ type socketWatch struct {
 	connecting               bool
 	pin                      runtime.Pinner
 	pending, detached, write bool
+	bulkUntil                atomic.Int64
+	didRead                  atomic.Bool
 	drained                  chan struct{}
 	detachDone               chan struct{}
 	detachErr                error
@@ -102,12 +113,14 @@ func newReadinessWithPolicy(policy tcpCompletionPolicy) (*readiness, error) {
 	}
 	p := &readiness{
 		port:    winhandle.Open(port, "TCP completion port open"),
-		watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{},
+		watches: map[uintptr]*socketWatch{}, writers: map[uintptr]*socketWatch{}, writeWake: make(chan struct{}, 1),
 		stop: make(chan struct{}), capture: hostedTraceEnabled(), poll: pollWritable,
+		batch: make(map[*socketWatch]struct{}), batchWake: make(chan struct{}, 1),
 		policy: policy, cancel: windows.CancelIoEx, providerIFS: socketProviderIFS,
 	}
 	p.wg.Go(p.completions)
 	p.wg.Go(p.pollWrites)
+	p.wg.Go(p.deliverBulkReads)
 	return p, nil
 }
 
@@ -159,7 +172,7 @@ func (p *readiness) completions() {
 		// after Detach has no callback, and its memory is now safe to unpin.
 		_ = err
 		if !detached && wake != nil {
-			wake()
+			w.readable(wake)
 		}
 	}
 }
@@ -214,6 +227,73 @@ func (p *readiness) stats() map[string]any {
 	}
 }
 
+var relayClockStart = time.Now()
+
+const bulkReadDelay = 600 * time.Microsecond
+const bulkReadWindow = 20 * time.Millisecond
+
+func (w *socketWatch) inBulkMode() bool {
+	until := w.bulkUntil.Load()
+	return until != 0 && int64(time.Since(relayClockStart)) < until
+}
+
+func (w *socketWatch) queueBulk() {
+	p := w.pool
+	p.batchMu.Lock()
+	first := len(p.batch) == 0
+	p.batch[w] = struct{}{}
+	if first {
+		select {
+		case p.batchWake <- struct{}{}:
+		default:
+		}
+	}
+	p.batchMu.Unlock()
+}
+
+// An active bulk socket can generate a completion for each incoming segment.
+// Give these notifications one short shared batch. The bytes stay in Winsock,
+// so there is no outstanding payload operation, buffer loan or per-flow timer.
+func (w *socketWatch) readable(wake func()) {
+	if !w.inBulkMode() {
+		wake()
+		return
+	}
+	w.queueBulk()
+}
+
+func (p *readiness) deliverBulkReads() {
+	batch := make(map[*socketWatch]struct{})
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
+	for {
+		select {
+		case <-p.stop:
+			return
+		case <-p.batchWake:
+		}
+		timer.Reset(bulkReadDelay)
+		select {
+		case <-p.stop:
+			return
+		case <-timer.C:
+		}
+		p.batchMu.Lock()
+		batch, p.batch = p.batch, batch
+		p.batchMu.Unlock()
+		for w := range batch {
+			w.mu.Lock()
+			wake, detached := w.wake, w.detached
+			w.mu.Unlock()
+			if !detached && wake != nil {
+				wake()
+			}
+		}
+		clear(batch)
+	}
+}
+
 func (p *readiness) recordClose(local netip.AddrPort, handle windows.Handle, err error) {
 	if !p.capture {
 		return
@@ -235,7 +315,7 @@ type pollFD struct {
 }
 
 func pollWritable(rows []pollFD) int32 {
-	n, _, _ := winsock.NewProc("WSAPoll").Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
+	n, _, _ := relayPoll.Call(uintptr(unsafe.Pointer(&rows[0])), uintptr(len(rows)), 0)
 	return int32(n)
 }
 
@@ -243,13 +323,23 @@ func (p *readiness) pollWrites() {
 	var rows []pollFD
 	var watches []*socketWatch
 	for {
-		if !winclock.System.WaitDone(p.stop, 2*time.Millisecond) {
-			return
-		}
 		// The backing array outlives this snapshot. Release detached watches
 		// and their relay callbacks before shortening it, including idle passes.
 		clear(watches)
 		rows, watches = rows[:0], watches[:0]
+		p.mu.Lock()
+		idle := len(p.writers) == 0
+		p.mu.Unlock()
+		if idle {
+			select {
+			case <-p.stop:
+				return
+			case <-p.writeWake:
+			}
+		}
+		if !winclock.System.WaitDone(p.stop, 2*time.Millisecond) {
+			return
+		}
 		p.mu.Lock()
 		for _, w := range p.writers {
 			rows = append(rows, pollFD{Socket: w.socket.Handle("TCP write poll snapshot"), Events: pollWrNorm})
@@ -343,16 +433,30 @@ func (w *socketWatch) Arm(read, write bool) error {
 		w.mu.Unlock()
 		return net.ErrClosed
 	}
-	w.write = write
-	w.pool.mu.Lock()
-	if write {
-		w.pool.writers[w.key] = w
-	} else {
-		delete(w.pool.writers, w.key)
+	if write != w.write {
+		w.write = write
+		p := w.pool
+		p.mu.Lock()
+		if write {
+			if len(p.writers) == 0 {
+				select {
+				case p.writeWake <- struct{}{}:
+				default:
+				}
+			}
+			p.writers[w.key] = w
+		} else {
+			delete(p.writers, w.key)
+		}
+		p.mu.Unlock()
 	}
-	w.pool.mu.Unlock()
 	if !read || w.pending {
 		w.mu.Unlock()
+		return nil
+	}
+	if w.inBulkMode() && w.didRead.Swap(false) {
+		w.mu.Unlock()
+		w.queueBulk()
 		return nil
 	}
 	w.op = windows.Overlapped{}
@@ -378,7 +482,7 @@ func (w *socketWatch) Arm(read, write bool) error {
 	wake := w.wake
 	w.mu.Unlock()
 	if err == nil {
-		wake()
+		w.readable(wake)
 	}
 	return err
 }
@@ -456,6 +560,8 @@ type readySocket struct {
 	watched       bool
 	local, remote net.Addr
 	closed        bool
+	readWindow    time.Duration // readWindow and windowBytes are protected by mu
+	windowBytes   int
 }
 
 func (c *readySocket) Watch(wake func()) (platform.Readiness, error) {
@@ -482,13 +588,15 @@ func socketIOFlags(h winhandle.Owner, name string, b []byte, flags uint32) (int,
 		return 0, nil
 	}
 	site := "TCP send"
+	proc := relaySend
 	if name == "recv" {
+		proc = relayRecv
 		site = "TCP receive"
 		if flags != 0 {
 			site = "TCP peek"
 		}
 	}
-	n, _, err := winsock.NewProc(name).Call(uintptr(h.Handle(site)), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(flags))
+	n, _, err := proc.Call(uintptr(h.Handle(site)), uintptr(unsafe.Pointer(&b[0])), uintptr(len(b)), uintptr(flags))
 	runtime.KeepAlive(b)
 	if int32(n) == -1 {
 		if errors.Is(err, windows.WSAEWOULDBLOCK) {
@@ -523,7 +631,26 @@ func (c *readySocket) tryReceive(b []byte, flags uint32) (int, error) {
 	if c.closed || !c.watched {
 		return 0, net.ErrClosed
 	}
-	return socketIOFlags(c.handle, "recv", b, flags)
+	n, err := socketIOFlags(c.handle, "recv", b, flags)
+	if flags == 0 && n > 0 {
+		if c.watch != nil {
+			c.watch.didRead.Store(true)
+		}
+		c.noteRead(time.Since(relayClockStart), n, len(b))
+	}
+	return n, err
+}
+
+// Count only bytes consumed from the socket. A long-lived interactive flow
+// must not acquire a batching delay merely by accumulating bytes over time.
+func (c *readySocket) noteRead(now time.Duration, n, requested int) {
+	if now-c.readWindow >= bulkReadWindow {
+		c.readWindow, c.windowBytes = now, 0
+	}
+	c.windowBytes += n
+	if c.windowBytes >= 64<<10 && n < 16<<10 && n < requested {
+		c.watch.bulkUntil.Store(int64(now + bulkReadWindow))
+	}
 }
 func (c *readySocket) TryWrite(b []byte) (int, error) {
 	c.mu.Lock()

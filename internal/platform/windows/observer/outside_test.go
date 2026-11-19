@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 import (
 	"encoding/binary"
@@ -75,7 +75,7 @@ func TestCreatedIsFormattedLikeDotNet(t *testing.T) {
 		133999999999999999: "2025-08-18T14:13:19.9999999Z",
 	}
 	for filetime, want := range cases {
-		if got := formatCreated(filetime); got != want {
+		if got := FormatCreated(filetime); got != want {
 			t.Errorf("formatCreated(%d) = %s, want %s", filetime, got, want)
 		}
 	}
@@ -90,30 +90,30 @@ func TestConnectionID(t *testing.T) {
 }
 
 // A MIB_TCPTABLE_OWNER_MODULE as Windows lays it out.
-func tcpTableBytes(rows ...tcpConnection) []byte {
+func tcpTableBytes(rows ...TCPConnection) []byte {
 	table := make([]byte, tcpTableHeaderSize+len(rows)*tcpTableRowSize)
 	binary.LittleEndian.PutUint32(table, uint32(len(rows)))
 	for i, c := range rows {
 		row := table[tcpTableHeaderSize+i*tcpTableRowSize:]
-		binary.LittleEndian.PutUint32(row[0:], c.state)
-		copy(row[4:8], c.local[:])
-		binary.BigEndian.PutUint16(row[8:], c.localPort)
+		binary.LittleEndian.PutUint32(row[0:], c.State)
+		copy(row[4:8], c.Local[:])
+		binary.BigEndian.PutUint16(row[8:], c.LocalPort)
 		// Windows says the upper half of a port field may hold anything.
 		row[10], row[11] = 0xAB, 0xCD
-		copy(row[12:16], c.remote[:])
-		binary.BigEndian.PutUint16(row[16:], c.remotePort)
+		copy(row[12:16], c.Remote[:])
+		binary.BigEndian.PutUint16(row[16:], c.RemotePort)
 		row[18], row[19] = 0xEF, 0x01
-		binary.LittleEndian.PutUint32(row[20:], c.pid)
-		binary.LittleEndian.PutUint64(row[24:], uint64(c.created))
+		binary.LittleEndian.PutUint32(row[20:], c.PID)
+		binary.LittleEndian.PutUint64(row[24:], uint64(c.Created))
 		row[32] = 0x77 // module info, which isn't read
 	}
 	return table
 }
 
 func TestTheConnectionTableIsReadInWindowsByteOrder(t *testing.T) {
-	want := []tcpConnection{
-		{state: 5, local: [4]byte{192, 168, 1, 20}, localPort: 51234, remote: [4]byte{140, 82, 112, 3}, remotePort: 443, pid: 4321, created: 134050418688012345},
-		{state: 2, local: [4]byte{10, 0, 0, 5}, localPort: 80, remote: [4]byte{8, 8, 8, 8}, remotePort: 53, pid: 7, created: 1},
+	want := []TCPConnection{
+		{State: 5, Local: [4]byte{192, 168, 1, 20}, LocalPort: 51234, Remote: [4]byte{140, 82, 112, 3}, RemotePort: 443, PID: 4321, Created: 134050418688012345},
+		{State: 2, Local: [4]byte{10, 0, 0, 5}, LocalPort: 80, Remote: [4]byte{8, 8, 8, 8}, RemotePort: 53, PID: 7, Created: 1},
 	}
 	got, err := parseTcpTable(tcpTableBytes(want...))
 	if err != nil {
@@ -130,7 +130,7 @@ func TestTheConnectionTableIsReadInWindowsByteOrder(t *testing.T) {
 
 	// The statistics row, built like the PowerShell version's C# did:
 	// BitConverter.ToUInt32(address bytes) and the port's two bytes swapped.
-	row := got[0].row()
+	row := got[0].NativeRow()
 	if row.State != 5 || row.LocalAddr != 0x1401A8C0 || row.LocalPort != 0x22C8 || row.RemoteAddr != 0x0370528C || row.RemotePort != 0xBB01 {
 		t.Errorf("statistics row %+v", row)
 	}
@@ -150,7 +150,7 @@ func TestTheConnectionTableIsReadInWindowsByteOrder(t *testing.T) {
 
 // A stand-in for Windows, counting what the watcher asks.
 type fakeTCP struct {
-	connections   []tcpConnection
+	connections   []TCPConnection
 	failList      bool
 	paths         map[uint32]string
 	enableResult  uint32
@@ -165,7 +165,7 @@ type fakeTCP struct {
 func (f *fakeTCP) system() tcpSystem {
 	return tcpSystem{
 		estats: !f.estatsMissing,
-		connections: func() ([]tcpConnection, error) {
+		connections: func() ([]TCPConnection, error) {
 			f.listCalls++
 			if f.failList {
 				return nil, errors.New("no table")
@@ -191,20 +191,20 @@ func (f *fakeTCP) system() tcpSystem {
 	}
 }
 
-func established(localPort uint16, pid uint32, remote [4]byte) tcpConnection {
-	return tcpConnection{state: 5, local: [4]byte{192, 168, 1, 20}, localPort: localPort, remote: remote, remotePort: 443, pid: pid, created: 134050418688012345}
+func established(localPort uint16, pid uint32, remote [4]byte) TCPConnection {
+	return TCPConnection{State: 5, Local: [4]byte{192, 168, 1, 20}, LocalPort: localPort, Remote: remote, RemotePort: 443, PID: pid, Created: 134050418688012345}
 }
 
 var public = [4]byte{140, 82, 112, 3}
 
 func TestTheWatcherFollowsThePowerShellSteps(t *testing.T) {
 	fake := &fakeTCP{
-		connections: []tcpConnection{
+		connections: []TCPConnection{
 			established(1001, 10, public),
 			established(1002, 10, public),
 			established(1003, 20, public),                  // the engine
 			established(1004, 30, [4]byte{192, 168, 1, 1}), // a device at home
-			{state: 2, local: [4]byte{192, 168, 1, 20}, localPort: 1005, remote: public, remotePort: 443, pid: 10},
+			{State: 2, Local: [4]byte{192, 168, 1, 20}, LocalPort: 1005, Remote: public, RemotePort: 443, PID: 10},
 		},
 		paths:      map[uint32]string{10: `C:\Apps\browser.exe`, 20: `C:\Program Files\Net Switch\NETSWITCH-ENGINE.exe`},
 		bytes:      map[uint16][2]uint64{1001: {5000, 300}, 1002: {7, 8}},
@@ -267,13 +267,13 @@ func TestTheWatcherFollowsThePowerShellSteps(t *testing.T) {
 }
 
 func TestConnectionsThatCantBeMeasuredReportNull(t *testing.T) {
-	fake := &fakeTCP{connections: []tcpConnection{established(1001, 10, public)}, enableResult: 5, bytes: map[uint16][2]uint64{1001: {1, 2}}}
+	fake := &fakeTCP{connections: []TCPConnection{established(1001, 10, public)}, enableResult: 5, bytes: map[uint16][2]uint64{1001: {1, 2}}}
 	line := newOutsideWatcher("", fake.system()).sample()
 	if len(line.Outside) != 1 || line.Outside[0].Down != nil || line.Outside[0].Up != nil || line.Outside[0].Path != "" {
 		t.Errorf("refused collection: %+v", line.Outside)
 	}
 
-	fake = &fakeTCP{connections: []tcpConnection{established(1001, 10, public)}, estatsMissing: true}
+	fake = &fakeTCP{connections: []TCPConnection{established(1001, 10, public)}, estatsMissing: true}
 	line = newOutsideWatcher("", fake.system()).sample()
 	if line.Estats || len(fake.enabledPorts) != 0 || line.Outside[0].Down != nil {
 		t.Errorf("without the statistics functions: %+v, enabled %v", line, fake.enabledPorts)

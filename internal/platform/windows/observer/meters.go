@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 type adapterReading struct {
 	Alias string `json:"alias"`

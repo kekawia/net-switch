@@ -153,12 +153,15 @@ try {
   & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitch-engine.exe') ./cmd/netswitch-engine
   if ($LASTEXITCODE -ne 0) { throw "Building netswitch-engine.exe failed (exit $LASTEXITCODE)." }
 
+  & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitch-worker.exe') ./cmd/netswitch-worker
+  if ($LASTEXITCODE -ne 0) { throw "Building netswitch-worker.exe failed (exit $LASTEXITCODE)." }
+
   & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $baseLdflags -o (Join-Path $stage 'netswitchctl.exe') ./cmd/netswitchctl
   if ($LASTEXITCODE -ne 0) { throw "Building netswitchctl.exe failed (exit $LASTEXITCODE)." }
 
   & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $guiLdflags -o (Join-Path $stage 'netswitch-desktop.exe') ./cmd/netswitch-desktop
   if ($LASTEXITCODE -ne 0) { throw "Building netswitch-desktop.exe failed (exit $LASTEXITCODE)." }
-  foreach ($file in @('netswitch.exe','netswitch-engine.exe','netswitchctl.exe','netswitch-desktop.exe')) {
+  foreach ($file in @('netswitch.exe','netswitch-engine.exe','netswitch-worker.exe','netswitchctl.exe','netswitch-desktop.exe')) {
     $metadata = & $go version -m (Join-Path $stage $file)
     if ($LASTEXITCODE -ne 0) { throw "Cannot inspect $file build metadata." }
     $hasFaults = ($metadata -join "`n") -match 'lifecycle_test'

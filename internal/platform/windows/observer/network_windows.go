@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 import (
 	"errors"
@@ -75,7 +75,7 @@ func linkSpeed(speed uint64) string {
 	return strconv.FormatFloat(math.RoundToEven(value*10)/10, 'f', -1, 64) + " " + units[unit]
 }
 
-func readPolicy() (any, error) {
+func ReadPolicy() (any, error) {
 	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Policies\Microsoft\Windows\WcmSvc\GroupPolicy`, registry.QUERY_VALUE)
 	if errors.Is(err, registry.ErrNotExist) {
 		return "absent", nil
@@ -210,10 +210,10 @@ func routeIPv4(address *windows.RawSockaddrInet) string {
 	return netip.AddrFrom4((*windows.RawSockaddrInet4)(unsafe.Pointer(address)).Addr).String()
 }
 
-func readNetwork() (networkLine, error) {
+func ReadNetwork() (networkLine, error) {
 	line := networkLine{ReadAt: time.Now().UnixMilli(), Adapters: []networkAdapter{}, DefaultRoutes: []defaultRoute{}}
 	var err error
-	line.Policy, err = readPolicy()
+	line.Policy, err = ReadPolicy()
 	if err != nil {
 		line.Policy = "unknown"
 		fmt.Fprintf(os.Stderr, "read Wi-Fi policy: %v\n", err)
@@ -270,7 +270,7 @@ func readNetwork() (networkLine, error) {
 	return result, err
 }
 
-func missingIPInterface(err error) bool {
+func MissingIPInterface(err error) bool {
 	return errors.Is(err, windows.ERROR_NOT_FOUND) || errors.Is(err, windows.ERROR_FILE_NOT_FOUND)
 }
 
@@ -340,7 +340,7 @@ func assembleNetwork(line networkLine, rows []windows.MibIfRow2, addresses map[u
 		}
 		ipif := windows.MibIpInterfaceRow{Family: windows.AF_INET, InterfaceIndex: route.InterfaceIndex}
 		if err := readIP(&ipif); err != nil {
-			if missingIPInterface(err) {
+			if MissingIPInterface(err) {
 				continue
 			}
 			return line, fmt.Errorf("read route interface %d: %w", route.InterfaceIndex, err)
@@ -519,7 +519,7 @@ func network(once bool) error {
 		}
 	}
 	emit := func() error {
-		line, err := readNetwork()
+		line, err := ReadNetwork()
 		if err != nil {
 			return &networkReadError{err}
 		}

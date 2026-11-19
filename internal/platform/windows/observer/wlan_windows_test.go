@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 import (
 	"encoding/json"
@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kekawia/net-switch/internal/platform/winapi"
 	"golang.org/x/sys/windows"
 )
 
@@ -34,14 +35,14 @@ func TestSSIDProfileLifetime(t *testing.T) {
 		t.Run(scenario, func(t *testing.T) {
 			wantID := windows.GUID{Data1: 0xaabbccdd, Data2: 0x1122, Data3: 0x3344}
 			refs := map[string]int{}
-			object := func(name string) *comObject {
-				o := &comObject{vt: new([32]uintptr)}
-				o.vt[2] = windows.NewCallback(func(uintptr) uintptr { refs[name]--; return 0 })
+			object := func(name string) *winapi.COMInterface {
+				o := &winapi.COMInterface{VT: new([32]uintptr)}
+				o.VT[2] = windows.NewCallback(func(uintptr) uintptr { refs[name]--; return 0 })
 				return o
 			}
 			profile, details, adapter, wlanDetails := object("profile"), object("details"), object("adapter"), object("wlan")
 			denied := uintptr(0x80070005)
-			profile.vt[7] = windows.NewCallback(func(_ uintptr, out *uint32) uintptr {
+			profile.VT[7] = windows.NewCallback(func(_ uintptr, out *uint32) uintptr {
 				if scenario == "level-error" {
 					return denied
 				}
@@ -50,7 +51,7 @@ func TestSSIDProfileLifetime(t *testing.T) {
 				}
 				return 0
 			})
-			profile.vt[0] = windows.NewCallback(func(_ uintptr, iid *windows.GUID, out **comObject) uintptr {
+			profile.VT[0] = windows.NewCallback(func(_ uintptr, iid *windows.GUID, out **winapi.COMInterface) uintptr {
 				if *iid != iidConnectionProfile2 {
 					t.Error("wrong profile IID")
 				}
@@ -61,7 +62,7 @@ func TestSSIDProfileLifetime(t *testing.T) {
 				refs["details"]++
 				return 0
 			})
-			details.vt[7] = windows.NewCallback(func(_ uintptr, out *uint8) uintptr {
+			details.VT[7] = windows.NewCallback(func(_ uintptr, out *uint8) uintptr {
 				if scenario == "kind-error" {
 					return denied
 				}
@@ -70,7 +71,7 @@ func TestSSIDProfileLifetime(t *testing.T) {
 				}
 				return 0
 			})
-			profile.vt[11] = windows.NewCallback(func(_ uintptr, out **comObject) uintptr {
+			profile.VT[11] = windows.NewCallback(func(_ uintptr, out **winapi.COMInterface) uintptr {
 				if scenario == "adapter-error" {
 					return denied
 				}
@@ -80,14 +81,14 @@ func TestSSIDProfileLifetime(t *testing.T) {
 				}
 				return 0
 			})
-			adapter.vt[10] = windows.NewCallback(func(_ uintptr, out *windows.GUID) uintptr {
+			adapter.VT[10] = windows.NewCallback(func(_ uintptr, out *windows.GUID) uintptr {
 				if scenario == "id-error" {
 					return denied
 				}
 				*out = wantID
 				return 0
 			})
-			details.vt[9] = windows.NewCallback(func(_ uintptr, out **comObject) uintptr {
+			details.VT[9] = windows.NewCallback(func(_ uintptr, out **winapi.COMInterface) uintptr {
 				if scenario == "details-error" {
 					return denied
 				}
@@ -97,7 +98,7 @@ func TestSSIDProfileLifetime(t *testing.T) {
 				}
 				return 0
 			})
-			wlanDetails.vt[6] = windows.NewCallback(func(_ uintptr, out *uintptr) uintptr {
+			wlanDetails.VT[6] = windows.NewCallback(func(_ uintptr, out *uintptr) uintptr {
 				if scenario == "ssid-error" {
 					return denied
 				}
@@ -115,7 +116,7 @@ func TestSSIDProfileLifetime(t *testing.T) {
 			})
 			id, ssid, err := connectedSSID(profile)
 			if strings.HasSuffix(scenario, "-error") {
-				var failure *comError
+				var failure *winapi.COMError
 				if !errors.As(err, &failure) || failure.Code != uint32(denied) {
 					t.Fatalf("lost HRESULT: %v", err)
 				}
@@ -134,7 +135,7 @@ func TestSSIDProfileLifetime(t *testing.T) {
 					t.Errorf("%s references left: %d", name, count)
 				}
 			}
-			runtime.KeepAlive([]*comObject{profile, details, adapter, wlanDetails})
+			runtime.KeepAlive([]*winapi.COMInterface{profile, details, adapter, wlanDetails})
 		})
 	}
 }

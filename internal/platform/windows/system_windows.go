@@ -12,22 +12,25 @@ import (
 
 	js "github.com/kekawia/net-switch/internal/jsvalue"
 	"github.com/kekawia/net-switch/internal/platform"
+	"github.com/kekawia/net-switch/internal/platform/windows/observer"
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
+
+var iphlpapi = windows.NewLazySystemDLL("iphlpapi.dll")
 
 func Execute(operation string, a map[string]any) (any, error) {
 	switch operation {
 	case "line-check":
 		return checkLine(uint32(js.Number(a["index"])), js.Text(a["target"]), a["quick"] == true, a["custom"] == true), nil
 	case "network":
-		return readNetwork()
+		return observer.ReadNetwork()
 	case "tcp-port-configuration":
 		return readTCPPortSettings()
 	case "architecture":
 		return Architecture()
 	case "policy":
-		v, err := readPolicy()
+		v, err := observer.ReadPolicy()
 		if v == "absent" {
 			v = nil
 		}
@@ -75,14 +78,14 @@ func Execute(operation string, a map[string]any) (any, error) {
 		}
 		return closeTCP(tuples)
 	case "tcp-identity":
-		rows, err := tcpConnections()
+		rows, err := observer.TCPConnections()
 		if err != nil {
 			return nil, err
 		}
 		out := []map[string]any{}
 		for _, r := range rows {
-			if r.localPort == uint16(js.Number(a["port"])) {
-				out = append(out, map[string]any{"local": netip.AddrFrom4(r.local).String(), "lport": r.localPort, "remote": netip.AddrFrom4(r.remote).String(), "rport": r.remotePort, "pid": r.pid, "created": formatCreated(r.created), "processStarted": processStarted(r.pid), "state": r.state})
+			if r.LocalPort == uint16(js.Number(a["port"])) {
+				out = append(out, map[string]any{"local": netip.AddrFrom4(r.Local).String(), "lport": r.LocalPort, "remote": netip.AddrFrom4(r.Remote).String(), "rport": r.RemotePort, "pid": r.PID, "created": observer.FormatCreated(r.Created), "processStarted": observer.ProcessStarted(r.PID), "state": r.State})
 			}
 		}
 		return out, nil
@@ -158,7 +161,7 @@ func readMetrics(alias string) ([]map[string]any, error) {
 		family, _ := familyNumber(name)
 		row := windows.MibIpInterfaceRow{Family: family, InterfaceLuid: i.InterfaceLuid}
 		if err := windows.GetIpInterfaceEntry(&row); err != nil {
-			if missingIPInterface(err) {
+			if observer.MissingIPInterface(err) {
 				continue
 			}
 			return nil, err
@@ -282,15 +285,15 @@ func StopProcess(pid uint32, path string) error {
 	return nil
 }
 func portHolder(port uint16) (any, error) {
-	rows, err := tcpTable(8)
+	rows, err := observer.ReadTCPTable(8)
 	if err != nil {
 		return nil, err
 	}
 	for _, r := range rows {
-		if r.local == [4]byte{127, 0, 0, 1} && r.localPort == port && r.state == 2 {
-			path := processPath(r.pid)
+		if r.Local == [4]byte{127, 0, 0, 1} && r.LocalPort == port && r.State == 2 {
+			path := observer.ProcessPath(r.PID)
 			if path != "" {
-				return map[string]any{"pid": r.pid, "image": strings.ToLower(filepath.Base(path))}, nil
+				return map[string]any{"pid": r.PID, "image": strings.ToLower(filepath.Base(path))}, nil
 			}
 		}
 	}
@@ -300,13 +303,13 @@ func closeTCP(tuples []platform.TCPSelector) (map[string]any, error) {
 	closed, failed, gone := 0, 0, 0
 	codes := []uint32{}
 	for _, t := range tuples {
-		rows, err := tcpConnections()
+		rows, err := observer.TCPConnections()
 		if err != nil {
 			return nil, err
 		}
-		var found *tcpConnection
+		var found *observer.TCPConnection
 		for _, r := range rows {
-			if r.state == tcpStateEstablished && r.pid == uint32(t.PID) && r.localPort == uint16(t.LPort) && r.remotePort == uint16(t.RPort) && netip.AddrFrom4(r.local).String() == t.Local && netip.AddrFrom4(r.remote).String() == t.Remote && formatCreated(r.created) == t.Created {
+			if r.State == observer.TCPStateEstablished && r.PID == uint32(t.PID) && r.LocalPort == uint16(t.LPort) && r.RemotePort == uint16(t.RPort) && netip.AddrFrom4(r.Local).String() == t.Local && netip.AddrFrom4(r.Remote).String() == t.Remote && observer.FormatCreated(r.Created) == t.Created {
 				found = &r
 				break
 			}
@@ -315,18 +318,18 @@ func closeTCP(tuples []platform.TCPSelector) (map[string]any, error) {
 			gone++
 			continue
 		}
-		owner, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, found.pid)
+		owner, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, found.PID)
 		if err != nil {
 			gone++
 			continue
 		}
-		started, err := processCreationTime(owner)
-		if err != nil || started > found.created || (t.ProcessStarted != "" && formatCreated(started) != t.ProcessStarted) {
+		started, err := observer.ProcessCreationTime(owner)
+		if err != nil || started > found.Created || (t.ProcessStarted != "" && observer.FormatCreated(started) != t.ProcessStarted) {
 			windows.CloseHandle(owner)
 			gone++
 			continue
 		}
-		row := found.row()
+		row := found.NativeRow()
 		row.State = 12
 		code, _, _ := iphlpapi.NewProc("SetTcpEntry").Call(uintptr(unsafe.Pointer(&row)))
 		windows.CloseHandle(owner)

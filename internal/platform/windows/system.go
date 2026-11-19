@@ -8,11 +8,28 @@ import (
 	"io"
 	"os"
 
+	"github.com/kekawia/net-switch/internal/platform/windows/observer"
 	"github.com/kekawia/net-switch/internal/platform/worker"
 )
 
+// Run dispatches Control's one-shot queries and probes, and delegates blocking
+// observer modes to the leaf observer package.
+func Run(args []string) int {
+	if len(args) > 0 && args[0] == "query" {
+		return query(args[1:], false)
+	}
+	if len(args) > 0 && args[0] == "query-supervised" {
+		return query(args[1:], true)
+	}
+	if len(args) > 0 && args[0] == "probe" {
+		return runProbe(args[1:])
+	}
+	return observer.Run(args)
+}
+
 type System struct {
 	Workers                               worker.Supervisor
+	StreamExecutable                      string
 	EnginePath, Root, UserDir, MachineDir string
 }
 
@@ -38,7 +55,14 @@ func (s *System) Stream(ctx context.Context, mode string, emit func([]byte), rep
 	if mode == "outside" {
 		args = append(args, "--engine", s.EnginePath)
 	}
-	s.Workers.Stream(ctx, mode, args, emit, report)
+	supervisor := s.Workers
+	switch mode {
+	case "meters", "outside", "network":
+		if s.StreamExecutable != "" {
+			supervisor.Executable = s.StreamExecutable
+		}
+	}
+	supervisor.Stream(ctx, mode, args, emit, report)
 }
 func query(args []string, supervised bool) int {
 	if len(args) != 1 && len(args) != 2 {
@@ -79,7 +103,7 @@ func query(args []string, supervised bool) int {
 	if err != nil {
 		result["error"] = err.Error()
 	}
-	if err := writeLine(result); err != nil {
+	if err := observer.WriteLine(result); err != nil {
 		return 1
 	}
 	return 0

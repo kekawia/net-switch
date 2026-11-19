@@ -11,7 +11,7 @@ func TestOutputCacheSurvivesGCAndEndsWithLink(t *testing.T) {
 	l := NewLink()
 	defer l.Close()
 	var batch [1]OutputPacket
-	for _, size := range []int{64, MTU} {
+	for _, size := range []int{64, 1500, MTU} {
 		data := make([]byte, size)
 		data[0] = 73
 		if !l.Send(data) || l.ReadOwnedBatch(context.Background(), batch[:]) != 1 {
@@ -27,14 +27,14 @@ func TestOutputCacheSurvivesGCAndEndsWithLink(t *testing.T) {
 		}
 		batch[0].Release()
 	}
-	if l.buffers.smallCount != 1 || l.buffers.largeCount != 1 {
-		t.Fatal("both cached buffers must exist before checking cleanup")
+	if l.buffers.smallCount != 1 || l.buffers.mediumCount != 1 || l.buffers.largeCount != 1 {
+		t.Fatal("all three cached buffer classes must exist before checking cleanup")
 	}
 	if !l.Send([]byte{91}) || l.ReadOwnedBatch(context.Background(), batch[:]) != 1 {
 		t.Fatal("could not keep one writer loan alive across close")
 	}
 	l.Close()
-	if l.buffers.smallCount != 0 || l.buffers.largeCount != 0 {
+	if l.buffers.smallCount != 0 || l.buffers.mediumCount != 0 || l.buffers.largeCount != 0 {
 		t.Fatal("closing the link retained cached buffers")
 	}
 	if batch[0].Bytes[0] != 91 {
@@ -59,8 +59,20 @@ func TestOutputCacheRetentionIsBounded(t *testing.T) {
 	for i := range loans {
 		loans[i].Release()
 	}
-	if l.buffers.largeCount != QueuePackets+64 {
-		t.Fatalf("cached %d buffers after %d outstanding loans", l.buffers.largeCount, len(loans))
+	if l.buffers.largeCount != largeCacheLimit {
+		t.Fatalf("cached %d large buffers after %d outstanding loans, want %d", l.buffers.largeCount, len(loans), largeCacheLimit)
+	}
+	medium := make([]byte, 1500)
+	for i := range mediumCacheLimit + 32 {
+		if !l.Send(medium) || l.ReadOwnedBatch(context.Background(), loans[i:i+1]) != 1 {
+			t.Fatal("could not borrow medium output storage")
+		}
+	}
+	for i := range mediumCacheLimit + 32 {
+		loans[i].Release()
+	}
+	if l.buffers.mediumCount != mediumCacheLimit {
+		t.Fatalf("cached %d medium buffers, want %d", l.buffers.mediumCount, mediumCacheLimit)
 	}
 }
 

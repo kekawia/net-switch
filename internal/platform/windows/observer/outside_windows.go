@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 import (
 	"errors"
@@ -17,27 +17,27 @@ var (
 func windowsTCP() tcpSystem {
 	return tcpSystem{
 		estats:       procSetPerTcpConnectionEStats.Find() == nil && procGetPerTcpConnectionEStats.Find() == nil,
-		connections:  tcpConnections,
-		processPath:  processPath,
-		processStart: processStarted,
+		connections:  TCPConnections,
+		processPath:  ProcessPath,
+		processStart: ProcessStarted,
 		enable:       enableEstats,
 		read:         readEstats,
 	}
 }
 
-func processStarted(pid uint32) string {
+func ProcessStarted(pid uint32) string {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		return ""
 	}
 	defer windows.CloseHandle(h)
-	created, err := processCreationTime(h)
+	created, err := ProcessCreationTime(h)
 	if err != nil {
 		return ""
 	}
-	return formatCreated(created)
+	return FormatCreated(created)
 }
-func processCreationTime(h windows.Handle) (int64, error) {
+func ProcessCreationTime(h windows.Handle) (int64, error) {
 	var created, exited, kernel, user windows.Filetime
 	if err := windows.GetProcessTimes(h, &created, &exited, &kernel, &user); err != nil {
 		return 0, err
@@ -49,11 +49,11 @@ func processCreationTime(h windows.Handle) (int64, error) {
 var tcpTableBuffer = make([]byte, 64*1024)
 
 // The IPv4 TCP connections, with their owner and creation time.
-func tcpConnections() ([]tcpConnection, error) {
-	return tcpTable(tcpTableOwnerModuleConnections)
+func TCPConnections() ([]TCPConnection, error) {
+	return ReadTCPTable(tcpTableOwnerModuleConnections)
 }
 
-func tcpTable(class uintptr) ([]tcpConnection, error) {
+func ReadTCPTable(class uintptr) ([]TCPConnection, error) {
 	for attempt := 0; attempt < 5; attempt++ {
 		size := uint32(len(tcpTableBuffer))
 		result, _, _ := procGetExtendedTcpTable.Call(
@@ -77,7 +77,7 @@ var pathBuffer = make([]uint16, 1024)
 
 // The program a process runs, or "" when Windows won't say (the System
 // process, or one that has already ended), as PowerShell's Path gave "".
-func processPath(pid uint32) string {
+func ProcessPath(pid uint32) string {
 	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
 	if err != nil {
 		return ""

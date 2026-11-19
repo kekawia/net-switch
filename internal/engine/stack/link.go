@@ -73,20 +73,29 @@ func classifyRaw(p []byte) (packetClass, bool) {
 }
 
 // GC must not evict the output cache precisely when the engine hits its
-// memory target. Keep at most one queue plus one writer batch of each size,
-// allocate lazily, and release the cache with its link. A link that only
-// carries small packets never reserves a queue's worth of MTU-sized storage.
+// memory target. Allocate lazily, size standard Ethernet/Wi-Fi packets apart
+// from jumbo MTU-9000 frames, keep steady-state writer batches hot without
+// pinning a full queue of jumbo buffers permanently, and release with the link.
+const (
+	smallPacketLimit  = 256
+	mediumPacketLimit = 1536
+	smallCacheLimit   = 256
+	mediumCacheLimit  = 256
+	largeCacheLimit   = 128
+)
+
 type outputBuffers struct {
-	mu                     sync.Mutex
-	small                  [QueuePackets + 64]*[256]byte
-	large                  [QueuePackets + 64]*[MTU]byte
-	smallCount, largeCount int
-	closed                 bool
+	mu                                  sync.Mutex
+	small                               [smallCacheLimit]*[smallPacketLimit]byte
+	medium                              [mediumCacheLimit]*[mediumPacketLimit]byte
+	large                               [largeCacheLimit]*[MTU]byte
+	smallCount, mediumCount, largeCount int
+	closed                              bool
 }
 
 // OutputPacket transfers one queue buffer to the TUN writer. Release exactly
-// once after the synchronous device write, including error paths. The small
-// class keeps a SYN/ACK burst from reserving 9 KiB for every tiny packet.
+// once after the synchronous device write, including error paths. Size classes
+// keep SYN/ACK and MTU-1500 traffic from reserving 9 KiB per packet.
 type OutputPacket struct {
 	Bytes     []byte
 	storage   any
@@ -95,8 +104,8 @@ type OutputPacket struct {
 }
 
 func (pool *outputBuffers) packet(size int) OutputPacket {
-	if size <= 256 {
-		var b *[256]byte
+	if size <= smallPacketLimit {
+		var b *[smallPacketLimit]byte
 		pool.mu.Lock()
 		if pool.smallCount > 0 {
 			pool.smallCount--
@@ -104,7 +113,20 @@ func (pool *outputBuffers) packet(size int) OutputPacket {
 		}
 		pool.mu.Unlock()
 		if b == nil {
-			b = new([256]byte)
+			b = new([smallPacketLimit]byte)
+		}
+		return OutputPacket{Bytes: b[:size], storage: b, pool: pool}
+	}
+	if size <= mediumPacketLimit {
+		var b *[mediumPacketLimit]byte
+		pool.mu.Lock()
+		if pool.mediumCount > 0 {
+			pool.mediumCount--
+			b, pool.medium[pool.mediumCount] = pool.medium[pool.mediumCount], nil
+		}
+		pool.mu.Unlock()
+		if b == nil {
+			b = new([mediumPacketLimit]byte)
 		}
 		return OutputPacket{Bytes: b[:size], storage: b, pool: pool}
 	}
@@ -130,10 +152,15 @@ func (p *OutputPacket) Release() {
 		pool.mu.Lock()
 		if !pool.closed {
 			switch b := p.storage.(type) {
-			case *[256]byte:
+			case *[smallPacketLimit]byte:
 				if pool.smallCount < len(pool.small) {
 					pool.small[pool.smallCount] = b
 					pool.smallCount++
+				}
+			case *[mediumPacketLimit]byte:
+				if pool.mediumCount < len(pool.medium) {
+					pool.medium[pool.mediumCount] = b
+					pool.mediumCount++
 				}
 			case *[MTU]byte:
 				if pool.largeCount < len(pool.large) {
@@ -155,8 +182,9 @@ func (pool *outputBuffers) close() {
 	defer pool.mu.Unlock()
 	pool.closed = true
 	clear(pool.small[:])
+	clear(pool.medium[:])
 	clear(pool.large[:])
-	pool.smallCount, pool.largeCount = 0, 0
+	pool.smallCount, pool.mediumCount, pool.largeCount = 0, 0, 0
 }
 
 // Link owns its output buffers. A slot is reserved before copying a packet;
@@ -175,6 +203,7 @@ type Link struct {
 	mtu           atomic.Uint32
 	closed        bool
 	onClose       func()
+	burstDepth    atomic.Int32
 	ready         chan struct{}
 	done          chan struct{}
 	Dropped       atomic.Uint64
@@ -222,9 +251,11 @@ func (l *Link) enqueue(size int, kind packetClass, bulk bool, copyInto func([]by
 	l.queue[(l.head+l.count)%QueuePackets] = p
 	l.count++
 	l.peak = max(l.peak, l.count)
-	select {
-	case l.ready <- struct{}{}:
-	default:
+	if l.burstDepth.Load() == 0 || l.count >= 64 {
+		select {
+		case l.ready <- struct{}{}:
+		default:
+		}
 	}
 	depth := l.count
 	l.mu.Unlock()
@@ -236,6 +267,28 @@ func (l *Link) enqueue(size int, kind packetClass, bulk bool, copyInto func([]by
 		runtime.Gosched()
 	}
 	return true
+}
+
+// BeginWriteBurst and EndWriteBurst let a producer that emits a multi-packet
+// TCP burst (such as a bulk write or ACK batch) coalesce its ready signal so
+// the TUN writer drains the burst in one WriteBatch instead of waking on the
+// first segment. Queue depth >= 64 still wakes immediately.
+func (l *Link) BeginWriteBurst() {
+	l.burstDepth.Add(1)
+}
+
+func (l *Link) EndWriteBurst() {
+	if l.burstDepth.Add(-1) == 0 {
+		l.mu.Lock()
+		has := l.count > 0
+		l.mu.Unlock()
+		if has {
+			select {
+			case l.ready <- struct{}{}:
+			default:
+			}
+		}
+	}
 }
 
 func (l *Link) Send(p []byte) bool {

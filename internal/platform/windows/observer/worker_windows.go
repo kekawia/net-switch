@@ -1,4 +1,4 @@
-package winplatform
+package observer
 
 import (
 	"errors"
@@ -10,10 +10,9 @@ import (
 )
 
 func runOptions(opts options) int {
-	var sample func() any
 	switch opts.mode {
 	case "policy":
-		policy, err := readPolicy()
+		policy, err := ReadPolicy()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
@@ -22,16 +21,34 @@ func runOptions(opts options) int {
 			return 1
 		}
 		return 0
-	case "probe":
-		if err := writeLine(probe(opts)); err != nil {
-			return 1
-		}
-		return 0
+	}
+	return runStream(opts)
+}
+
+// RunStream is the entry point of the smaller executable used by the three
+// persistent observers. One-shot operations still use the engine executable.
+func RunStream(args []string) int {
+	opts, err := parseArgs(args)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	return runStream(opts)
+}
+
+func runStream(opts options) int {
+	var sample func() any
+	switch opts.mode {
 	case "meters":
 		sample = func() any { return readMeters() }
 	case "outside":
 		watcher := newOutsideWatcher(opts.engine, windowsTCP())
 		sample = func() any { return watcher.sample() }
+	case "network":
+		// Network changes use the existing notification loop below.
+	default:
+		fmt.Fprintln(os.Stderr, "expected meters, outside or network")
+		return 2
 	}
 
 	if !opts.once {

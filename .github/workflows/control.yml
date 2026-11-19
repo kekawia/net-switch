@@ -110,6 +110,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-engine.exe" ./cmd/netswitch-engine
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-worker.exe" ./cmd/netswitch-worker
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitch-desktop.exe" ./cmd/netswitch-desktop
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go build -tags lifecycle_test -ldflags "-X github.com/kekawia/net-switch/internal/buildinfo.Version=${{ github.sha }}-installed" -o "$directory/netswitchctl.exe" ./cmd/netswitchctl
@@ -123,6 +125,11 @@ jobs:
           ./tests/windows/testisp/fetch-wintun.ps1 -Directory $directory
           icacls $directory /setowner '*S-1-5-32-544' /T /Q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Read all three outputs from the installed observer image
+        if: matrix.control == 'go'
+        run: |
+          $env:NETSWITCH_STREAM_TEST_DIR = Join-Path $env:ProgramFiles 'NetSwitch-Installed-Harness-CI'
+          go test -v -count=1 -run '^TestInstalledStreamImageReads$' ./internal/platform/windows
       - name: Native Win32 parity
         id: parity
         if: matrix.control == 'go'

@@ -8,6 +8,8 @@ out=$(realpath -m "${2:?output directory required}")
 [[ "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || exit 2
 host=$(go env GOHOSTARCH)
 arch=${3:-$host}
+formats=${4:-all}
+[[ "$formats" == all || "$formats" == deb ]] || exit 2
 [[ "$arch" == amd64 || "$arch" == arm64 ]] || exit 2
 case $host in
   amd64) archive=x86_64; digest=2afaa5ffb5e3493402e31e7c67a5a1fb42133e3f66fc315ca0051934125561c7 ;;
@@ -49,6 +51,10 @@ install -m755 packaging/linux/{deb,rpm}-* "$work/hooks/"
 cp packaging/linux/nfpm.yaml "$work/"
 (cd "$work"
     ./nfpm package -f nfpm.yaml -p deb -t "$out/netswitch-${version}-${arch}.deb"
-    ./nfpm package -f nfpm.yaml -p rpm -t "$out/netswitch-${version}-${arch}.rpm"
+    if [[ "$formats" == all ]]; then
+        ./nfpm package -f nfpm.yaml -p rpm -t "$out/netswitch-${version}-${arch}.rpm"
+    fi
 )
-tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner -C "$root" -czf "$out/netswitch-${version}-${arch}.tar.gz" usr
+if [[ "$formats" == all ]]; then
+    tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner -C "$root" -czf "$out/netswitch-${version}-${arch}.tar.gz" usr
+fi

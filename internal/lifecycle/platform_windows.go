@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/kekawia/net-switch/internal/platform"
@@ -11,8 +12,16 @@ import (
 )
 
 func nativePlatform(c Config, log func(string)) platform.System {
-	exe := filepath.Join(c.Directory, "netswitch-engine.exe")
-	return &win.System{Workers: worker.Supervisor{Executable: exe, Log: func(err error) { log(err.Error()) }}, EnginePath: exe, Root: c.Directory, UserDir: c.Data, MachineDir: c.Data}
+	engine := filepath.Join(c.Directory, "netswitch-engine.exe")
+	executable := filepath.Join(c.Directory, "netswitch-worker.exe")
+	// Older version directories supplied the same worker modes in the engine.
+	if _, err := os.Lstat(executable); os.IsNotExist(err) {
+		executable = engine
+	}
+	return &win.System{
+		Workers:          worker.Supervisor{Executable: engine, Log: func(err error) { log(err.Error()) }},
+		StreamExecutable: executable, EnginePath: engine, Root: c.Directory, UserDir: c.Data, MachineDir: c.Data,
+	}
 }
 func Worker(args []string) int { return win.Run(args) }
 func DesktopCall(ctx context.Context, operation string, args map[string]any) (any, error) {
