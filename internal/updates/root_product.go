@@ -2,6 +2,5 @@
 
 package updates
 
-// Replace only this production anchor at the approved offline-root ceremony.
-// Until then, CheckProductionRoot deliberately refuses release publication.
-const RootPublicKey = DevelopmentRootPublicKey
+// Offline production root public key anchored for signed Net Switch releases.
+const RootPublicKey = "RWRlfOcOYDfJ80j/VrgSswWVdcQYYv4am5RAWzjbfd0jZSw/RdhQ/lCo"
