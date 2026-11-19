@@ -471,6 +471,20 @@ async function run(name, task) {
   return ok;
 }
 
+// Clear a failed routing toggle once polling shows the requested state was reached
+// (for example after Control's automatic retry succeeded).
+function clearResolvedActionError() {
+  if (!actionError || !state?.routing) return;
+  const status = state.routing.status;
+  if ((failedAction === 'routing-on' || failedAction === 'retry' || failedAction === 'restart') && status === 'on') {
+    actionError = null;
+    failedAction = null;
+  } else if (failedAction === 'routing-off' && status === 'off') {
+    actionError = null;
+    failedAction = null;
+  }
+}
+
 async function chooseLine(app, value) {
   if (choiceOf(app) === value || pendingLine.has(app.key)) return;
   pendingLine.set(app.key, value ?? '');
@@ -1443,8 +1457,13 @@ function renderNotices() {
       );
     }
   }
-  // While a panel is open its own error line shows this.
-  if (actionError && !panel) list.push(notice('error', actionError));
+  // While a panel is open its own error line shows this. When routing itself
+  // already shows its own error notice, don't stack a duplicate generic
+  // routing-toggle error underneath it.
+  const routingErrorShown =
+    Boolean(state && !unreachable && !outdated && state.routing?.status === 'error' && state.routing?.error) &&
+    (failedAction === 'routing-on' || failedAction === 'retry' || failedAction === 'restart');
+  if (actionError && !panel && !routingErrorShown) list.push(notice('error', actionError));
 
   const signature = JSON.stringify([list.map((item) => item.dataset.noticeKey ?? item.textContent), busyAction]);
   if (els.notices.dataset.signature !== signature) {
@@ -3484,6 +3503,7 @@ async function poll() {
     state = await api('/api/state');
     unreachable = false;
     outdated = false;
+    clearResolvedActionError();
   } catch (error) {
     if (error.outdated) outdated = true;
     else unreachable = true;

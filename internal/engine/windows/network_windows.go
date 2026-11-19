@@ -78,15 +78,20 @@ func interfaceGUID(luid uint64) (string, error) {
 
 func readAdapters() ([]Adapter, error) {
 	size := uint32(32 << 10)
-	var b []byte
+	var words []uint64
 	for attempt := 0; ; attempt++ {
 		if attempt == 8 || size > 16<<20 {
 			return nil, errors.New("adapter table kept growing")
 		}
-		b = make([]byte, size)
-		err := windows.GetAdaptersAddresses(windows.AF_UNSPEC, windows.GAA_FLAG_INCLUDE_ALL_INTERFACES, 0, (*windows.IpAdapterAddresses)(unsafe.Pointer(&b[0])), &size)
+		words = make([]uint64, (size+7)/8)
+		bufSize := uint32(len(words) * 8)
+		err := windows.GetAdaptersAddresses(windows.AF_UNSPEC, windows.GAA_FLAG_INCLUDE_ALL_INTERFACES, 0, (*windows.IpAdapterAddresses)(unsafe.Pointer(&words[0])), &bufSize)
 		if errors.Is(err, windows.ERROR_BUFFER_OVERFLOW) {
+			size = bufSize
 			continue
+		}
+		if errors.Is(err, windows.ERROR_NO_DATA) {
+			return []Adapter{}, nil
 		}
 		if err != nil {
 			return nil, err
@@ -99,15 +104,28 @@ func readAdapters() ([]Adapter, error) {
 	}
 	defer windows.FreeMibTable(unsafe.Pointer(routes))
 	default4, default6 := markDefaultLUIDs(routes.Rows())
+	result, err := collectAdapters((*windows.IpAdapterAddresses)(unsafe.Pointer(&words[0])), default4, default6, interfaceGUID)
+	runtime.KeepAlive(words)
+	return result, err
+}
+
+func collectAdapters(first *windows.IpAdapterAddresses, default4, default6 map[uint64]bool, guidOf func(uint64) (string, error)) ([]Adapter, error) {
 	var result []Adapter
-	for p := (*windows.IpAdapterAddresses)(unsafe.Pointer(&b[0])); p != nil; p = p.Next {
+	for p := first; p != nil; p = p.Next {
 		// Virtual interfaces remain eligible. Full-tunnel VPN policy can be
 		// added without changing the discovery or socket binding boundary.
 		if p.IfType == 24 {
 			continue
 		}
-		id, err := interfaceGUID(p.Luid)
+		id, err := guidOf(p.Luid)
 		if err != nil {
+			// GAA_FLAG_INCLUDE_ALL_INTERFACES can return an adapter that
+			// disappears (e.g. a retiring WireGuard tunnel or re-enumerating
+			// USB Wi-Fi adapter) before ConvertInterfaceLuidToGuid runs.
+			// Skip vanished entries rather than failing startup or monitoring.
+			if missing(err) {
+				continue
+			}
 			return nil, err
 		}
 		if strings.EqualFold(id, wintun.DefaultGUID) {
@@ -137,7 +155,6 @@ func readAdapters() ([]Adapter, error) {
 		}
 		result = append(result, a)
 	}
-	runtime.KeepAlive(b)
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Default4 != result[j].Default4 {
 			return result[i].Default4
