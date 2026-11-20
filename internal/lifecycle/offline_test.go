@@ -698,3 +698,241 @@ vm.runInNewContext(appCode, sandbox);
 		t.Fatalf("node runtime check failed: %v\n%s", err, out)
 	}
 }
+
+func TestServiceAppJSCombineAutoHidesFixedShareBars(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	source, err := assets.UI.ReadFile("ui/app.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transformed := ServiceAsset("app.js", source)
+	harness := `
+const fs = require('fs');
+const vm = require('vm');
+const assert = require('assert');
+const appCode = fs.readFileSync(0, 'utf8');
+
+class Node {}
+function matchesSelector(el, sel) {
+  const attrMatch = sel.match(/^([^\[]+)\[([^\]]+)\]$/);
+  if (attrMatch) {
+    return matchesSelector(el, attrMatch[1]) && el.hasAttribute(attrMatch[2]);
+  }
+  if (sel.startsWith('.')) return (el.className || '').split(/\s+/).includes(sel.slice(1));
+  if (sel.startsWith('#')) return el.id === sel.slice(1);
+  return el.tagName === sel.toUpperCase();
+}
+function findAll(root, sel, out = []) {
+  for (const child of root.children || []) {
+    if (matchesSelector(child, sel)) out.push(child);
+    findAll(child, sel, out);
+  }
+  return out;
+}
+function makeElement(tag) {
+  const attrs = {};
+  const dataset = {};
+  const children = [];
+  const listeners = new Map();
+  let text = '';
+  const el = Object.assign(new Node(), {
+    nodeType: 1,
+    tagName: String(tag).toUpperCase(),
+    id: '',
+    className: '',
+    hidden: false,
+    disabled: false,
+    open: false,
+    value: '',
+    dataset,
+    children,
+    style: { setProperty() {}, removeProperty() {} },
+    classList: { toggle() {}, add() {}, remove() {}, contains() { return false; } },
+    get childElementCount() { return children.length; },
+    get firstChild() { return children[0] || null; },
+    setAttribute(k, v) {
+      attrs[k] = String(v);
+      if (k.startsWith('data-')) dataset[k.slice(5)] = String(v);
+      if (k === 'class') el.className = String(v);
+    },
+    removeAttribute(k) {
+      delete attrs[k];
+      if (k.startsWith('data-')) delete dataset[k.slice(5)];
+    },
+    hasAttribute(k) { return k in attrs; },
+    hasChildNodes() { return children.length > 0; },
+    getAttribute(k) { return attrs[k] ?? null; },
+    addEventListener(type, fn) {
+      if (!listeners.has(type)) listeners.set(type, []);
+      listeners.get(type).push(fn);
+    },
+    dispatchEvent(type, ev = {}) {
+      for (const fn of listeners.get(type) ?? []) fn(ev);
+    },
+    insertBefore(node, ref) {
+      const idx = children.indexOf(node);
+      if (idx >= 0) children.splice(idx, 1);
+      if (!ref) { children.push(node); return node; }
+      const refIdx = children.indexOf(ref);
+      if (refIdx >= 0) children.splice(refIdx, 0, node);
+      else children.push(node);
+      return node;
+    },
+    append(...items) { for (const item of items) children.push(item); },
+    appendChild(child) { children.push(child); return child; },
+    replaceChildren(...items) { children.splice(0, children.length, ...items); },
+    remove() {},
+    focus() {},
+    contains() { return false; },
+    closest() { return null; },
+    showModal() { el.open = true; },
+    close() { el.open = false; },
+    querySelector(sel) { return findAll(el, sel)[0] || null; },
+    querySelectorAll(sel) { return findAll(el, sel); },
+  });
+  Object.defineProperty(el, 'textContent', {
+    get() { return children.length ? children.map((c) => c.textContent || '').join('') : text; },
+    set(v) { children.length = 0; text = String(v ?? ''); },
+  });
+  return el;
+}
+
+const byId = new Map();
+for (const id of ['routing-status','routing-toggle','lines','combine','notices','apps','empty','list-message','footer-note','open-settings','add-app','quit','panel']) {
+  const e = makeElement('div');
+  e.id = id;
+  byId.set(id, e);
+}
+const document = {
+  body: makeElement('body'),
+  activeElement: null,
+  getElementById(id) { return byId.get(id) || makeElement('div'); },
+  querySelector() { return makeElement('div'); },
+  createElement(tag) { return makeElement(tag); },
+  createElementNS(_ns, tag) { return makeElement(tag); },
+  createDocumentFragment() { return makeElement('#fragment'); },
+  createTextNode(t) { return Object.assign(new Node(), { nodeType: 3, textContent: String(t) }); },
+};
+
+const storage = new Map([['token', 'tok1']]);
+const timers = new Map();
+let nextTimer = 1;
+const windowObj = {
+  chrome: { webview: { postMessage() {}, addEventListener() {} } },
+  addEventListener() {},
+  matchMedia() { return { matches: false, addEventListener() {} }; },
+};
+windowObj.window = windowObj;
+
+const cable = {
+  id: 'l1', alias: 'Ethernet', label: 'Cable', kind: 'wired', main: true,
+  connected: true, problem: null, ping: 12, connections: 5, carrying: true,
+  target: 'l1', rate: { down: 900000, up: 12000 }, ssid: null, metered: false,
+  strict: false, cap: null, usage: { bytes: 0, periodStart: '2026-11-01T00:00:00.000Z' },
+  exhausted: false, weight: 1, share: 0.5,
+};
+const wifi = {
+  id: 'l2', alias: 'Wi-Fi', label: 'Wi-Fi stick', kind: 'wifi', main: false,
+  connected: true, problem: null, ping: 35, connections: 3, carrying: true,
+  target: 'l2', rate: { down: 400000, up: 10000 }, ssid: 'HomeWiFi', metered: false,
+  strict: false, cap: null, usage: { bytes: 0, periodStart: '2026-11-01T00:00:00.000Z' },
+  exhausted: false, weight: 1, share: 0.5,
+};
+const vpn = {
+  id: 'v1', alias: 'WireGuard', label: 'Work VPN', kind: 'vpn', vpn: true, main: false,
+  connected: true, problem: null, ping: 40, connections: 0, carrying: false,
+  target: 'v1', rate: { down: 0, up: 0 }, ssid: null, metered: false,
+  strict: true, onlyChosen: true, cap: null, usage: { bytes: 0, periodStart: '2026-11-01T00:00:00.000Z' },
+  exhausted: false, weight: 1, share: null,
+};
+
+let currentLines = [cable, wifi];
+let currentCombine = { on: true, active: true, mode: 'auto', shares: { l1: 0.5, l2: 0.5 } };
+function makeState() {
+  return {
+    mode: 'tun', version: '1.0.0', elevated: true,
+    routing: { status: 'on', wanted: true, measuring: true, error: null, retryAt: null },
+    lines: currentLines,
+    combine: currentCombine,
+    setup: { wifiBlocked: false, cableNotDefault: false, keepBothConnected: false, changed: { cableDefault: false, keepBoth: false } },
+    settings: { checkForUpdates: false, ipv6: 'off' },
+    apps: [], outside: [], events: [], usageError: null,
+  };
+}
+async function tickPoll() {
+  const fn = Array.from(timers.values()).pop();
+  assert(fn, 'expected scheduled poll timer');
+  timers.clear();
+  fn();
+  await new Promise((r) => setTimeout(r, 20));
+}
+
+const sandbox = {
+  Node, window: windowObj, document,
+  sessionStorage: {
+    getItem(k) { return storage.has(k) ? storage.get(k) : null; },
+    setItem(k, v) { storage.set(k, String(v)); },
+    removeItem(k) { storage.delete(k); },
+  },
+  location: { hash: '', pathname: '/', replace() {} },
+  history: { replaceState() {} },
+  matchMedia: windowObj.matchMedia,
+  URL: { createObjectURL() { return 'blob:1'; }, revokeObjectURL() {} },
+  setTimeout(fn) { const id = nextTimer++; timers.set(id, fn); return id; },
+  clearTimeout(id) { timers.delete(id); },
+  Map, Set, Date, Math, Number, String, Boolean, Array, Object, JSON, Error, RegExp, Promise, console,
+  fetch: async () => ({ ok: true, status: 200, async json() { return makeState(); } }),
+};
+
+vm.runInNewContext(appCode, sandbox);
+
+(async () => {
+  await new Promise((r) => setTimeout(r, 20));
+  const combine = byId.get('combine');
+  const text = combine.querySelector('.feature-text');
+  const shares = combine.querySelector('.shares');
+
+  // 1. Auto mode with two sharing lines: live free-speed copy, no fixed 50% share bars.
+  assert.equal(text.textContent, 'Apps set to Shared use whichever line has free speed.');
+  assert.equal(shares.hidden, true);
+  assert.equal(shares.querySelectorAll('.share').length, 0);
+
+  // 2. Auto mode with a VPN line present: still no 50% share bars, but shows left-out note.
+  currentLines = [cable, wifi, vpn];
+  await tickPoll();
+  assert.equal(text.textContent, 'Apps set to Shared use whichever line has free speed.');
+  assert.equal(shares.hidden, false);
+  assert.equal(shares.querySelectorAll('.share').length, 0);
+  assert.equal(shares.querySelectorAll('.share-range').length, 0);
+  assert.match(shares.textContent, /Work VPN/);
+
+  // 3. Manual mode: manual copy + interactive share sliders shown.
+  currentLines = [{ ...cable, weight: 70 }, { ...wifi, weight: 30 }];
+  currentCombine = { on: true, active: true, mode: 'manual', shares: { l1: 0.7, l2: 0.3 } };
+  await tickPoll();
+  assert.equal(text.textContent, 'Apps set to Shared split new connections by your shares below.');
+  assert.equal(shares.hidden, false);
+  assert.equal(shares.querySelectorAll('.share-range').length, 2);
+  assert.match(shares.textContent, /70%/);
+  assert.match(shares.textContent, /30%/);
+
+  // 4. Switching back to Auto with a strict 3rd physical line hides share sliders while keeping the left-out item.
+  const strictLine = { ...wifi, id: 'l3', alias: 'Cellular', label: 'Phone hotspot', strict: true, share: null };
+  currentLines = [cable, wifi, strictLine];
+  currentCombine = { on: true, active: true, mode: 'auto', shares: { l1: 0.5, l2: 0.5 } };
+  await tickPoll();
+  assert.equal(text.textContent, 'Apps set to Shared use whichever line has free speed.');
+  assert.equal(shares.hidden, false);
+  assert.equal(shares.querySelectorAll('.share-range').length, 0);
+  assert.match(shares.textContent, /Phone hotspot/);
+  assert.match(shares.textContent, /Chosen apps only/);
+})().catch((err) => { console.error(err); process.exit(1); });
+`
+	cmd := exec.Command("node", "--max-old-space-size=2048", "-e", harness)
+	cmd.Stdin = strings.NewReader(string(transformed))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("node runtime check failed: %v\n%s", err, out)
+	}
+}

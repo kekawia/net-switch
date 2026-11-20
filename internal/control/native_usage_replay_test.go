@@ -211,6 +211,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 			before := e.Snapshot()
 			want := twoLineNativeConfig(map[string]string{})
 			want.Combine = combined
+			want.AutoBalance = combined && len(want.Shares) >= 2
 			if polls >= 2 && !resetTrace || polls == 2 {
 				want.Blocked = []string{"b2"}
 				want.Shares = map[string]uint64{"a1": 500000}
@@ -222,6 +223,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 					want.Shares = map[string]uint64{"a1": 500000, "b2": 500000}
 					want.Lanes["b2"] = "a1"
 				}
+				want.AutoBalance = combined && len(want.Shares) >= 2
 			}
 			e.want = want
 			// Startup's journal/settings guard remains installed: physical usage
@@ -524,6 +526,7 @@ func replayNativeUsageSuffix(t *testing.T, c *Core, e *nativeStartupEngine, cloc
 				guard := e.check
 				want := twoLineNativeConfig(map[string]string{})
 				want.Combine = combined
+				want.AutoBalance = combined && len(want.Shares) >= 2
 				for seq, proof := range replayNativePolicySteps(t, c, e, clock, files, trace, cmp, fileCursor, []nativePolicyStep{{pos, end, settingsSeq, want}}) {
 					checked[seq] = proof
 				}

@@ -606,6 +606,9 @@ func (e *Engine) Stats() any {
 	// Aggregates only: every entry has a fixed bound (see stats_bound_test.go).
 	// Per-flow detail is in the paged flows listing.
 	s := map[string]any{"flows": e.Table.Stats(), "unsupportedUDP": e.Table.UnsupportedUDPStats()}
+	if ab := e.Table.AutoBalanceStats(); len(ab) > 0 {
+		s["autoBalance"] = ab
+	}
 	if e.proxy != nil {
 		if ps := e.proxy.Stats(); len(ps) > 0 {
 			s["proxyLines"] = ps

@@ -118,10 +118,11 @@ managers that download in parts.
 
 Each line gets a share of the new connections:
 
-- **Auto** follows each line's measured speed: a line that has shown it can go
-  twice as fast gets about twice the share. The shares only change when a line
-  has been busy enough to show its speed, at most once a minute.
-- **Manual** lets you set each line's share with sliders, in steps of 5%.
+- **Auto** balances new connections live across your sharing lines by each
+  line's free speed, active demand, and recent connection health — steering away
+  from a busy or stalled line within seconds so all sharing lines can run full
+  out.
+- **Manual** lets you set fixed shares with sliders, in steps of 5%.
 
 A line kept for chosen apps, or one that has reached its data cap, takes no
 share.

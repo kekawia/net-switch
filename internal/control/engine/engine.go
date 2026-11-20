@@ -15,13 +15,14 @@ import (
 )
 
 type Policy struct {
-	Lines    []lines.Line      `json:"lines"`
-	AppLines apps.Pins         `json:"appLines"`
-	Combine  bool              `json:"combine"`
-	Shares   lines.Shares      `json:"shares"`
-	Blocked  []string          `json:"blocked"`
-	Lanes    map[string]string `json:"lanes"`
-	IPv6     bool              `json:"ipv6"`
+	Lines       []lines.Line      `json:"lines"`
+	AppLines    apps.Pins         `json:"appLines"`
+	Combine     bool              `json:"combine"`
+	AutoBalance bool              `json:"autoBalance,omitempty"`
+	Shares      lines.Shares      `json:"shares"`
+	Blocked     []string          `json:"blocked"`
+	Lanes       map[string]string `json:"lanes"`
+	IPv6        bool              `json:"ipv6"`
 }
 
 type Snapshot struct {

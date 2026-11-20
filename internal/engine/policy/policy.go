@@ -21,13 +21,14 @@ var ErrBlocked = errors.New("app is pinned to a blocked line")
 var ErrIPv6 = errors.New("IPv6 is disabled")
 
 type Config struct {
-	Lines    []platform.Line   `json:"lines"`
-	AppLines map[string]string `json:"appLines"`
-	Combine  bool              `json:"combine"`
-	Shares   map[string]uint64 `json:"shares"`
-	Lanes    map[string]string `json:"lanes"`
-	Blocked  []string          `json:"blocked"`
-	IPv6     bool              `json:"ipv6"`
+	Lines       []platform.Line   `json:"lines"`
+	AppLines    map[string]string `json:"appLines"`
+	Combine     bool              `json:"combine"`
+	AutoBalance bool              `json:"autoBalance,omitempty"`
+	Shares      map[string]uint64 `json:"shares"`
+	Lanes       map[string]string `json:"lanes"`
+	Blocked     []string          `json:"blocked"`
+	IPv6        bool              `json:"ipv6"`
 }
 type Revision struct {
 	N      uint64 `json:"n"`
@@ -138,37 +139,82 @@ func Compile(r Revision) (*Policy, error) {
 	return p, nil
 }
 
+// ShareTarget is one open combining candidate resolved through Lanes.
+type ShareTarget struct {
+	Lane   string
+	Line   string
+	Weight uint64
+}
+
+func (p *Policy) AutoBalance() bool {
+	return p.config.AutoBalance && p.config.Combine && p.total != 0
+}
+
+func (p *Policy) ShareTargets() []ShareTarget {
+	if !p.config.Combine || p.total == 0 {
+		return nil
+	}
+	out := make([]ShareTarget, 0, len(p.slices))
+	for _, s := range p.slices {
+		if p.blocked[s.lane] || p.blocked[s.line] {
+			continue
+		}
+		out = append(out, ShareTarget{Lane: s.lane, Line: s.line, Weight: s.weight})
+	}
+	return out
+}
+
 func (p *Policy) Decide(owner platform.Owner, sourcePort uint16, ipv6 bool, k uint64) (flowapi.Decision, error) {
+	d, _, err := p.DecideWith(owner, sourcePort, ipv6, k, nil)
+	return d, err
+}
+
+// DecideWith evaluates the policy identically to Decide, delegating unpinned
+// AutoBalance selection to pick when non-nil and returning whether the flow
+// was admitted through combining (as opposed to an explicit pin or fallback).
+func (p *Policy) DecideWith(owner platform.Owner, sourcePort uint16, ipv6 bool, k uint64, pick func([]ShareTarget, uint64) (ShareTarget, bool)) (flowapi.Decision, bool, error) {
 	if ipv6 && !p.config.IPv6 {
-		return flowapi.Decision{}, ErrIPv6
+		return flowapi.Decision{}, false, ErrIPv6
 	}
 	lane := p.config.AppLines[owner.AppID]
 	if lane != "" && p.blocked[lane] {
-		return flowapi.Decision{}, ErrBlocked
+		return flowapi.Decision{}, false, ErrBlocked
 	}
+	combined := false
 	if lane == "" {
 		lane = p.config.Lines[0].ID
 		if p.config.Combine && !owner.Ambiguous && sourcePort >= 1024 && p.total != 0 {
-			position := k * Fibonacci
-			for _, s := range p.slices {
-				if s.last || position < s.end {
-					lane = s.lane
-					break
+			if p.config.AutoBalance && pick != nil {
+				if targets := p.ShareTargets(); len(targets) > 0 {
+					if chosen, ok := pick(targets, k); ok {
+						lane = chosen.Lane
+						combined = true
+					}
+				}
+			}
+			if !combined {
+				position := k * Fibonacci
+				for _, s := range p.slices {
+					if s.last || position < s.end {
+						lane = s.lane
+						combined = true
+						break
+					}
 				}
 			}
 		}
 	}
 	if p.blocked[lane] {
-		return flowapi.Decision{}, ErrBlocked
+		return flowapi.Decision{}, false, ErrBlocked
 	}
 	line, ok := p.config.Lanes[lane]
 	if !ok {
-		return flowapi.Decision{}, fmt.Errorf("no target for lane %s", lane)
+		return flowapi.Decision{}, false, fmt.Errorf("no target for lane %s", lane)
 	}
 	if p.blocked[line] {
-		return flowapi.Decision{}, ErrBlocked
+		return flowapi.Decision{}, false, ErrBlocked
 	}
-	return flowapi.Decision{Lane: lane, Line: line, Revision: p.revision}, nil
+	return flowapi.Decision{Lane: lane, Line: line, Revision: p.revision}, combined, nil
 }
 
 func (p *Policy) Predict(app string) Prediction {

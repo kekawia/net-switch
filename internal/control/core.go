@@ -705,7 +705,7 @@ func (c *Core) policyLocked() engine.Policy {
 	if !excludeVirtual {
 		shares = c.sharesLocked(ordered)
 	}
-	p := engine.Policy{Lines: ordered, AppLines: append(apps.Pins{}, c.pinsLocked()...), Combine: combine, Shares: shares, Blocked: []string{}, Lanes: map[string]string{}, IPv6: c.effectiveIPv6Locked()}
+	p := engine.Policy{Lines: ordered, AppLines: append(apps.Pins{}, c.pinsLocked()...), Combine: combine, AutoBalance: combine && c.values["combineMode"] == "auto" && len(shares) >= 2, Shares: shares, Blocked: []string{}, Lanes: map[string]string{}, IPv6: c.effectiveIPv6Locked()}
 	current := c.op.Engine.Snapshot()
 	if p.Combine && current.Policy.Combine && c.values["combineMode"] == "auto" && len(p.Shares) == len(current.Policy.Shares) {
 		sameIDs, moved := true, false

@@ -113,6 +113,7 @@ type Table struct {
 	flows                  map[uint64]*ticket
 	apps                   map[string]counts
 	lineRefs               map[string]int // resolved admissions; native socket pins cover closing tails
+	balancer               *autoBalancer
 	totals                 Totals
 	accountingIDs          map[accountIdentity]uint64
 	nextAccounting         uint64
@@ -148,6 +149,7 @@ func New(l Limits, store StateStore) *Table {
 		store:             store,
 		flows:             map[uint64]*ticket{},
 		apps:              map[string]counts{},
+		balancer:          newAutoBalancer(),
 		totals:            Totals{Apps: map[string]Bytes{}, Lines: map[string]Bytes{}},
 		snapshots:         map[uint64]*snapshot{},
 		rejectApps:        map[string]int{},
@@ -223,6 +225,7 @@ func (t *Table) Apply(r policy.Revision) (policy.Applied, error) {
 	a.Point = t.point
 	t.policy = p
 	t.applied = &a
+	t.balancer.syncPolicy(p, t.now())
 	return a, nil
 }
 func (t *Table) Unload() {
@@ -231,6 +234,7 @@ func (t *Table) Unload() {
 	t.mu.Lock()
 	t.policy = nil
 	t.applied = nil
+	t.balancer.reset()
 	t.mu.Unlock()
 }
 func (t *Table) Predict(app string) (policy.Prediction, error) {
@@ -295,6 +299,7 @@ func (t *Table) Begin(protocol string, tuple platform.Tuple) (flowapi.Ticket, er
 type ticket struct {
 	accountMu                                          sync.RWMutex
 	up, down                                           atomic.Uint64
+	lineLoad                                           *lineLoad
 	lineAddresses                                      []netip.Addr
 	table                                              *Table
 	record                                             liveRecord
@@ -303,7 +308,7 @@ type ticket struct {
 	cancel                                             context.CancelFunc
 	accountClosed, retired, timeWait, timeWaitReserved bool
 	closingOverflow, resolved, closed, handshake       bool
-	setupRefused                                       bool
+	setupRefused, combined, countedHandshake           bool
 }
 
 // Wire snapshots carry counters and a time.Time, but live tickets already
@@ -338,7 +343,9 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	if len(owner.Path) > 1024 || len(owner.AppID) > 512 || len(owner.Generation) > 256 {
 		return flowapi.Decision{}, errors.New("owner identity too long")
 	}
-	d, err := t.policy.Decide(owner, f.record.Source.Port(), f.record.Destination.Addr().Is6(), t.k.Load()+1)
+	d, combined, err := t.policy.DecideWith(owner, f.record.Source.Port(), f.record.Destination.Addr().Is6(), t.k.Load()+1, func(targets []policy.ShareTarget, k uint64) (policy.ShareTarget, bool) {
+		return t.balancer.pickLocked(targets, k, t.now())
+	})
 	if err != nil {
 		t.refusal(f.record.Protocol).Policy++
 		return flowapi.Decision{}, err
@@ -376,6 +383,12 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	f.record.Decision = d
 	f.record.Owner = owner
 	f.lineAddresses = t.policy.Addresses(d.Line)
+	f.lineLoad = t.balancer.lineLocked(d.Line)
+	f.combined = combined
+	if combined {
+		t.balancer.noteAdmitLocked(d.Line, f.handshake)
+		f.countedHandshake = f.handshake
+	}
 	f.resolved = true
 	if t.lineRefs == nil {
 		t.lineRefs = map[string]int{}
@@ -513,6 +526,12 @@ func (f *ticket) retireLocked() {
 		t.gauges.Handshakes--
 		f.handshake = false
 	}
+	if f.countedHandshake {
+		f.countedHandshake = false
+		if f.lineLoad != nil && f.lineLoad.handshakes > 0 {
+			f.lineLoad.handshakes--
+		}
+	}
 	udp := f.record.Protocol == "udp"
 	if udp {
 		t.gauges.UDP--
@@ -554,6 +573,12 @@ func (f *ticket) Established(source netip.Addr) {
 		t.gauges.Handshakes--
 		f.handshake = false
 	}
+	if f.countedHandshake {
+		f.countedHandshake = false
+		if f.lineLoad != nil && f.lineLoad.handshakes > 0 {
+			f.lineLoad.handshakes--
+		}
+	}
 }
 func (f *ticket) SetCancel(cancel context.CancelFunc) {
 	t := f.table
@@ -575,6 +600,14 @@ func (f *ticket) Add(up, down uint64) {
 	}
 	f.up.Add(up)
 	f.down.Add(down)
+	if f.lineLoad != nil {
+		if total := up + down; total > 0 {
+			f.lineLoad.totalBytes.Add(total)
+			if f.combined {
+				f.lineLoad.sharedBytes.Add(total)
+			}
+		}
+	}
 }
 func (f *ticket) Close() {
 	t := f.table
@@ -584,6 +617,12 @@ func (f *ticket) Close() {
 		return
 	}
 	f.closed = true
+	if f.countedHandshake {
+		f.countedHandshake = false
+		if f.lineLoad != nil && f.lineLoad.handshakes > 0 {
+			f.lineLoad.handshakes--
+		}
+	}
 	f.endTimeWaitLocked()
 	f.retireLocked()
 	delete(t.flows, f.record.ID)
@@ -863,7 +902,19 @@ func (t *Table) LineError(line string, err error) {
 	if !proxy.IsLineFault(err) {
 		return
 	}
+	t.mu.Lock()
+	t.balancer.noteFaultLocked(line, t.now())
+	t.mu.Unlock()
 	t.Emit(flowapi.Event{Type: "lineError", Line: line, Message: err.Error()})
+}
+
+func (t *Table) AutoBalanceStats() map[string]LineLoadStats {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.policy != nil && t.policy.AutoBalance() {
+		t.balancer.sampleLocked(t.policy.ShareTargets(), t.now())
+	}
+	return t.balancer.statsLocked()
 }
 
 func (t *Table) UnsupportedUDP(line, app string, packets uint64) {

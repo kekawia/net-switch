@@ -1026,12 +1026,9 @@ function combineMessage(on, sharers) {
     const carrier = standIn(main) ?? main;
     return `Paused while only one line works. New connections use the ${carrier.label} until another is back.`;
   }
-  if (allLines().some(isVirtualLine) && state.combine.mode !== 'manual') {
-    return 'Apps set to Shared spread new connections. Auto follows each line’s measured speed.';
-  }
   return state.combine.mode === 'manual'
-    ? 'Apps set to Shared spread new connections in the shares you set below. If a website keeps signing you out, put that app on one line.'
-    : 'Apps set to Shared spread new connections. Auto follows each line’s measured speed. If a website keeps signing you out, put that app on one line.';
+    ? 'Apps set to Shared split new connections by your shares below.'
+    : 'Apps set to Shared use whichever line has free speed.';
 }
 
 // The row under the line cards: the switch, Auto or Manual, and each line's share.
@@ -1091,28 +1088,31 @@ function renderCombine() {
     markUnavailable(key, Boolean(busyAction));
   }
 
-  parts.shares.hidden = !on;
-  if (!on) return;
   const left = list.filter((line) => !isVirtualLine(line) && (line.strict || line.exhausted));
   const virtualLeft = list.filter(isVirtualLine);
+  // In Auto mode, combining balances live by free speed rather than fixed percentages,
+  // so only show the lower row when Manual sliders are active or lines are left out.
+  const showShares = on && (manual || left.length > 0 || virtualLeft.length > 0);
+  parts.shares.hidden = !showShares;
+  if (!showShares) return;
   const signature = JSON.stringify([
     manual,
-    sharers.map((line) => [line.id, line.label, colorOf(line.id)]),
+    manual ? sharers.map((line) => [line.id, line.label, colorOf(line.id)]) : [],
     left.map((line) => [line.id, line.label, colorOf(line.id), line.strict]),
     virtualLeft.map((line) => [line.id, line.label, colorOf(line.id)]),
   ]);
   if (parts.shares.dataset.signature !== signature) {
     parts.shares.dataset.signature = signature;
     rebuildKeepingFocus(parts.shares, () => [
-      ...sharers.map((line) => shareItem(line, manual, sharers)),
+      ...(manual ? sharers.map((line) => shareItem(line, sharers)) : []),
       ...left.map((line) => leftOutItem(line)),
       virtualLeft.length ? virtualLeftOutItem(virtualLeft) : null,
     ]);
   }
-  renderShareValues();
+  if (manual) renderShareValues();
 }
 
-function shareItem(line, manual, sharers) {
+function shareItem(line, sharers) {
   const item = h(
     'div',
     { class: 'share', 'data-color': String(colorOf(line.id)), 'data-id': line.id },
@@ -1120,20 +1120,18 @@ function shareItem(line, manual, sharers) {
     h('div', { class: 'share-track' }, createMeter(SHARE_CELLS, 'share')),
     h('span', { class: 'share-value' }),
   );
-  if (manual) {
-    const slider = h('input', {
-      class: 'share-range',
-      type: 'range',
-      min: '0',
-      max: '100',
-      step: '5',
-      'data-focus': `share:${line.id}`,
-      'aria-label': `${line.label}’s share`,
-      oninput: (event) => moveShare(sharers, line.id, Number(event.target.value)),
-      onchange: () => sendShares(),
-    });
-    item.querySelector('.share-track').append(slider);
-  }
+  const slider = h('input', {
+    class: 'share-range',
+    type: 'range',
+    min: '0',
+    max: '100',
+    step: '5',
+    'data-focus': `share:${line.id}`,
+    'aria-label': `${line.label}’s share`,
+    oninput: (event) => moveShare(sharers, line.id, Number(event.target.value)),
+    onchange: () => sendShares(),
+  });
+  item.querySelector('.share-track').append(slider);
   return item;
 }
 
@@ -1164,20 +1162,16 @@ function virtualLeftOutItem(virtualLines) {
   return h('div', { class: 'shares-virtual' }, parts);
 }
 
-// Each share's number and cells: measured ones in Auto, the set ones in Manual.
+// Each share's number and cells in Manual mode.
 function renderShareValues() {
-  if (!combineParts || !state) return;
-  const manual = state.combine?.mode === 'manual';
+  if (!combineParts || !state || state.combine?.mode !== 'manual') return;
   const sharers = sharingLines();
-  const set = manual ? manualShares(sharers) : null;
+  const set = manualShares(sharers);
   for (const item of combineParts.shares.querySelectorAll('.share[data-id]')) {
     const line = lineById(item.dataset.id);
     if (!line) continue;
-    // Measured shares only mean something while combining really splits; paused, it shows none.
-    let percent = null;
-    if (manual) percent = set[line.id] ?? 0;
-    else if (Number.isFinite(line.share) && sharing()) percent = Math.round(line.share * 100);
-    const text = percent === null ? '—' : `${percent}%`;
+    const percent = set[line.id] ?? 0;
+    const text = `${percent}%`;
     const value = item.querySelector('.share-value');
     if (value.textContent !== text) value.textContent = text;
     setMeter(item.querySelector('.meter'), percent ? [[colorOf(line.id), Math.round(percent / 5)]] : []);

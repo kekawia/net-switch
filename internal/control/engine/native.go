@@ -33,7 +33,7 @@ func pinIdentity(value string, rules apppath.Rules) (string, bool) {
 // It performs no I/O and is shared by the IPC client and policy decision evidence.
 func NativeRevision(r Revision, rules apppath.Rules) (policy.Revision, error) {
 	p := r.Policy
-	config := policy.Config{Combine: p.Combine, IPv6: p.IPv6, AppLines: map[string]string{}, Shares: map[string]uint64{}, Lanes: map[string]string{}, Blocked: []string{}}
+	config := policy.Config{Combine: p.Combine, AutoBalance: p.AutoBalance, IPv6: p.IPv6, AppLines: map[string]string{}, Shares: map[string]uint64{}, Lanes: map[string]string{}, Blocked: []string{}}
 	known := map[string]bool{}
 	nonProxy := map[string]bool{}
 	mainCarrier := ""
