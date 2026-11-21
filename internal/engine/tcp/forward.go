@@ -335,6 +335,7 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 		return
 	}
 	dial, cancelDial := context.WithTimeout(ctx, DialTimeout)
+	dialStart := time.Now()
 	var remote platform.TCPConn
 	if f.flowDialer != nil {
 		remote, err = f.flowDialer.DialFlowTCP(dial, decision.Line, t.Destination, platform.FlowIdentity{Owner: owner, Source: t.Source, Destination: t.Destination})
@@ -348,6 +349,11 @@ func (f *Forwarder) open(r *gtcp.ForwarderRequest) {
 			observer.LineError(decision.Line, err)
 		}
 		return
+	}
+	// Setup time shows queueing on the line: a full queue delays the SYN or
+	// its answer, light traffic does not.
+	if observer, ok := f.control.(flowapi.SetupObserver); ok {
+		observer.LineConnected(decision.Line, t.Destination.Addr(), time.Since(dialStart))
 	}
 	defer func() {
 		if !handedOff {

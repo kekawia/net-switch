@@ -308,7 +308,7 @@ type ticket struct {
 	cancel                                             context.CancelFunc
 	accountClosed, retired, timeWait, timeWaitReserved bool
 	closingOverflow, resolved, closed, handshake       bool
-	setupRefused, combined, countedHandshake           bool
+	setupRefused, countedHandshake                     bool
 }
 
 // Wire snapshots carry counters and a time.Time, but live tickets already
@@ -384,7 +384,6 @@ func (f *ticket) Resolve(owner platform.Owner) (flowapi.Decision, error) {
 	f.record.Owner = owner
 	f.lineAddresses = t.policy.Addresses(d.Line)
 	f.lineLoad = t.balancer.lineLocked(d.Line)
-	f.combined = combined
 	if combined {
 		t.balancer.noteAdmitLocked(d.Line, f.handshake)
 		f.countedHandshake = f.handshake
@@ -603,9 +602,6 @@ func (f *ticket) Add(up, down uint64) {
 	if f.lineLoad != nil {
 		if total := up + down; total > 0 {
 			f.lineLoad.totalBytes.Add(total)
-			if f.combined {
-				f.lineLoad.sharedBytes.Add(total)
-			}
 		}
 	}
 }
@@ -908,13 +904,23 @@ func (t *Table) LineError(line string, err error) {
 	t.Emit(flowapi.Event{Type: "lineError", Line: line, Message: err.Error()})
 }
 
+var _ flowapi.SetupObserver = (*Table)(nil)
+
+// LineConnected reports how long a successful outbound TCP dial on line took.
+// Auto balancing compares it with earlier setups to the same destination to
+// see whether the line's queue is full.
+func (t *Table) LineConnected(line string, destination netip.Addr, took time.Duration) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.balancer.noteSetupLocked(line, destination, took, t.now())
+}
+
 func (t *Table) AutoBalanceStats() map[string]LineLoadStats {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if t.policy != nil && t.policy.AutoBalance() {
-		t.balancer.sampleLocked(t.policy.ShareTargets(), t.now())
-	}
-	return t.balancer.statsLocked()
+	now := t.now()
+	t.balancer.sampleLocked(now)
+	return t.balancer.statsLocked(now)
 }
 
 func (t *Table) UnsupportedUDP(line, app string, packets uint64) {
