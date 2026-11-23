@@ -4,6 +4,7 @@ package flowapi
 import (
 	"context"
 	"net/netip"
+	"time"
 
 	"github.com/kekawia/net-switch/internal/engine/platform"
 )
@@ -30,6 +31,12 @@ type Controller interface {
 // behind newer bursts when the per-second notice cap resets.
 type TupleRejectController interface {
 	AllowRejectTuple(app string, tuple platform.Tuple) bool
+}
+
+// SetupObserver extends Controller with how long each successful outbound TCP
+// dial took on its line, the evidence Auto balancing uses to see a full queue.
+type SetupObserver interface {
+	LineConnected(line string, destination netip.Addr, took time.Duration)
 }
 
 type Ticket interface {

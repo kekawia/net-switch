@@ -118,10 +118,12 @@ managers that download in parts.
 
 Each line gets a share of the new connections:
 
-- **Auto** balances new connections live across your sharing lines by each
-  line's free speed, active demand, and recent connection health — steering away
-  from a busy or stalled line within seconds so all sharing lines can run full
-  out.
+- **Auto** sends each new connection to the line with the most free speed
+  right now, so all your sharing lines can run full out. A line that only
+  carries a little traffic still counts as free. A line counts as busy when
+  it's carrying a lot, or when new connections on it take much longer than
+  usual to start, which happens when something like a big upload chokes it.
+  It gets new connections again within seconds of that passing.
 - **Manual** lets you set fixed shares with sliders, in steps of 5%.
 
 A line kept for chosen apps, or one that has reached its data cap, takes no

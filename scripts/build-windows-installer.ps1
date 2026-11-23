@@ -35,8 +35,11 @@ if (-not $Version) {
   }
   $Version = [string]$pkg.version
 }
-if ($Version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
-  throw "Invalid release version '$Version' (expected semantic version, e.g. 1.0.0)."
+# Match updates.CanonicalVersion: netswitchctl install and signed updates take
+# only three plain numbers, so an installer built with a suffix like 1.0.0-dev
+# would build fine and then refuse to install.
+if ($Version -notmatch '^(0|[1-9]\d{0,9})\.(0|[1-9]\d{0,9})\.(0|[1-9]\d{0,9})$') {
+  throw "Invalid release version '$Version' (expected three plain numbers, e.g. 1.0.0; the installer accepts nothing else)."
 }
 
 $stage = Join-Path $dist "stage-$Version-$Arch"
