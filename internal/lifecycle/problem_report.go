@@ -128,12 +128,17 @@ func shortenTimings(line string) string {
 	return out + " (full timings in the log)"
 }
 
-// reportHeader describes routing as Control sees it.
+// reportHeader describes routing and combining as Control sees them.
 func (a *Access) reportHeader() []diagnostics.Field {
 	snapshot := a.Remote.Snapshot()
 	fields := []diagnostics.Field{{Name: "Routing", Value: snapshot.Status}}
 	if snapshot.Error != nil && *snapshot.Error != "" {
 		fields = append(fields, diagnostics.Field{Name: "Routing error", Value: *snapshot.Error})
+	}
+	if a.Core != nil {
+		for _, fact := range a.Core.CombineFacts() {
+			fields = append(fields, diagnostics.Field{Name: fact[0], Value: fact[1]})
+		}
 	}
 	return fields
 }

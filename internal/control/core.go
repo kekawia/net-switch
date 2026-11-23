@@ -101,7 +101,8 @@ type lane struct {
 type meter struct {
 	counter usage.Counter
 	rate    *apps.Rate
-	at      int64
+	at      int64 // when the reading arrived, on Control's clock
+	sampled int64 // when it was taken, from the reading; 0 if not given
 }
 type Core struct {
 	mu                                           sync.Mutex
@@ -1131,6 +1132,43 @@ func (c *Core) logPolicyRulesLocked(before, after engine.Policy, auto bool) {
 		}
 	}
 }
+
+// CombineFacts describes combining for the problem report: whether it is on
+// and how, each line's stored top speed, and the shares the engine last
+// applied. Auto's shares come from the top speeds, so a wrong one shows here
+// (2026-11-23: a cable stored at 31 MB/s while doing 1.2 MB/s took them to
+// 90/10, visible only in an admin-only file).
+func (c *Core) CombineFacts() [][2]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	applied := c.op.Engine.Snapshot().Policy
+	mode := "off"
+	if applied.Combine {
+		mode = "on, " + js.Text(c.values["combineMode"])
+	}
+	var speeds []string
+	for _, l := range c.itemsLocked() {
+		if peak := c.usage.Peaks[l.ID]; peak > 0 {
+			speeds = append(speeds, fmt.Sprintf("%s %.2f MB/s", l.Label, peak/(1<<20)))
+		} else {
+			speeds = append(speeds, l.Label+" not measured yet")
+		}
+	}
+	measured := "timed readings"
+	if !c.usage.PeaksTimed {
+		measured = "readings timed by arrival, which can read high"
+	}
+	facts := [][2]string{{"Combine", mode}, {"Line top speeds", strings.Join(speeds, ", ") + " (" + measured + ")"}}
+	if applied.Combine && len(applied.Shares) > 0 {
+		var shares []string
+		for _, s := range applied.Shares {
+			shares = append(shares, fmt.Sprintf("%s %d%%", c.labelLocked(s.ID), int(math.Round(s.Value*100))))
+		}
+		facts = append(facts, [2]string{"New Shared connections split", strings.Join(shares, ", ")})
+	}
+	return facts
+}
+
 func (c *Core) labelLocked(id string) string {
 	for _, l := range c.itemsLocked() {
 		if l.ID == id {
@@ -1669,6 +1707,14 @@ func (c *Core) HelperLine(data []byte) bool {
 	defer c.mu.Unlock()
 	now := c.now()
 	if list, ok := m["adapters"].([]any); ok {
+		// Readings that say when they were taken are divided by that interval.
+		// A busy PC delays readings and then delivers them back to back, so the
+		// arrival interval made one second of traffic count as a fifth of one;
+		// the 0.3.x helpers and recorded traces give no time and keep it.
+		sampled := int64(js.Number(m["at"]))
+		if sampled > 0 && c.usage.TimePeaks() {
+			c.log("forgot the lines' top speeds measured before this version: a busy PC could make them several times too high. Auto combining learns them again from new readings")
+		}
 		next := map[string]meter{}
 		for _, v := range list {
 			a := js.Object(v)
@@ -1680,9 +1726,16 @@ func (c *Core) HelperLine(data []byte) bool {
 			var rate *apps.Rate
 			if before, ok := c.meters[alias]; ok {
 				sec := math.Max(.2, float64(now-before.at)/1000)
-				rate = &apps.Rate{Down: math.Max(0, counter.RX-before.counter.RX) / sec, Up: math.Max(0, counter.TX-before.counter.TX) / sec}
+				if sampled > 0 && before.sampled > 0 {
+					sec = math.Max(.2, float64(sampled-before.sampled)/1000)
+				}
+				if sampled > 0 && sampled <= before.sampled {
+					rate = before.rate // the same or an older reading: no new interval
+				} else {
+					rate = &apps.Rate{Down: math.Max(0, counter.RX-before.counter.RX) / sec, Up: math.Max(0, counter.TX-before.counter.TX) / sec}
+				}
 			}
-			next[alias] = meter{counter, rate, now}
+			next[alias] = meter{counter, rate, now, sampled}
 		}
 		c.meters = next
 	}

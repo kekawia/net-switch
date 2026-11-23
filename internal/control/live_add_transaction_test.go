@@ -170,4 +170,3 @@ func TestLiveAddJournalFailureDiscardsPreparedLane(t *testing.T) {
 		t.Fatal("uncommitted added lane survived")
 	}
 }
-

@@ -20,6 +20,7 @@ import (
 	"github.com/kekawia/net-switch/internal/platform"
 	linuxplatform "github.com/kekawia/net-switch/internal/platform/linux"
 	"github.com/kekawia/net-switch/internal/platform/worker"
+	"golang.org/x/sys/unix"
 )
 
 type linuxPlatform struct {
@@ -76,7 +77,13 @@ func linuxCall(op string, args map[string]any) (any, error) {
 			}
 			adapters = append(adapters, map[string]any{"alias": nic.Name, "rx": rx, "tx": tx})
 		}
-		return map[string]any{"adapters": adapters}, nil
+		// When the counters were read, on the system-wide monotonic clock, so a
+		// reading delayed in the pipe does not make a line look faster.
+		var ts unix.Timespec
+		if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+			return map[string]any{"adapters": adapters}, nil
+		}
+		return map[string]any{"adapters": adapters, "at": ts.Nano() / 1e6}, nil
 	case "network":
 		interfaces, err := net.Interfaces()
 		if err != nil {

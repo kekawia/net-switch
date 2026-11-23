@@ -77,6 +77,9 @@ type Saved struct {
 	// It is absent while the temporary adapter is the engine, so that record
 	// keeps its 0.3.x shape. Caps keep counting the whole adapter.
 	Routed *Routed `json:"routed,omitempty"`
+	// PeaksTimed says Peaks come from readings timed where they were taken
+	// (TimePeaks). Absent, as in 0.3.x records, until such a reading arrives.
+	PeaksTimed bool `json:"peaksTimed,omitempty"`
 }
 type Usage struct {
 	Saved
@@ -117,6 +120,22 @@ func (u *Usage) Load(saved map[string]any) {
 			}
 		}
 	}
+	u.PeaksTimed, _ = saved["peaksTimed"].(bool)
+}
+
+// TimePeaks is called when line readings start carrying the time they were
+// taken. Peaks recorded before were timed by their arrival, which a busy PC
+// delays and bunches, so they can be several times too high (2026-11-23: a
+// cable stored at 31 MB/s while doing 1.2 MB/s took Auto's shares to 90/10).
+// They are dropped once and learned again. It reports whether any were.
+func (u *Usage) TimePeaks() bool {
+	if u.PeaksTimed {
+		return false
+	}
+	u.PeaksTimed = true
+	dropped := len(u.Peaks) > 0
+	u.Peaks, u.PeakAt = map[string]float64{}, map[string]int64{}
+	return dropped
 }
 func (u *Usage) KeepOnly(ids []string) {
 	keep := map[string]bool{}
