@@ -5,6 +5,7 @@ package sharedfile
 import (
 	"errors"
 	"io"
+	"os"
 	"time"
 )
 
@@ -12,11 +13,34 @@ import (
 // size errors. A negative limit preserves an unbounded reader's semantics.
 // Missing-file and permission errors are returned unchanged, without retry.
 func ReadFile(path string, limit int64) ([]byte, error) {
+	var data []byte
+	err := retry(func() error {
+		var err error
+		data, err = readOnce(path, limit)
+		return err
+	})
+	return data, err
+}
+
+// Open opens path for reading with the same sharing and retry as ReadFile,
+// for callers that stream a large file, such as a log that is being appended
+// to or rotated by renaming, without refusing its writer.
+func Open(path string) (*os.File, error) {
+	var file *os.File
+	err := retry(func() error {
+		var err error
+		file, err = openFile(path)
+		return err
+	})
+	return file, err
+}
+
+func retry(attempt func() error) error {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		data, err := readOnce(path, limit)
+		err := attempt()
 		if err == nil || !sharingViolation(err) || !time.Now().Before(deadline) {
-			return data, err
+			return err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

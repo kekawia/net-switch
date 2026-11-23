@@ -53,7 +53,7 @@ func ServiceCommand(name string, args []string) error {
 }
 func Ctl(args []string) (resultErr error) {
 	if len(args) == 0 {
-		return errors.New("usage: netswitchctl status|enroll|start|stop|journal|install|cleanup|recover|uninstall|migration-check|migrate-profiles|migrate|restore-windows|cleanup-machine-data|whoami|version|update|update-keygen|update-issue-release-key|update-sign-manifest|update-verify-manifest|update-check-root")
+		return errors.New("usage: netswitchctl status|enroll|start|stop|diagnostics|journal|install|cleanup|recover|uninstall|migration-check|migrate-profiles|migrate|restore-windows|cleanup-machine-data|whoami|version|update|update-keygen|update-issue-release-key|update-sign-manifest|update-verify-manifest|update-check-root")
 	}
 	command := args[0]
 	if command == "install" || command == "uninstall" {
@@ -98,7 +98,7 @@ func Ctl(args []string) (resultErr error) {
 		*data = *machineData
 	}
 	switch command {
-	case "install", "status", "start", "stop", "whoami", "migrate-profiles", "migrate", "restore-windows", "cleanup-machine-data", "harden-root", "uninstall":
+	case "install", "status", "start", "stop", "diagnostics", "whoami", "migrate-profiles", "migrate", "restore-windows", "cleanup-machine-data", "harden-root", "uninstall":
 	default:
 		resolved, err := ResolveStore(*data)
 		if err != nil {
@@ -177,6 +177,8 @@ func Ctl(args []string) (resultErr error) {
 		var result any
 		err = rpc.Call(ctx, request, &result)
 		return printJSON(result, err)
+	case "diagnostics":
+		return DiagnosticsCommand(ctx, *data, *outPath)
 	case "journal", "migration-check":
 		value, err := Inspect(*data)
 		return printJSON(value, err)

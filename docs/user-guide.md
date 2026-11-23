@@ -259,7 +259,7 @@ An installed copy uses three places:
 | --- | --- |
 | `C:\Program Files\Net Switch` | The installed versions, desktop launcher and protected update files |
 | `%LOCALAPPDATA%\Net Switch` | Your tray preferences (`tray-settings.json`) and settings retained from older installations |
-| `%ProgramData%\Net Switch` | Routing settings, usage, Windows undo records, service logs and update recovery records (administrators only) |
+| `%ProgramData%\Net Switch` | Routing settings, usage, Windows undo records, service logs (see [Problem reports](#problem-reports)) and update recovery records (administrators only) |
 
 Settings from older versions, with a cable and a second connection, become two
 lines the first time a newer version starts, with every app keeping its line.
@@ -321,21 +321,55 @@ window's **Settings**.
 
 ## Troubleshooting
 
-- **The window says routing couldn't start.** Press **Details** in the message.
-  Net Switch also retries by itself. The full log is `server.log` in
-  `%LOCALAPPDATA%\Net Switch`.
-- **Nothing opens when I start Net Switch.** Check `launch.log` in
-  `%LOCALAPPDATA%\Net Switch`.
-- **The internet stopped working and Net Switch won't open.** Run this in a
-  PowerShell window opened as administrator. It stops only Net Switch's own
-  processes, not other Node.js programs:
+- **The window says routing couldn't start.** Press **Details** in the message
+  to see why. Net Switch also tries again by itself (see
+  [When a line drops](#when-a-line-drops)). If it keeps failing, make a
+  [problem report](#problem-reports).
+- **Nothing opens when I start Net Switch.** Its background service may still
+  be starting; the window opens by itself once it answers. If nothing opens
+  within a minute, make a [problem report](#problem-reports) from a PowerShell
+  window opened as administrator.
+- **The internet stopped working and Net Switch won't open.** Open PowerShell
+  as administrator and run:
 
   ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Program Files\Net Switch\tools\stop.ps1" -AppDir "C:\Program Files\Net Switch"
+  Stop-Service NetSwitch, NetSwitchEngine
   ```
 
-  Windows routing goes back to normal as soon as the routing engine stops.
+  Routing stops and every app uses Windows' normal connection again. Net Switch
+  stays off until you open it again.
 - **A website keeps signing me out.** Stop combining, or put that browser on one
   line.
 - **A line shows Checking… for a long time.** Its address came back but its
   internet tests keep failing. Check the phone's mobile data or the router.
+
+### Problem reports
+
+A problem report is a text file with Net Switch's newest log lines, made for
+attaching to a [bug report](https://github.com/kekawia/net-switch/issues/new/choose).
+Before you see it, Net Switch replaces personal details: user and computer
+names, email addresses, public IP addresses, hardware addresses and IDs. Each
+one gets its own label, so `[user-1]` is the same account everywhere in the
+file. Your own network's addresses, like `192.168.1.20`, stay: they show which
+line something happened on. Nothing is sent anywhere. Read the file before you
+share it.
+
+On Windows, run this in PowerShell. While Net Switch is running, you don't
+need to be an administrator:
+
+```powershell
+& "$env:ProgramFiles\Net Switch\$(Get-Content "$env:ProgramFiles\Net Switch\current")\netswitchctl.exe" diagnostics --out "$HOME\Desktop\netswitch-report.txt"
+```
+
+On Linux:
+
+```sh
+netswitchctl diagnostics --out ~/netswitch-report.txt
+```
+
+If Net Switch isn't running, run the same command as administrator (with
+`sudo` on Linux) and it reads the logs itself.
+
+The logs are `NetSwitch.log` (the service) and `NetSwitchEngine.log` (the
+routing engine) in `%ProgramData%\Net Switch`, or `/var/lib/netswitch` on Linux.
+Only administrators can open them.
