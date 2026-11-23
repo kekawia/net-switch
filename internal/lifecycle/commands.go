@@ -34,6 +34,11 @@ func ServiceCommand(name string, args []string) error {
 			return err
 		}
 		log := Log(c.Data, name)
+		if message, err := raiseServicePriority(); err != nil {
+			log("process priority remains normal: " + err.Error())
+		} else if message != "" {
+			log(message)
+		}
 		run := ControlService
 		if name == service.Engine {
 			run = nativeEngineService

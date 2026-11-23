@@ -8,6 +8,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/kekawia/net-switch/internal/engine/host"
 	win "github.com/kekawia/net-switch/internal/platform/windows"
 	"github.com/kekawia/net-switch/internal/winlock"
 	"golang.org/x/sys/windows"
@@ -94,17 +95,15 @@ func writeStoreFile(path string, data []byte, _ os.FileMode) error {
 	_, writeErr := f.Write(data)
 	return errors.Join(writeErr, f.Close())
 }
+
+// BootID keeps the GUID spelling journals already hold, so routing intent
+// still matches its boot across an update.
 func BootID() (string, error) {
-	var info struct {
-		ID       windows.GUID
-		Firmware uint32
-		Flags    uint64
-	}
-	var size uint32
-	if err := windows.NtQuerySystemInformation(90, unsafe.Pointer(&info), uint32(unsafe.Sizeof(info)), &size); err != nil {
+	id, err := host.BootGUID()
+	if err != nil {
 		return "", err
 	}
-	return info.ID.String(), nil
+	return id.String(), nil
 }
 
 type Lock struct{ Data, Name string }

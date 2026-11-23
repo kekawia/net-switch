@@ -192,7 +192,10 @@ func Install(c Config) error {
 // restart, backoff and latch decision (spec §3.4).
 func unitFiles(c Config) map[string]string {
 	run := func(file string) string { return quoted(filepath.Join(c.Directory, file)) }
-	common := "\nUser=root\nUMask=0077\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nRestrictSUIDSGID=yes\nProtectClock=yes\nProtectHostname=yes\nProtectKernelLogs=yes\nRestrictNamespaces=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\nDevicePolicy=closed\nReadWritePaths=" + quoted(c.Data) + " /run/netswitch\n"
+	// Nice=-5: routing and the lease that keeps it on must get CPU while the
+	// apps they serve are busy (2026-11-23: a native build starved both on
+	// Windows). systemd applies it before exec; no capability is needed.
+	common := "\nUser=root\nUMask=0077\nNice=-5\nNoNewPrivileges=yes\nProtectSystem=strict\nProtectHome=read-only\nPrivateTmp=yes\nProtectKernelTunables=yes\nProtectKernelModules=yes\nProtectControlGroups=yes\nRestrictSUIDSGID=yes\nProtectClock=yes\nProtectHostname=yes\nProtectKernelLogs=yes\nRestrictNamespaces=yes\nLockPersonality=yes\nRestrictRealtime=yes\nSystemCallArchitectures=native\nRestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK\nDevicePolicy=closed\nReadWritePaths=" + quoted(c.Data) + " /run/netswitch\n"
 	// /proc/<pid>/exe and fd links for other UIDs require the ptrace read
 	// permission. Routing is machine-wide, including other users' apps.
 	readCapabilities := "CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH CAP_SYS_PTRACE"

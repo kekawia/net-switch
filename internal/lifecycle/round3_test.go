@@ -101,21 +101,21 @@ func TestHealthWatchBoundsConsecutiveFailureAndResetsOnAnswers(t *testing.T) {
 		return context.DeadlineExceeded
 	})
 	for range 6 {
-		if err := w.check(context.Background(), fail, clock); err != nil {
+		if err := w.check(context.Background(), fail, clock, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := w.check(context.Background(), fail, clock); err == nil {
+	if err := w.check(context.Background(), fail, clock, 0); err == nil {
 		t.Fatal("hung process not detected within 21 seconds")
 	}
 	answer := healthFunc(func(context.Context) error { now = now.Add(2 * time.Second); return nil })
-	if err := w.check(context.Background(), answer, clock); err != nil {
+	if err := w.check(context.Background(), answer, clock, 0); err != nil {
 		t.Fatal(err)
 	}
 	if w.failedFor != 0 {
 		t.Fatal("slow successful response did not reset the failure window")
 	}
-	if err := w.check(context.Background(), fail, clock); err != nil {
+	if err := w.check(context.Background(), fail, clock, 0); err != nil {
 		t.Fatal("old failures leaked into the new window")
 	}
 }
@@ -124,7 +124,7 @@ func TestHealthProbeAcrossStandbyCannotConsumeFailureWindow(t *testing.T) {
 	now := time.Unix(100, 0)
 	var watch healthWatch
 	probe := healthFunc(func(context.Context) error { now = now.Add(8 * time.Hour); return context.DeadlineExceeded })
-	if err := watch.check(context.Background(), probe, func() time.Time { return now }); err != nil {
+	if err := watch.check(context.Background(), probe, func() time.Time { return now }, 0); err != nil {
 		t.Fatal("standby was mistaken for a hung engine", err)
 	}
 }

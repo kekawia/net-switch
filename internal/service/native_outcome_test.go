@@ -51,6 +51,83 @@ func TestNativeStatusRequiresMatchingSuccessfulRecovery(t *testing.T) {
 	}
 }
 
+// Setup re-registers the services, so Windows keeps no exit for the engine
+// (ERROR_SERVICE_NEVER_STARTED) and every install and update counted as an
+// engine failure (2026-11-23). Only the host's own clean record from this boot
+// stands in; anything less stays unknown.
+func TestNativeStatusAfterTheServiceIsReRegistered(t *testing.T) {
+	boot, err := host.CurrentBootID()
+	if err != nil || boot == "" {
+		t.Skip("no boot identity on this platform", err)
+	}
+	dir := t.TempDir()
+	instance := strings.Repeat("a", 32)
+	write := func(path string, v any) {
+		t.Helper()
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, b, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(dir, "engine-state.json"), host.Record{Schema: 1, Instance: instance})
+	path, err := host.OutcomePath(dir, instance)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean := func(code uint32, change func(*host.Outcome)) host.Outcome {
+		out := host.Outcome{Instance: instance, State: "complete", Reason: "stop", BootID: boot, Child: &host.ChildOutcome{PID: 7, Code: code, Completed: true}}
+		if change != nil {
+			change(&out)
+		}
+		return out
+	}
+	neverRan := Status{Stopped: true, ManagerNeverRan: true}
+	for _, tc := range []struct {
+		name  string
+		out   host.Outcome
+		known bool
+		code  uint32
+	}{
+		{"clean stop", clean(0, nil), true, 0},
+		{"clean adapter loss", clean(3, func(o *host.Outcome) { o.Reason = "adapter lost" }), true, 3},
+		{"child failed", clean(0, func(o *host.Outcome) { o.Reason, o.Child.Error = "failure", "native child failed code=1" }), false, 0},
+		{"child forced", clean(0, func(o *host.Outcome) { o.Child.Forced = true }), false, 0},
+		{"child without completion", clean(0, func(o *host.Outcome) { o.Child.Completed = false }), false, 0},
+		{"host gone before recording the child", clean(0, func(o *host.Outcome) { o.Child = nil }), false, 0},
+		{"other child code", clean(1, nil), false, 0},
+		{"cleanup failed", clean(0, func(o *host.Outcome) { o.State, o.Error = "failed", "route cleanup" }), true, 1},
+		{"cleanup still running", clean(0, func(o *host.Outcome) { o.State = "running" }), false, 0},
+		{"earlier boot", clean(0, func(o *host.Outcome) { o.BootID = strings.Repeat("e", 32) }), false, 0},
+		{"no boot recorded (older engine)", clean(0, func(o *host.Outcome) { o.BootID = "" }), false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			write(path, tc.out)
+			got := readNativeOutcome(dir, neverRan, nil)
+			if got.ExitKnown != tc.known || (got.ExitKnown && got.ExitCode != tc.code) {
+				t.Fatalf("unexpected final status: %+v", got)
+			}
+			if !tc.known && got.LastError == "" {
+				t.Fatal("unknown exit has no diagnostic", got)
+			}
+			if tc.known && tc.code != 1 && got.MainExitSource != "host-outcome" {
+				t.Fatal("host record used without saying so", got)
+			}
+		})
+	}
+	// Only a manager that ran nothing since registration or boot defers to the
+	// host's record; any other missing exit (a crash code) stays unknown.
+	write(path, clean(0, nil))
+	if got := readNativeOutcome(dir, Status{Stopped: true}, nil); got.ExitKnown || got.LastError == "" {
+		t.Fatal("host record replaced a manager exit that was merely unknown", got)
+	}
+	if got := readNativeOutcome(dir, Status{Stopped: true, ExitKnown: true, ExitCode: 3, ManagerNeverRan: true}, nil); !got.ExitKnown || got.ExitCode != 1 || got.MainExitSource == "host-outcome" {
+		t.Fatal("host record replaced a live manager exit", got)
+	}
+}
+
 func TestNativeStatusSurvivesSystemdUnitCollection(t *testing.T) {
 	dir := t.TempDir()
 	instance, invocation := strings.Repeat("a", 32), strings.Repeat("b", 32)

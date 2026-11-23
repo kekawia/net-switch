@@ -59,6 +59,37 @@ type Remote struct {
 	outcome       func(string) (host.Outcome, error)
 	Credentials   func() (map[string]proxy.Credentials, error)
 	credsInstance string
+	// renewal is the lease renewal timing; zero fields use the defaults below.
+	renewal renewalTiming
+}
+
+// Lease renewal. The engine's lease lasts protocol.Lease (30 s) and Control
+// renews it every 5 s. A renewal that is only slow, because the PC is
+// overloaded rather than the engine gone, must not end a working connection:
+// tearing it down forces a reattach whose durable epoch write is the slowest
+// thing to do on a busy PC, and the lease runs out while it waits. That turned
+// one Android build into ten routing drops on 2026-11-23. A request deadline
+// is not a transport failure (rpc.go), so one renewal at a time waits for its
+// answer for as long as the lease budget allows: until 20 s after the last
+// renewal that landed, which still leaves 10 s of the lease for a reattach.
+// Resending instead would not help: the RPC writer drops a request whose
+// deadline passed before it was written. A renewal slower than timeout is
+// logged with the PC's load.
+type renewalTiming struct {
+	every, timeout, giveUp time.Duration
+}
+
+func (t renewalTiming) withDefaults() renewalTiming {
+	if t.every <= 0 {
+		t.every = 5 * time.Second
+	}
+	if t.timeout <= 0 {
+		t.timeout = 4 * time.Second
+	}
+	if t.giveUp <= 0 {
+		t.giveUp = 20 * time.Second
+	}
+	return t
 }
 
 func NewRemote(ctx context.Context, log func(string)) *Remote {
@@ -356,8 +387,10 @@ func (r *Remote) Attach(ctx context.Context, start bool) error {
 	return nil
 }
 func (r *Remote) renew(rpc *RPC) {
-	tick := time.NewTicker(5 * time.Second)
+	timing := r.renewal.withDefaults()
+	tick := time.NewTicker(timing.every)
 	defer tick.Stop()
+	renewed := time.Now()
 	for {
 		select {
 		case <-r.ctx.Done():
@@ -367,13 +400,26 @@ func (r *Remote) renew(rpc *RPC) {
 			r.disconnect(rpc, errors.New("engine connection closed"))
 			return
 		case <-tick.C:
-			ctx, cancel := context.WithTimeout(r.ctx, 4*time.Second)
+			budget := max(timing.timeout, timing.giveUp-time.Since(renewed))
+			started := time.Now()
+			slow := time.AfterFunc(timing.timeout, func() {
+				r.log(fmt.Sprintf("engine lease renewal is slow (no answer within %s); waiting for it while the lease lasts (%s)", timing.timeout, systemLoad()))
+			})
+			ctx, cancel := context.WithTimeout(r.ctx, budget)
 			err := r.call(ctx, "renew", nil, "", nil)
 			cancel()
-			if err != nil {
-				r.disconnect(rpc, err)
-				return
+			if !slow.Stop() && err == nil {
+				r.log(fmt.Sprintf("engine lease renewed after %s", time.Since(started).Round(100*time.Millisecond)))
 			}
+			if err == nil {
+				renewed = time.Now()
+				continue
+			}
+			if errors.Is(err, context.DeadlineExceeded) {
+				err = fmt.Errorf("no lease renewal for %s: %w", time.Since(renewed).Round(100*time.Millisecond), err)
+			}
+			r.disconnect(rpc, err)
+			return
 		}
 	}
 }

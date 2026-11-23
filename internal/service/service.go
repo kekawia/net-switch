@@ -36,6 +36,10 @@ type Status struct {
 	ManagerInvocation string `json:"managerInvocation,omitempty"`
 	ManagerBootID     string `json:"managerBootId,omitempty"`
 	MainExitSource    string `json:"mainExitSource,omitempty"`
+	// ManagerNeverRan: the service manager keeps no exit for this service
+	// because it has not run since it was registered or since boot (Windows
+	// ERROR_SERVICE_NEVER_STARTED, e.g. right after Setup re-registers it).
+	ManagerNeverRan bool `json:"managerNeverRan,omitempty"`
 }
 
 // ExitCode accepts only a direct, completed outcome. In particular, joining
