@@ -401,6 +401,8 @@ func cachedGuardDLLID(t *testing.T) *guardFileID {
 // This is a check of one vanished snapshot entry, never a retry of a failed
 // baseline. A reused/still-present value remains an error, even if it now names
 // an innocent object. Log the old failure as well as the independent absence.
+// Only settledOffenders, beside a live session, may take a whole new
+// observation when reused numbers were all that failed; no handle is re-queried.
 func guardSnapshotGone(t *testing.T, h windows.Handle, err error) bool {
 	t.Helper()
 	if !errors.Is(err, windows.ERROR_INVALID_HANDLE) && !errors.Is(err, windows.STATUS_INVALID_HANDLE) {
@@ -708,6 +710,9 @@ type deviceFileGuard struct {
 	files     map[windows.Handle]windows.Handle // known owned file -> identity witness
 	witnesses map[windows.Handle]bool
 	dllID     *guardFileID
+	// reused counts the last observation's unreadable handles that were
+	// closed after the snapshot and whose number was already in use again.
+	reused int
 }
 
 func newDeviceFileGuard(t *testing.T) *deviceFileGuard {
@@ -790,6 +795,7 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 	// second handle to the same file, other than our own reference open, is
 	// an offender: the exception is bounded, not open-ended.
 	resources := map[guardFileID][]windows.Handle{}
+	g.reused = 0
 	for h := range handleSnapshot(t) {
 		if g.witnesses[h] {
 			continue // retained by this guard until t.Cleanup, never a session file
@@ -799,6 +805,9 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 			oldUnreadable++
 			if guardSnapshotGone(t, h, err) {
 				continue
+			}
+			if errors.Is(err, windows.ERROR_INVALID_HANDLE) || errors.Is(err, windows.STATUS_INVALID_HANDLE) {
+				g.reused++ // guardSnapshotGone found the number in use again
 			}
 			unreadable++
 			t.Logf("device-file guard cannot classify handle %#x: %v", h, err)
@@ -847,6 +856,25 @@ func (g *deviceFileGuard) offenders(t *testing.T) (offenders []windows.Handle, u
 	}
 	t.Logf("device-file guard comparison old_pass=%t old_offenders=%d old_unreadable=%d classified=%v new_offenders=%d new_unreadable=%d", oldOffenders == 0 && oldUnreadable == 0, oldOffenders, oldUnreadable, classified, len(offenders), unreadable)
 	return offenders, unreadable
+}
+
+// settledOffenders observes again, at most three times in all, while the only
+// unreadable handles were numbers Windows reused between the snapshot and the
+// query. A live session opens and closes handles all the time: on the
+// 2026-11-23 nightly (X64/full/9) handle 0x594 closed mid-check and its number
+// was taken again, which failed the negative control though the registered
+// device itself was found. Each observation stays strict and logged as it
+// was; a device file that is really held is in every one of them, and any
+// other unreadable handle is returned at once.
+func (g *deviceFileGuard) settledOffenders(t *testing.T) (offenders []windows.Handle, unreadable int) {
+	t.Helper()
+	for observation := 1; ; observation++ {
+		offenders, unreadable = g.offenders(t)
+		if unreadable == 0 || unreadable != g.reused || observation == 3 {
+			return offenders, unreadable
+		}
+		t.Logf("device-file guard observation %d: its %d unreadable handle(s) were all reused numbers; observing again", observation, unreadable)
+	}
 }
 
 func (g *deviceFileGuard) assertNone(t *testing.T) {
@@ -1248,7 +1276,7 @@ func TestWintunRegistrarDeviceFileGuardNegativeControl(t *testing.T) {
 		}
 		device := o.deviceOwner.Handle("test negative-control device identity")
 		kind, typeErr := objectType(device)
-		offenders, unreadable := guard.offenders(t)
+		offenders, unreadable := guard.settledOffenders(t)
 		found, directoryFound := false, false
 		for _, h := range offenders {
 			found = found || h == device

@@ -107,6 +107,16 @@ How the nightly applies it:
   failed that way, and needs nine valid pairs of twelve for a ratio. The
   instrumented nightly run has no ratio to defend and only asks that every
   sample of ours ran.
+- An isolated or full job measures one boundary, so its overhead median for a
+  mode rests on three pairs, which a shared hosted runner's speed swings move
+  by 20% on their own (on 2026-11-23 the ARM64 isolated jobs ranged from 0.79
+  to 1.13 in one night, 0.92 pooled; three nights in a row failed on one job's
+  0.79). A job whose only shortfall is that median hands it to the night: the
+  `Night verdict` judges it by the night's pooled pairs for the same runner,
+  scenario and mode (about 54) against the same 0.80 bound, and lists the jobs
+  it judged that way. Wrong bytes, a failed recovery, an unfinished transfer,
+  a capture shortfall or any other failed test in that job still fail the
+  night, and a real slowdown shows in the pooled median as well.
 - Each job uploads its verdict; the `Night verdict` job
   (`scripts/wintun-night.mjs`) fails unless all 72 reported and passed. Rule 4
   starts once seven earlier nights have a record: it compares the night's

@@ -7,7 +7,7 @@ const job = (index, change = {}) => ({
   arch: index % 2 ? 'ARM64' : 'X64', scenario: index % 4 < 2 ? 'isolated' : 'full', shard: String(1 + (index >> 2)),
   verdict: 'no_corruption_observed', passed: true, own_rejections: 0, recovery_failures: 0, own_payload_mismatches: 0,
   guard: {ignored_heads: 1, shifted_entries: 20, head_probes: 0}, reference_evidence: {payload_mismatch_incidents: 0, ring_rejection_incidents: 0, missing_transfers: 0},
-  clean_exposure_connections: 240, ...change,
+  clean_exposure_connections: 240, overhead_ratios: index % 4 < 2 ? {ours: [.92, .95, .9]} : {ours: [.92, .95, .9], inprocess: [.93, .96, .91]}, ...change,
 });
 const jobs = (change = () => ({})) => Array.from({length: expectedJobs}, (_, index) => job(index, change(index)));
 const earlier = (rejections, passed = true) => ({passed, totals: {own_rejections: rejections}});
@@ -62,6 +62,30 @@ test('one failed, missing or repeated job fails the night and names the failing 
   const repeated = night([...jobs().slice(1), job(1)]);
   assert.deepEqual(repeated.reasons, ['two records name the same job']);
   assert.equal(night([]).passed, false);
+});
+
+// Index 53 is ARM64/isolated/14, as on 2026-11-23.
+const slowOverhead = (index, verdict = 'no_corruption_observed') => index === 53 ? {verdict: 'diagnostic_invalid', passed: false, overhead_ratios: {ours: [.774, .788, .874]},
+  overhead_pending: {invalid_modes: ['ours'], verdict}} : {};
+
+test('a job short only on its own three overhead pairs is judged by the night\'s pooled pairs', () => {
+  const r = night(jobs(index => slowOverhead(index)));
+  assert.equal(r.passed, true);
+  assert.deepEqual(r.overhead_judged_by_night, ['ARM64/isolated/14']);
+  assert.deepEqual(r.overhead['ARM64/isolated/ours'].pairs, 54);
+  assert.ok(r.overhead['ARM64/isolated/ours'].median >= .8);
+  // What else the job found still fails the night.
+  const failing = night(jobs(index => slowOverhead(index, 'test_failed')));
+  assert.equal(failing.passed, false);
+  assert.deepEqual(failing.reasons, ['1 job: test_failed (ARM64/isolated/14)']);
+  // A real slowdown shows in the pooled pairs too, and then nothing is excused.
+  const slowNight = night(jobs(index => index % 4 === 1 ? {overhead_ratios: {ours: [.78, .79, .79]}, ...slowOverhead(index)} : {}));
+  assert.equal(slowNight.passed, false);
+  assert.deepEqual(slowNight.overhead_judged_by_night, []);
+  assert.deepEqual(slowNight.reasons, ['1 job: diagnostic_invalid (ARM64/isolated/14)']);
+  // An invalid job with nothing pending (a capture shortfall) still fails.
+  const capture = night(jobs(index => index === 53 ? {verdict: 'diagnostic_invalid', passed: false} : {}));
+  assert.equal(capture.passed, false);
 });
 
 test('rejections more than ten times the trailing median fail the night, once seven nights exist', () => {
