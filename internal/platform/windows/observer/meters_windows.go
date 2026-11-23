@@ -6,6 +6,7 @@ import (
 	"os"
 	"unsafe"
 
+	"github.com/kekawia/net-switch/internal/winclock"
 	"golang.org/x/sys/windows"
 )
 
@@ -16,7 +17,7 @@ import (
 // interface index. Not WMI: that can hang for minutes, and it doesn't list the
 // USB Wi-Fi stick at all.
 func readMeters() metersLine {
-	line := metersLine{Adapters: []adapterReading{}}
+	line := metersLine{Adapters: []adapterReading{}, At: winclock.Now().Milliseconds()}
 	first, err := adapterAddresses(false)
 	if err != nil {
 		// .NET throws here, which left the PowerShell version with an empty list too.

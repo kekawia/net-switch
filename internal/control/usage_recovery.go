@@ -254,8 +254,15 @@ func mergeUsage(old, recent usage.Saved, first *usage.Routed) usage.Saved {
 			recent.Lines[id] = now
 		}
 	}
-	for id, peak := range old.Peaks {
-		recent.Peaks[id] = max(recent.Peaks[id], peak)
+	// Peaks timed by arrival never mix with timed ones (usage.TimePeaks): a
+	// reset must not bring back the value it dropped.
+	switch {
+	case old.PeaksTimed == recent.PeaksTimed:
+		for id, peak := range old.Peaks {
+			recent.Peaks[id] = max(recent.Peaks[id], peak)
+		}
+	case old.PeaksTimed:
+		recent.Peaks, recent.PeaksTimed = old.Peaks, true
 	}
 	if old.Routed == nil {
 		return recent
