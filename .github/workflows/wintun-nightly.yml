@@ -120,8 +120,26 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Repeat complete matched cases without retrying or replacing failures
         run: node scripts/wintun-integrity-summary.mjs
+      # The artifact client gives up at once on a network error such as
+      # ETIMEDOUT (actions/upload-artifact#569), which on 11-23 left a passing
+      # job without a verdict. One more try after a pause; if that fails too,
+      # the job fails.
       - name: Hand this job's verdict to the night job
+        id: verdict
         if: always()
+        timeout-minutes: 2
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wintun-integrity-result-${{ runner.arch }}-${{ matrix.scenario }}-${{ matrix.shard }}
+          path: bin/integrity-result.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Wait before handing the verdict over again
+        if: always() && steps.verdict.outcome == 'failure'
+        run: Start-Sleep -Seconds 30
+      - name: Hand the verdict over again after a network failure
+        if: always() && steps.verdict.outcome == 'failure'
         timeout-minutes: 2
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -129,6 +147,7 @@ jobs:
           path: bin/integrity-result.json
           if-no-files-found: ignore
           retention-days: 30
+          overwrite: true
       - name: Keep full-sequence CPU profiles
         if: always() && matrix.scenario == 'full'
         timeout-minutes: 2
@@ -166,11 +185,29 @@ jobs:
         run: gh run download "$GITHUB_RUN_ID" --pattern 'wintun-integrity-result-*' --dir night/results || mkdir -p night/results
       - name: Judge the night against the gate and earlier nights
         run: node scripts/wintun-night.mjs night/results night/wintun-night.json
+      # Later nights read this record; a night without one ends the streak.
+      # Same one retry as the verdicts above.
       - name: Keep the night's record for the nights after it
+        id: record
         if: always()
+        timeout-minutes: 2
+        continue-on-error: true
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wintun-night
           path: night/wintun-night.json
           if-no-files-found: ignore
           retention-days: 90
+      - name: Wait before keeping the record again
+        if: always() && steps.record.outcome == 'failure'
+        run: sleep 30
+      - name: Keep the record again after a network failure
+        if: always() && steps.record.outcome == 'failure'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wintun-night
+          path: night/wintun-night.json
+          if-no-files-found: ignore
+          retention-days: 90
+          overwrite: true

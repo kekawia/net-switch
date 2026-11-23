@@ -63,8 +63,33 @@ test('nightly uses the qualified sequence with one shared cap and no ordinary CI
   assert.match(text, /INTEGRITY_REPEATS: '2'/);
   assert.match(text, /NETSWITCH_WINTUN_INTEGRITY_BOUNDARY: rotate/);
   assert.deepEqual(nightly.jobs.get('wintun-integrity').steps, readWorkflow(workflowText).jobs.get('wintun-integrity').steps);
-  assert.ok(!text.includes('continue-on-error'), 'other failures stay visible, never become fake green');
+  for (const job of nightly.jobs.values()) assertOneUploadRetry(job);
+  assert.equal(text.match(/continue-on-error/g).length, 2, 'the verdict and the night record, nothing else');
 });
+
+// The artifact client gives up at once on a network error such as ETIMEDOUT
+// (actions/upload-artifact#569), so an upload may be tried twice. Nothing else
+// continues on error and the second try never does: a failure that lasts stays
+// visible, never becomes fake green.
+function assertOneUploadRetry(job) {
+  const withKeys = step => Object.fromEntries((step.keys.with?.lines ?? []).map(line => {
+    const [, key, value] = /^\s+([\w-]+):\s*(.*)$/.exec(line);
+    return [key, value.replace(/\s+#.*$/, '')];
+  }));
+  for (const [index, step] of job.steps.entries()) {
+    if (!step.keys['continue-on-error']) continue;
+    const name = `${job.id}: ${step.keys.name?.inline}`;
+    assert.match(step.keys.uses?.inline ?? '', /^actions\/upload-artifact@[0-9a-f]{40}$/, `${name} is not an artifact upload, so it may not continue on error`);
+    assert.equal(step.if, 'always()', name);
+    const retry = job.steps.slice(index + 1).find(later => later.keys.uses && later.if === `always() && steps.${step.keys.id?.inline}.outcome == 'failure'`);
+    assert.ok(retry, `${name} has a second try`);
+    assert.equal(retry.keys['continue-on-error'], undefined, `${name}: the second try's failure fails the job`);
+    assert.equal(retry.keys.uses.inline, step.keys.uses.inline);
+    const {overwrite, ...same} = withKeys(retry);
+    assert.equal(overwrite, 'true', `${name}: the second try replaces a half-made artifact`);
+    assert.deepEqual(same, withKeys(step), `${name}: the second try uploads the same thing`);
+  }
+}
 
 function assertParity(plan) {
   for (const phase of plan) {
