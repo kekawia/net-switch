@@ -155,6 +155,8 @@ func Query(name string) (Status, error) {
 			out.ExitCode, out.ExitKnown = state.ServiceSpecificExitCode, true
 		} else if state.Win32ExitCode == 0 {
 			out.ExitKnown = true
+		} else if state.Win32ExitCode == uint32(windows.ERROR_SERVICE_NEVER_STARTED) {
+			out.ManagerNeverRan = true
 		}
 	}
 	return nativeOutcome(name, out), err
