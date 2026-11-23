@@ -107,8 +107,24 @@ How the nightly applies it:
   failed that way, and needs nine valid pairs of twelve for a ratio. The
   instrumented nightly run has no ratio to defend and only asks that every
   sample of ours ran.
+- An isolated or full job measures one boundary, so its overhead median for a
+  mode rests on three pairs, which a shared hosted runner's speed swings move
+  by 10-20% on their own. Boundaries also cost differently: on run
+  `45148827749` the ARM64 isolated `ours` ratios pooled at 0.86 for ingress and
+  0.87-1.0 for the other five. Three of the six nights from 11-18 to 11-23 failed
+  on one ARM64 isolated ingress job's three-pair median of about 0.79. A job
+  whose only shortfall is that median hands it to the night: the
+  `Night verdict` judges it by the night's pooled pairs for the same runner,
+  scenario, boundary and mode (three jobs, nine pairs) against the same 0.80
+  bound, and lists the jobs it judged that way. Boundaries are never pooled
+  together, so a slowdown at one boundary shows. Wrong bytes, a failed
+  recovery, an unfinished transfer, a capture shortfall or any other failed
+  test in that job still fail the night.
 - Each job uploads its verdict; the `Night verdict` job
-  (`scripts/wintun-night.mjs`) fails unless all 72 reported and passed. Rule 4
+  (`scripts/wintun-night.mjs`) fails unless all 72 reported and passed. The
+  artifact client gives up at once on a network error (`ETIMEDOUT`,
+  actions/upload-artifact#569), so the verdict and the night's own record are
+  each uploaded once more after 30 seconds; a second failure fails the job. Rule 4
   starts once seven earlier nights have a record: it compares the night's
   rejections in our own session with ten times the median of the last fourteen
   recorded nights, with a floor of ten. It prints the number of passing nights

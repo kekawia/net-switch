@@ -188,7 +188,30 @@ test('the writer guard counters are summed over our own sessions and reach the n
  assert.deepEqual(r.guard,{ignored_heads:5,shifted_entries:30,head_probes:1});
  assert.equal(r.verdict,'no_corruption_observed');
  assert.deepEqual(nightRecord(r,{arch:'ARM64',scenario:'full',shard:'3'}),{arch:'ARM64',scenario:'full',shard:'3',verdict:'no_corruption_observed',passed:true,own_rejections:0,recovery_failures:0,
-  own_payload_mismatches:0,guard:{ignored_heads:5,shifted_entries:30,head_probes:1},reference_evidence:{payload_mismatch_incidents:0,ring_rejection_incidents:0,missing_transfers:0},clean_exposure_connections:r.clean_exposure_connections});
+  own_payload_mismatches:0,guard:{ignored_heads:5,shifted_entries:30,head_probes:1},reference_evidence:{payload_mismatch_incidents:0,ring_rejection_incidents:0,missing_transfers:0},clean_exposure_connections:r.clean_exposure_connections,
+  overhead_ratios:{'receive/ours':[1,1,1],'receive/inprocess':[1,1,1]}});
+});
+// Nights 11-18, 11-20 and 11-23 each failed on one ARM64 isolated ingress job's
+// three-pair median of about 0.79; on run 45148827749 the night's nine ARM64
+// isolated ingress pairs stood at 0.86.
+test('a job whose only shortfall is its three-pair overhead median hands that question to the night',()=>{
+ const slow=fixture({scenario:'isolated',modeRatios:{ours:.79}}).result(0);
+ assert.equal(slow.verdict,'diagnostic_invalid');
+ assert.deepEqual(slow.overhead_pending,{invalid_modes:['ours'],verdict:'no_corruption_observed'});
+ const record=nightRecord(slow,{arch:'ARM64',scenario:'isolated',shard:'14'});
+ assert.equal(record.passed,false,'the job alone never passes on it');
+ assert.deepEqual(record.overhead_ratios,{'receive/ours':[.79,.79,.79]},'ratios carry the boundary they measured');
+ // A proof job measures every boundary and keeps them apart.
+ assert.deepEqual(Object.keys(fixture().result(0).own_overhead_ratios),['receive','ingress','echo','output','send','host'].map(b=>`${b}/ours`));
+ assert.deepEqual(record.overhead_pending,slow.overhead_pending);
+ // Anything else the job found stands.
+ const failing=fixture({scenario:'isolated',modeRatios:{ours:.79}});failing.line('--- FAIL: TestWintunRecoveryAndCancellation (2s)');
+ assert.equal(failing.result(1).overhead_pending.verdict,'test_failed');
+ const wrong=fixture({scenario:'isolated',modeRatios:{ours:.79}});emit(wrong,{test:'tcp_payload_difference',verdict:'integrity_failure'});
+ assert.equal(wrong.result(0).overhead_pending,null);
+ // A capture shortfall is never pooled, and a passing job has nothing pending.
+ assert.equal(fixture({captureModeRatios:{ours:.94}}).result(0).overhead_pending,null);
+ assert.equal(fixture({scenario:'isolated'}).result(0).overhead_pending,null);
 });
 test('a warning and repeated counter snapshots for one incident count once',()=>{
  const s=fixture({scenario:'full'});ringIncident(s);
