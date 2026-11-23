@@ -1132,6 +1132,43 @@ func (c *Core) logPolicyRulesLocked(before, after engine.Policy, auto bool) {
 		}
 	}
 }
+
+// CombineFacts describes combining for the problem report: whether it is on
+// and how, each line's stored top speed, and the shares the engine last
+// applied. Auto's shares come from the top speeds, so a wrong one shows here
+// (2026-11-23: a cable stored at 31 MB/s while doing 1.2 MB/s took them to
+// 90/10, visible only in an admin-only file).
+func (c *Core) CombineFacts() [][2]string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	applied := c.op.Engine.Snapshot().Policy
+	mode := "off"
+	if applied.Combine {
+		mode = "on, " + js.Text(c.values["combineMode"])
+	}
+	var speeds []string
+	for _, l := range c.itemsLocked() {
+		if peak := c.usage.Peaks[l.ID]; peak > 0 {
+			speeds = append(speeds, fmt.Sprintf("%s %.2f MB/s", l.Label, peak/(1<<20)))
+		} else {
+			speeds = append(speeds, l.Label+" not measured yet")
+		}
+	}
+	measured := "timed readings"
+	if !c.usage.PeaksTimed {
+		measured = "readings timed by arrival, which can read high"
+	}
+	facts := [][2]string{{"Combine", mode}, {"Line top speeds", strings.Join(speeds, ", ") + " (" + measured + ")"}}
+	if applied.Combine && len(applied.Shares) > 0 {
+		var shares []string
+		for _, s := range applied.Shares {
+			shares = append(shares, fmt.Sprintf("%s %d%%", c.labelLocked(s.ID), int(math.Round(s.Value*100))))
+		}
+		facts = append(facts, [2]string{"New Shared connections split", strings.Join(shares, ", ")})
+	}
+	return facts
+}
+
 func (c *Core) labelLocked(id string) string {
 	for _, l := range c.itemsLocked() {
 		if l.ID == id {

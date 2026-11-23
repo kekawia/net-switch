@@ -1,6 +1,7 @@
 package control
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -65,6 +66,32 @@ func TestFirstTimedReadingForgetsArrivalTimedPeaksOnce(t *testing.T) {
 	}
 	if forgot != 1 {
 		t.Fatalf("reset logged %d times", forgot)
+	}
+}
+
+// The problem report shows what Auto combining weighs lines by, so a wrong
+// top speed is visible without reading an admin-only file.
+func TestCombineFactsShowSpeedsAndShares(t *testing.T) {
+	c, _, _, _ := testCore(t, map[string]any{"lines": testLines(), "combine": true, "combineMode": "auto"})
+	c.adapters = []map[string]any{{"alias": "Ethernet", "ipv4s": []any{"192.0.2.1"}}, {"alias": "Wi-Fi", "ipv4s": []any{"192.0.2.2"}}}
+	c.routes = []map[string]any{{"interfaceAddress": "192.0.2.1"}, {"interfaceAddress": "192.0.2.2"}}
+	c.routesAt = c.now()
+	c.usage.Peaks["a1"] = 31 << 20
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	facts := map[string]string{}
+	for _, f := range c.CombineFacts() {
+		facts[f[0]] = f[1]
+	}
+	if facts["Combine"] != "on, auto" || facts["Line top speeds"] != "Ethernet 31.00 MB/s, Wi-Fi not measured yet (readings timed by arrival, which can read high)" || !strings.Contains(facts["New Shared connections split"], "Ethernet ") {
+		t.Fatalf("facts: %q", facts)
+	}
+	c.HelperLine(timedMeters(0, 5000))
+	for _, f := range c.CombineFacts() {
+		if f[0] == "Line top speeds" && f[1] != "Ethernet not measured yet, Wi-Fi not measured yet (timed readings)" {
+			t.Fatalf("after the reset: %q", f[1])
+		}
 	}
 }
 
