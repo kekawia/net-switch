@@ -36,18 +36,24 @@ export function night(tonight, history = [], expected = expectedJobs) {
   if (tonight.length !== expected) reasons.push(`${tonight.length} of ${expected} jobs reported a verdict`);
   // A job's own overhead median rests on three pairs. One whose only
   // shortfall is that median is judged by the night's pooled pairs for its
-  // runner, scenario and mode, against the same bound; anything else it found
-  // stands (wintun-integrity-summary.mjs, overhead_pending).
+  // runner, scenario, boundary and mode (three jobs, nine pairs), against the
+  // same bound; anything else it found stands (wintun-integrity-summary.mjs,
+  // overhead_pending). Boundaries are never pooled together: ingress costs
+  // more than the others, and a slowdown at one boundary must show.
   const pooled = new Map();
-  for (const r of tonight) for (const [mode, ratios] of Object.entries(r.overhead_ratios ?? {})) {
-    const key = `${r.arch}/${r.scenario}/${mode}`;
+  for (const r of tonight) for (const [boundaryMode, ratios] of Object.entries(r.overhead_ratios ?? {})) {
+    const key = `${r.arch}/${r.scenario}/${boundaryMode}`;
     pooled.set(key, [...(pooled.get(key) ?? []), ...ratios]);
   }
   const overhead = Object.fromEntries([...pooled].sort(([a], [b]) => a.localeCompare(b)).map(([key, ratios]) => [key, {pairs: ratios.length, median: ratios.length ? median(ratios) : null}]));
+  const pooledPasses = (r, mode) => {
+    const keys = Object.keys(r.overhead_ratios ?? {}).filter(key => key.endsWith(`/${mode}`));
+    return keys.length > 0 && keys.every(key => overhead[`${r.arch}/${r.scenario}/${key}`]?.median >= minimumOverheadRatio);
+  };
   const judgedByNight = [];
   const records = tonight.map(r => {
     if (r.passed || !r.overhead_pending) return r;
-    if (!r.overhead_pending.invalid_modes.every(mode => overhead[`${r.arch}/${r.scenario}/${mode}`]?.median >= minimumOverheadRatio)) return r;
+    if (!r.overhead_pending.invalid_modes.every(mode => pooledPasses(r, mode))) return r;
     judgedByNight.push(jobName(r));
     return {...r, verdict: r.overhead_pending.verdict, passed: ['no_corruption_observed', 'recovered_rejections'].includes(r.overhead_pending.verdict)};
   });
@@ -116,7 +122,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     `Our own session, ${result.jobs} of ${result.expected_jobs} jobs: ${t.own_payload_mismatches} delivered mismatches, ${t.own_rejections} ring rejections, ${t.recovery_failures} recovery failures, ${t.clean_exposure_connections} clean transfers.`,
     `Writer guard: ${t.ignored_heads} Heads refused, ${t.shifted_entries} entries shifted, ${t.head_probes} stall probes.`,
     result.regression ? `Rejections against earlier nights: median ${result.regression.median} over ${result.regression.nights} nights, limit ${result.regression.limit}.` : 'The regression rule starts once seven earlier nights have a record.',
-    `Instrumentation overhead, pooled median per runner, scenario and mode (bound ${minimumOverheadRatio}): ${Object.entries(result.overhead).map(([key, o]) => `${key} ${o.median?.toFixed(3) ?? 'none'} over ${o.pairs} pairs`).join('; ')}.`,
+    `Instrumentation overhead, pooled median per runner, scenario, boundary and mode (bound ${minimumOverheadRatio}):${Object.entries(result.overhead).map(([key, o]) => `${key} ${o.median?.toFixed(3) ?? 'none'} over ${o.pairs} pairs`).join('; ')}.`,
     result.overhead_judged_by_night.length ? `Judged by the pooled overhead instead of their own three pairs: ${result.overhead_judged_by_night.join(', ')}.` : '',
     '',
     `Signed DLL, reference only: ${t.reference_payload_mismatches} delivered mismatches, ${t.reference_ring_rejections} ring rejections, ${t.reference_missing_transfers} transfers not finished.`,

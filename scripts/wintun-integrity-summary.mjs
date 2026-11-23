@@ -262,12 +262,13 @@ export class IntegritySummary {
     const verdict=this.hasIntegrityFailure ? 'integrity_failure' : recoveryFailures ? 'recovery_failure' : this.incomplete || this.timeouts || missing ? 'diagnostic_incomplete'
       : ownInvalid.length ? 'diagnostic_invalid' : verdictWithoutOverhead;
     // In isolated and full jobs a mode's median comes from one boundary's three
-    // pairs, which a shared hosted runner's speed swings move by 20% on their
-    // own (2026-11-23: ARM64 isolated medians from 0.79 to 1.13 in one night,
-    // 0.92 pooled). Our modes' raw ratios go to the night verdict, which judges
-    // a job whose only shortfall is that median by the night's pooled pairs
-    // (scripts/wintun-night.mjs). A capture shortfall is never pooled.
-    const ownOverheadRatios=Object.fromEntries(modes.filter(m=>!reference(m)).map(m=>[m,chosen.map(b=>this.configurations.get(`${b}/${m}`)).filter(Boolean).flat()]));
+    // pairs, which a shared hosted runner's speed swings move by 10-20% on
+    // their own. Our modes' raw ratios go to the night verdict per boundary,
+    // which judges a job whose only shortfall is that median by the night's
+    // pooled pairs for the same boundary (scripts/wintun-night.mjs). Boundaries
+    // cost differently (ARM64 ingress about 0.86, others 0.93-1.0), so they are
+    // never pooled together there. A capture shortfall is never pooled.
+    const ownOverheadRatios=Object.fromEntries(chosen.flatMap(b=>modes.filter(m=>!reference(m)).map(m=>[`${b}/${m}`,this.configurations.get(`${b}/${m}`)])).filter(([,ratios])=>ratios));
     const overheadPending=verdict==='diagnostic_invalid' && ownInvalid.every(m=>(this.capture.get(m)?.median??1)>=.95)
       ? {invalid_modes:ownInvalid, verdict:verdictWithoutOverhead} : null;
     const guard=[...this.guards.values()].reduce((sum,g)=>({ignored_heads:sum.ignored_heads+g.ignored_heads,shifted_entries:sum.shifted_entries+g.shifted_entries,head_probes:sum.head_probes+g.head_probes}),{ignored_heads:0,shifted_entries:0,head_probes:0});

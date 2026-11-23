@@ -109,14 +109,17 @@ How the nightly applies it:
   sample of ours ran.
 - An isolated or full job measures one boundary, so its overhead median for a
   mode rests on three pairs, which a shared hosted runner's speed swings move
-  by 20% on their own (on 2026-11-23 the ARM64 isolated jobs ranged from 0.79
-  to 1.13 in one night, 0.92 pooled; three of the six nights from 11-18 to
-  11-23 failed on one job's 0.79). A job whose only shortfall is that median hands it to the night: the
+  by 10-20% on their own. Boundaries also cost differently: on run
+  `45148827749` the ARM64 isolated `ours` ratios pooled at 0.86 for ingress and
+  0.87-1.0 for the other five. Three of the six nights from 11-18 to 11-23 failed
+  on one ARM64 isolated ingress job's three-pair median of about 0.79. A job
+  whose only shortfall is that median hands it to the night: the
   `Night verdict` judges it by the night's pooled pairs for the same runner,
-  scenario and mode (about 54) against the same 0.80 bound, and lists the jobs
-  it judged that way. Wrong bytes, a failed recovery, an unfinished transfer,
-  a capture shortfall or any other failed test in that job still fail the
-  night, and a real slowdown shows in the pooled median as well.
+  scenario, boundary and mode (three jobs, nine pairs) against the same 0.80
+  bound, and lists the jobs it judged that way. Boundaries are never pooled
+  together, so a slowdown at one boundary shows. Wrong bytes, a failed
+  recovery, an unfinished transfer, a capture shortfall or any other failed
+  test in that job still fail the night.
 - Each job uploads its verdict; the `Night verdict` job
   (`scripts/wintun-night.mjs`) fails unless all 72 reported and passed. The
   artifact client gives up at once on a network error (`ETIMEDOUT`,
