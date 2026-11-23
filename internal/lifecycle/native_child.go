@@ -79,6 +79,12 @@ func NativeChildCommand(args []string) error {
 	childLogs := supervisor.NewLog(os.Stderr)
 	log.SetOutput(childLogs)
 	gvlog.SetTarget(&gvlog.Writer{Next: childLogs})
+	// The forwarding child does not inherit the host's priority class.
+	if message, err := raiseServicePriority(); err != nil {
+		log.Printf("process priority remains normal: %v", err)
+	} else if message != "" {
+		log.Print(message)
+	}
 	channel := supervisor.NewChannel(os.Stdin, os.Stdout)
 	defer channel.Close()
 	start, cancelStart := context.WithTimeout(context.Background(), 10*time.Second)

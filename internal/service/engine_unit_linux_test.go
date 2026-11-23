@@ -19,6 +19,18 @@ func TestEngineUnitNeverRestartsItself(t *testing.T) {
 	}
 }
 
+// Routing and the lease that keeps it on must get CPU while the apps they
+// serve are busy; systemd applies Nice before exec, so the supervised engine
+// and Control both start raised (the engine's own nice only covered `run`).
+func TestServiceUnitsRunAboveNormalPriority(t *testing.T) {
+	files := unitFiles(Config{Directory: "/opt/netswitch", Data: "/var/lib/netswitch", Native: true})
+	for _, name := range []string{"netswitch.service", "netswitch-engine.service"} {
+		if strings.Count(files[name], "\nNice=-5\n") != 1 {
+			t.Fatalf("%s must set Nice=-5 once:\n%s", name, files[name])
+		}
+	}
+}
+
 func TestEngineUnitBPFCapabilitiesStayOutOfControl(t *testing.T) {
 	files := unitFiles(Config{Directory: "/opt/netswitch", Data: "/var/lib/netswitch", Native: true})
 	engine := files["netswitch-engine.service"]

@@ -267,6 +267,7 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 	if result == nil {
 		watch := time.NewTimer(0) // first check at readiness, not one tick later
 		defer watch.Stop()
+		due := time.Now() // when the watch timer should fire
 		health := healthWatch{limit: 18 * time.Second}
 		var pause powerPause
 		events := service.Events(ctx)
@@ -301,18 +302,24 @@ func nativeEngineService(ctx context.Context, ready func(), c Config, report fun
 				continue
 			case <-watch.C:
 				checkStarted := time.Now()
+				late := checkStarted.Sub(due)
 				if pause.expired(nativeAwake()) {
 					health = healthWatch{limit: 18 * time.Second}
 				}
 				if !pause.on {
-					before := probe.success
-					result = health.check(ctx, probe, nativeAwake)
+					before, starved := probe.success, health.starved
+					result = health.check(ctx, probe, nativeAwake, late)
 					if probe.success != before && (before == 0 || probe.success%10 == 0) {
 						log(fmt.Sprintf("NATIVE_HEALTH instance=%s child_pid=%d passes=%d failures=%d at=%s", instance, p.pid, probe.success, probe.failures, time.Now().UTC().Format(time.RFC3339Nano)))
 					}
+					if health.starved != starved && (health.starved == 1 || health.starved%30 == 0) {
+						log(fmt.Sprintf("routing engine health check missed while this PC is overloaded (the watch ran %s late); not counting it (%d so far; %s)", late.Round(100*time.Millisecond), health.starved, systemLoad()))
+					}
 				}
 				// Timed-out probes have already consumed the tick interval.
-				watch.Reset(max(0, time.Second-time.Since(checkStarted)))
+				next := max(0, time.Second-time.Since(checkStarted))
+				watch.Reset(next)
+				due = time.Now().Add(next)
 				if ctx.Err() != nil {
 					result = nil
 					break watching

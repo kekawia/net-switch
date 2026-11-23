@@ -3,6 +3,7 @@ package lifecycle
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,8 +25,12 @@ func TestNativeHealthLifecycleDeadlines(t *testing.T) {
 			var w healthWatch
 			probe := healthFunc(func(context.Context) error { return h.lifecycle(state, now.Add(bound)) })
 			var timeout *nativeTransitionTimeout
-			if err := w.check(context.Background(), probe, func() time.Time { return now.Add(bound) }); !errors.As(err, &timeout) {
+			if err := w.check(context.Background(), probe, func() time.Time { return now.Add(bound) }, 0); !errors.As(err, &timeout) {
 				t.Fatal("lifecycle hang was given another forwarding window", err)
+			}
+			// A starved PC does not excuse a transition that overran its bound.
+			if err := w.check(context.Background(), probe, func() time.Time { return now.Add(bound) }, time.Minute); !errors.As(err, &timeout) {
+				t.Fatal("lifecycle hang excused as PC starvation", err)
 			}
 			if err := h.lifecycle("on", now.Add(bound)); err != nil {
 				t.Fatal(err)
@@ -82,11 +87,54 @@ func TestNativeHealthEighteenSecondWindow(t *testing.T) {
 	w := healthWatch{limit: 18 * time.Second}
 	fail := healthFunc(func(context.Context) error { now = now.Add(3 * time.Second); return context.DeadlineExceeded })
 	for range 5 {
-		if err := w.check(context.Background(), fail, func() time.Time { return now }); err != nil {
+		if err := w.check(context.Background(), fail, func() time.Time { return now }, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if w.check(context.Background(), fail, func() time.Time { return now }) == nil {
+	if w.check(context.Background(), fail, func() time.Time { return now }, 0) == nil {
 		t.Fatal("six bounded failures did not trip")
+	}
+}
+
+// 2026-11-23: a native build starved the PC; the watch's one-second ticks ran
+// seconds late and the watchdog killed a forwarding child that was only slow.
+func TestHealthWatchDoesNotCountMissesWhileThePCIsStarved(t *testing.T) {
+	now := time.Unix(100, 0)
+	w := healthWatch{limit: 18 * time.Second}
+	fail := healthFunc(func(context.Context) error { now = now.Add(3 * time.Second); return context.DeadlineExceeded })
+	for range 60 { // three minutes of starved ticks
+		if err := w.check(context.Background(), fail, func() time.Time { return now }, 4*time.Second); err != nil {
+			t.Fatal("slow child killed while the PC was starved:", err)
+		}
+	}
+	if w.failedFor != 0 || w.starved != 60 {
+		t.Fatalf("starved misses counted: failedFor=%s starved=%d", w.failedFor, w.starved)
+	}
+	// Just under the threshold is an on-time tick and counts.
+	if err := w.check(context.Background(), fail, func() time.Time { return now }, starvedTickLateness-time.Millisecond); err != nil || w.failedFor == 0 {
+		t.Fatal("a nearly on-time miss was not counted", err, w.failedFor)
+	}
+}
+
+func TestHealthWatchStillKillsAStuckChildOnceThePCCatchesUp(t *testing.T) {
+	now := time.Unix(100, 0)
+	w := healthWatch{limit: 18 * time.Second}
+	fail := healthFunc(func(context.Context) error { now = now.Add(3 * time.Second); return context.DeadlineExceeded })
+	tripped := false
+	for i := range 20 {
+		late := time.Duration(0)
+		if i%2 == 0 {
+			late = 5 * time.Second // starved ticks between on-time ones
+		}
+		if err := w.check(context.Background(), fail, func() time.Time { return now }, late); err != nil {
+			if !strings.Contains(err.Error(), "failed continuously for 18s (") {
+				t.Fatal("kill message lacks the PC's load:", err)
+			}
+			tripped = true
+			break
+		}
+	}
+	if !tripped {
+		t.Fatal("a child stuck through on-time ticks was never killed")
 	}
 }
