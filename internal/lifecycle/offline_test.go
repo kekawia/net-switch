@@ -40,7 +40,7 @@ func TestRPCStopAcknowledgementBeforeEOF(t *testing.T) {
 func TestOwnerIsNeverFirstClient(t *testing.T) {
 	for _, owner := range []Owner{{}, {User: "owner", Name: "Owner"}} {
 		a := &Access{Owner: owner, Tokens: NewTokens()}
-		for _, method := range []string{"session", "pair", "revoke", "routing", "signin", "desktop-connect", "desktop-result"} {
+		for _, method := range []string{"session", "pair", "revoke", "routing", "signin", "desktop-connect", "desktop-result", "diagnostics"} {
 			if _, err := a.request(context.Background(), localipc.Peer{User: "stranger"}, false, "connection", controlRequest{Method: method}); err == nil {
 				t.Fatalf("%s granted to stranger", method)
 			}

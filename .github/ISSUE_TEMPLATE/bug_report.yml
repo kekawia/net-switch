@@ -83,7 +83,11 @@ body:
     attributes:
       label: Logs
       description: |
-        The relevant lines (around the time it happened) from:
+        Net Switch 1.0 or later: attach a problem report. The user guide's
+        Troubleshooting section shows the one command that makes it, with personal
+        details already replaced. Read it before you attach it.
+
+        Net Switch 0.3: the relevant lines (around the time it happened) from:
         - `%LOCALAPPDATA%\Net Switch\server.log`
         - `%LOCALAPPDATA%\Net Switch\launch.log` (if Net Switch didn't open)
         - `%ProgramData%\Net Switch\engine.log` (needs an administrator to open)

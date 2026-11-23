@@ -95,6 +95,8 @@ func (a *Access) request(ctx context.Context, peer localipc.Peer, statusOnly boo
 		return true, nil
 	case "routing":
 		return true, a.Core.Routing(ctx, r.On)
+	case "diagnostics":
+		return map[string]any{"report": problemReport(a.Data, a.Owner, a.reportHeader(), "from the running Net Switch")}, nil
 	case "desktop-poll":
 		return a.Desktop.Poll(session), nil
 	case "desktop-result":
