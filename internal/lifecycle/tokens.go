@@ -10,11 +10,24 @@ import (
 	"time"
 )
 
+// A session lasts as long as the desktop program's connection to Control; the
+// key it hands the window lasts at most tokenLifetime. The desktop program
+// asks for its session again every few minutes, and in the last tokenRenewal
+// of a key's life it gets a new one. The key it replaces keeps working until
+// its own end, so a request already sent with it, or a window that hasn't
+// received the new one yet, isn't refused.
+const (
+	tokenLifetime = 12 * time.Hour
+	tokenRenewal  = time.Hour
+)
+
 type session struct {
-	expires     time.Time
-	token, code string
-	codeExpires time.Time
-	attempts    int
+	expires      time.Time
+	token, code  string
+	previous     string
+	previousEnds time.Time
+	codeExpires  time.Time
+	attempts     int
 }
 type Tokens struct {
 	mu       sync.Mutex
@@ -27,15 +40,24 @@ func (t *Tokens) Open(id string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	token := randomID()
-	t.sessions[id] = &session{expires: t.now().Add(12 * time.Hour), token: token}
+	t.sessions[id] = &session{expires: t.now().Add(tokenLifetime), token: token}
 	return token
 }
+
+// Get returns the session's current key, replacing it when it ends within
+// tokenRenewal or already has. A key that ran out while the connection stayed
+// open (after the PC slept, for example) is replaced the same way.
 func (t *Tokens) Get(id string) (string, error) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	s := t.sessions[id]
-	if s == nil || !t.now().Before(s.expires) {
-		return "", errors.New("desktop session expired or revoked")
+	if s == nil {
+		return "", errors.New("desktop session closed or revoked")
+	}
+	now := t.now()
+	if !now.Before(s.expires.Add(-tokenRenewal)) {
+		s.previous, s.previousEnds = s.token, s.expires
+		s.token, s.expires = randomID(), now.Add(tokenLifetime)
 	}
 	return s.token, nil
 }
@@ -47,8 +69,9 @@ func equal(a, b string) bool {
 func (t *Tokens) Valid(token string) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	now := t.now()
 	for _, s := range t.sessions {
-		if t.now().Before(s.expires) && equal(s.token, token) {
+		if (now.Before(s.expires) && equal(s.token, token)) || (now.Before(s.previousEnds) && equal(s.previous, token)) {
 			return true
 		}
 	}
