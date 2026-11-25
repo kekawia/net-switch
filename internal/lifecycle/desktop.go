@@ -97,6 +97,10 @@ func ConfigureAutostart(ctx context.Context, mode string) (any, error) {
 var (
 	testDesktopSeq       atomic.Uint64
 	desktopStateInterval = desktop.PollInterval
+	// Control replaces the window's key in the last hour of its 12 hours,
+	// when the desktop program asks for its session. Asking this often
+	// leaves several tries in that hour, even on a PC too busy to answer one.
+	sessionRenewInterval = 10 * time.Minute
 	desktopScope         = func() string {
 		if testing.Testing() {
 			return fmt.Sprintf("test-%d", testDesktopSeq.Add(1))
@@ -178,6 +182,11 @@ func (r *desktopRuntime) refreshToken(ctx context.Context) (string, bool) {
 		return "", false
 	}
 	if client != nil {
+		// One Control connection keeps one address, so an unchanged key
+		// means the window already has it.
+		if _, current := client.Endpoint(); current == session.Token {
+			return session.Token, true
+		}
 		_ = client.SetEndpoint(session.URL, session.Token)
 	}
 	if ui != nil {
@@ -541,10 +550,14 @@ func desktopSession(ctx context.Context, rt *desktopRuntime, rpc *RPC, show, reg
 
 	tick := time.NewTicker(250 * time.Millisecond)
 	defer tick.Stop()
+	renew := time.NewTicker(sessionRenewInterval)
+	defer renew.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-renew.C:
+			rt.refreshToken(ctx)
 		case <-rpc.Done():
 			cancelSess()
 			wg.Wait()

@@ -28,6 +28,7 @@ type fakeDesktopUI struct {
 	sessionURL   string
 	sessionToken string
 	sessionOwner string
+	sessionSets  int
 	shows        chan string
 	states       chan recordedState
 	quitting     chan struct{}
@@ -48,6 +49,7 @@ func (f *fakeDesktopUI) SetSession(baseURL, token, owner string) {
 	f.sessionURL = baseURL
 	f.sessionToken = token
 	f.sessionOwner = owner
+	f.sessionSets++
 	f.mu.Unlock()
 }
 
@@ -381,5 +383,84 @@ func TestDesktopPollsStateAndRefreshes401Token(t *testing.T) {
 		case <-deadline:
 			t.Fatal("timed out waiting for refreshed state after 401")
 		}
+	}
+}
+
+// Control replaces the key in its last hour when asked, so the desktop program
+// must ask on its own and pass a new key on before the old one is refused.
+func TestDesktopRenewsSessionKeyBeforeItEnds(t *testing.T) {
+	var refused atomic.Int32
+	var renewedUsed atomic.Bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Header.Get("X-Token") {
+		case "tok-first":
+			_ = json.NewEncoder(w).Encode(map[string]any{"routing": "on"})
+		case "tok-renewed":
+			renewedUsed.Store(true)
+			_ = json.NewEncoder(w).Encode(map[string]any{"routing": "on"})
+		default:
+			refused.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	defer srv.Close()
+
+	oldDial, oldStartUI, oldInterval, oldRenew := dialIPC, startDesktopUI, desktopStateInterval, sessionRenewInterval
+	t.Cleanup(func() {
+		dialIPC = oldDial
+		startDesktopUI = oldStartUI
+		desktopStateInterval = oldInterval
+		sessionRenewInterval = oldRenew
+	})
+	desktopStateInterval = 15 * time.Millisecond
+	sessionRenewInterval = 20 * time.Millisecond
+
+	ui := newFakeDesktopUI()
+	startDesktopUI = func(cb desktop.UICallbacks) desktop.UI { return ui }
+	var sessionCalls atomic.Int32
+	dialIPC = func(ctx context.Context, e localipc.Endpoint) (*localipc.Conn, error) {
+		client, server := net.Pipe()
+		go serveMockDesktopIPC(t, server, func(int) map[string]any {
+			tok := "tok-first"
+			if sessionCalls.Add(1) >= 3 {
+				tok = "tok-renewed"
+			}
+			return map[string]any{"token": tok, "url": srv.URL, "ownerName": "Owner"}
+		})
+		return &localipc.Conn{ReadWriteCloser: client, Peer: localipc.Peer{User: CurrentUser()}}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- Desktop(ctx, false) }()
+
+	deadline := time.After(5 * time.Second)
+	for sessionCalls.Load() < 6 || !renewedUsed.Load() {
+		select {
+		case <-ui.states:
+		case err := <-done:
+			t.Fatalf("Desktop exited unexpectedly: %v", err)
+		case <-deadline:
+			t.Fatalf("no renewal: %d session calls, renewed key used %t", sessionCalls.Load(), renewedUsed.Load())
+		}
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Desktop exit error: %v", err)
+	}
+	ui.mu.Lock()
+	token, sets := ui.sessionToken, ui.sessionSets
+	ui.mu.Unlock()
+	if token != "tok-renewed" {
+		t.Fatalf("window key = %q, want tok-renewed", token)
+	}
+	// Once at the start and once for the new key: an unchanged key isn't
+	// passed to the window again.
+	if sets != 2 {
+		t.Fatalf("window was handed a key %d times, want 2", sets)
+	}
+	if n := refused.Load(); n != 0 {
+		t.Fatalf("%d requests were refused during renewal", n)
 	}
 }
