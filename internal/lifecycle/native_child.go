@@ -79,12 +79,11 @@ func NativeChildCommand(args []string) error {
 	childLogs := supervisor.NewLog(os.Stderr)
 	log.SetOutput(childLogs)
 	gvlog.SetTarget(&gvlog.Writer{Next: childLogs})
-	// The forwarding child does not inherit the host's priority class.
-	if message, err := raiseServicePriority(); err != nil {
-		log.Printf("process priority remains normal: %v", err)
-	} else if message != "" {
-		log.Print(message)
-	}
+	// The forwarding child stays at Normal, the priority of the apps whose
+	// bytes it moves, while Control and the engine host run Above Normal.
+	// Raised, it competed with those apps: on hosted x64 runners 1.0 fell to
+	// 0.72 times 0.3.2's 8-stream speed at 1.3 times its CPU per GB, and at
+	// Normal it measured 1.07-1.17 times the speed at 0.42-0.53 times the CPU.
 	channel := supervisor.NewChannel(os.Stdin, os.Stdout)
 	defer channel.Close()
 	start, cancelStart := context.WithTimeout(context.Background(), 10*time.Second)

@@ -12,8 +12,9 @@ import (
 // as the Linux units do with Nice=-5: routing, and the lease and health checks
 // that keep it on, must keep running while the apps they serve are busy. On
 // 2026-11-23 a native Android build (15 compilers on 12 threads) starved the
-// services at Normal priority until their few-second deadlines failed. A child
-// process does not inherit Above Normal, so each process calls this itself.
+// services at Normal priority until their few-second deadlines failed. Control
+// and the engine host call it; the forwarding child they start does not
+// inherit Above Normal and deliberately stays at Normal (native_child.go).
 // An explicit class set by an administrator is kept.
 func raiseServicePriority() (string, error) {
 	process := windows.CurrentProcess()
