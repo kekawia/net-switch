@@ -136,10 +136,33 @@ function Start-LegacyInstalledServer {
   }
 }
 
+# A stop that ran past its bound ends as a failed stop, after the service wrote
+# every goroutine to its own log (internal/service, stopOverrun). Twice on
+# 2026-11-27 Control's stop hung here for 90 minutes and left no evidence.
+function Assert-NoStopOverrun([string] $When) {
+  foreach ($name in @('NetSwitch', 'NetSwitchEngine')) {
+    $log = Join-Path $machineData "$name.log"
+    if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { continue }
+    $hit = Select-String -LiteralPath $log -Pattern 'service stop overran' -SimpleMatch | Select-Object -Last 1
+    if (-not $hit) { continue }
+    $lines = @(Get-Content -LiteralPath $log)
+    $from = [Math]::Max(0, $hit.LineNumber - 100)
+    Write-Host "STOP OVERRUN: $name $When. Its log from line $($from + 1):"
+    $lines[$from..($lines.Count - 1)] | ForEach-Object { Write-Host $_ }
+    Copy-Item -LiteralPath $log -Destination (Join-Path $diagDir "stop-overrun-$name.log") -Force -ErrorAction SilentlyContinue
+    throw "$name did not finish stopping $When; its goroutines are above."
+  }
+}
+
 function Reset-CleanSlate {
   foreach ($svcName in @('NetSwitchEngine', 'NetSwitch')) {
     if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) {
       Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
+    }
+  }
+  Assert-NoStopOverrun 'during clean-slate reset'
+  foreach ($svcName in @('NetSwitchEngine', 'NetSwitch')) {
+    if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) {
       & sc.exe delete $svcName | Out-Null
     }
   }

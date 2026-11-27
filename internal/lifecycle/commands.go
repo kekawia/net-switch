@@ -34,6 +34,7 @@ func ServiceCommand(name string, args []string) error {
 			return err
 		}
 		log := Log(c.Data, name)
+		service.SetStopOverrunReport(log)
 		if message, err := raiseServicePriority(); err != nil {
 			log("process priority remains normal: " + err.Error())
 		} else if message != "" {
