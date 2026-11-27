@@ -44,13 +44,18 @@ func Line(r *bufio.Reader, limit int) ([]byte, error) {
 // therefore reserve at most 32 MiB, independent of traffic and client count.
 // Queue saturation closes the connection; it never drops an accounting reply
 // or blocks the private supervisor channel. Control retries its fenced opId.
+// A child that closes after its last frame (the stop reply) still has every
+// frame it sent delivered, even when a request crossing that close cannot be
+// forwarded: the failed forward waits, at most childGoneDrain, for the child's
+// own direction to finish instead of closing both ends at once.
 func Relay(parent context.Context, public, child io.ReadWriteCloser) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	closeBoth := context.AfterFunc(ctx, func() { public.Close(); child.Close() })
 	defer closeBoth()
 	var workers sync.WaitGroup
-	for _, ends := range [][2]io.ReadWriteCloser{{public, child}, {child, public}} {
+	for i, ends := range [][2]io.ReadWriteCloser{{public, child}, {child, public}} {
+		toChild := i == 0
 		queue := make(chan []byte, 2)
 		workers.Go(func() {
 			defer close(queue)
@@ -83,14 +88,26 @@ func Relay(parent context.Context, public, child io.ReadWriteCloser) {
 		})
 		workers.Go(func() {
 			defer cancel()
+			var childGone *time.Timer
+			defer func() {
+				if childGone != nil {
+					childGone.Stop()
+				}
+			}()
 			for {
 				select {
 				case line, ok := <-queue:
 					if !ok {
 						return
 					}
+					if childGone != nil {
+						continue // fails with the connection once the child's frames are out
+					}
 					if err := Write(ends[1], line); err != nil {
-						return
+						if !toChild {
+							return
+						}
+						childGone = time.AfterFunc(childGoneDrain, cancel)
 					}
 				case <-ctx.Done():
 					return
@@ -100,6 +117,11 @@ func Relay(parent context.Context, public, child io.ReadWriteCloser) {
 	}
 	workers.Wait()
 }
+
+// childGoneDrain bounds how long a connection whose child stopped taking
+// requests stays open for the child's last frames. They are already read or
+// in the pipe, so delivering them takes only as long as the public peer reads.
+const childGoneDrain = time.Second
 
 func Write(w io.Writer, b []byte) error {
 	for len(b) != 0 {

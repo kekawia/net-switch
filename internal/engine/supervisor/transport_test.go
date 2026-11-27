@@ -38,6 +38,45 @@ func testFinalFrame(t *testing.T, want string) {
 		t.Fatal("relay did not join")
 	}
 }
+
+// Control may send a request (a lease renewal or a status read) just as the
+// engine writes its stop reply and closes. Forwarding that request fails, but
+// the reply the engine already sent must still reach Control: losing it made
+// Control force-end an engine that had stopped cleanly (PR #160's lifecycle
+// run, 2026-11-25).
+func TestRelayDeliversFinalFrameWhenARequestCrossesTheClose(t *testing.T) {
+	want := "{\"id\":\"stop\",\"result\":true}\n"
+	client, public := net.Pipe()
+	private, engine := net.Pipe()
+	defer client.Close()
+	done := make(chan struct{})
+	go func() { Relay(context.Background(), public, private); close(done) }()
+	// The relay has read the final reply once this write returns.
+	if err := Write(engine, []byte(want)); err != nil {
+		t.Fatal(err)
+	}
+	engine.Close()
+	// Control's next request arrives after the close, so forwarding it fails.
+	if err := Write(client, []byte("{\"id\":\"renew\",\"method\":\"renew\"}\n")); err != nil {
+		t.Fatal(err)
+	}
+	// Leave the failed forward time to tear the relay down early.
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+	}
+	client.SetReadDeadline(time.Now().Add(time.Second))
+	got, err := bufio.NewReader(client).ReadString('\n')
+	if err != nil || got != want {
+		t.Fatalf("final reply lost: %q %v", got, err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("relay did not join")
+	}
+}
+
 func TestSlowRelayAndLogReaderCannotHoldPrivateCompletion(t *testing.T) {
 	client, public := net.Pipe()
 	private, engine := net.Pipe()
