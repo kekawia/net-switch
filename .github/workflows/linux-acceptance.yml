@@ -9,6 +9,9 @@ on:
   # The ci:full label is read on the PR's next push. Label changes don't start
   # a run: they would share the PR's concurrency group and cancel its run.
   pull_request:
+  # Every runner, every night, after the Wintun nightly's queue has drained.
+  schedule:
+    - cron: '41 22 * * *'
   workflow_dispatch:
     inputs:
       release_gate:
@@ -31,7 +34,7 @@ on:
         options: [all, release, faults]
         default: all
       runner:
-        description: 'A single runner for focused diagnostics; PR checks always use all four'
+        description: 'A single runner for focused diagnostics; PR checks use 26.04 x64 and 24.04 ARM64, main and the nightly run all four'
         type: choice
         options: [all, ubuntu-24.04, ubuntu-26.04, ubuntu-24.04-arm, ubuntu-26.04-arm]
         default: all
@@ -154,7 +157,9 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        runner: ${{ fromJSON(inputs.runner && inputs.runner != 'all' && format('["{0}"]', inputs.runner) || '["ubuntu-24.04","ubuntu-26.04","ubuntu-24.04-arm","ubuntu-26.04-arm"]') }}
+        # A pull request runs one x64 and one ARM64 runner across both Ubuntu
+        # versions; main and the nightly run cover all four.
+        runner: ${{ fromJSON(inputs.runner && inputs.runner != 'all' && format('["{0}"]', inputs.runner) || github.event_name == 'pull_request' && '["ubuntu-26.04","ubuntu-24.04-arm"]' || '["ubuntu-24.04","ubuntu-26.04","ubuntu-24.04-arm","ubuntu-26.04-arm"]') }}
     env:
       GOTOOLCHAIN: local
       CGO_ENABLED: '0'
