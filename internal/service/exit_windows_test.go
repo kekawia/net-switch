@@ -11,9 +11,9 @@ import (
 	"golang.org/x/sys/windows/svc"
 )
 
-// stopService runs h until it is ready, asks it to stop and returns how
-// Execute ended, or reports a stop that is still running after wait.
-func stopService(t *testing.T, h *handler, wait time.Duration) (bool, uint32, bool) {
+// stopService runs h until it is ready, sends request and returns how Execute
+// ended, or reports a stop that is still running after wait.
+func stopService(t *testing.T, h *handler, wait time.Duration, request ...svc.Cmd) (bool, uint32, bool) {
 	t.Helper()
 	requests := make(chan svc.ChangeRequest, 1)
 	updates := make(chan svc.Status, 64)
@@ -28,7 +28,11 @@ func stopService(t *testing.T, h *handler, wait time.Duration) (bool, uint32, bo
 			break
 		}
 	}
-	requests <- svc.ChangeRequest{Cmd: svc.Stop}
+	cmd := svc.Stop
+	if len(request) != 0 {
+		cmd = request[0]
+	}
+	requests <- svc.ChangeRequest{Cmd: cmd}
 	select {
 	case e := <-done:
 		return e.specific, e.code, true
@@ -39,7 +43,7 @@ func stopService(t *testing.T, h *handler, wait time.Duration) (bool, uint32, bo
 
 // Twice on 2026-11-27 Control never returned from a stop and the service
 // manager waited 90 minutes; Execute kept reporting progress every second.
-func TestStopThatNeverFinishesEndsAsAFailedStopWithItsGoroutines(t *testing.T) {
+func TestStopThatNeverFinishesEndsAtItsBoundWithItsGoroutines(t *testing.T) {
 	previous := stopOverrun
 	stopOverrun = 300 * time.Millisecond
 	t.Cleanup(func() { stopOverrun = previous })
@@ -57,12 +61,19 @@ func TestStopThatNeverFinishesEndsAsAFailedStopWithItsGoroutines(t *testing.T) {
 	if !stopped {
 		t.Fatal("a program that never returns still held the stop open")
 	}
-	if !specific || code != 1 || h.err == nil {
-		t.Fatalf("overrun ended as specific=%t code=%d err=%v, want a failed stop", specific, code, h.err)
+	// Both services restart on a failed exit; an update or uninstall that
+	// stopped one must not have it started again.
+	if specific || code != 0 || h.err == nil {
+		t.Fatalf("an overrun stop ended as specific=%t code=%d err=%v, want stopped for good", specific, code, h.err)
 	}
 	message := dump.Load()
-	if message == nil || !strings.Contains(*message, "service stop overran") || !strings.Contains(*message, "TestStopThatNeverFinishesEndsAsAFailedStopWithItsGoroutines") {
+	if message == nil || !strings.Contains(*message, "service stop overran") || !strings.Contains(*message, "TestStopThatNeverFinishesEndsAtItsBoundWithItsGoroutines") {
 		t.Fatal("the program's log did not get the stuck goroutine's stack")
+	}
+	// A requested restart that overran still fails, so it is restarted.
+	h = &handler{name: "test", run: h.run}
+	if specific, code, stopped := stopService(t, h, 5*time.Second, svc.Cmd(128)); !stopped || !specific || code != 1 {
+		t.Fatalf("an overrun restart ended as stopped=%t specific=%t code=%d, want a failed exit", stopped, specific, code)
 	}
 	// A program whose own log is stuck still lets the stop end.
 	stuck := make(chan struct{})

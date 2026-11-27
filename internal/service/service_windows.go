@@ -68,10 +68,12 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	var overrun <-chan time.Time
+	restart := false
 	stopping := func(cause error) {
 		status = svc.Status{State: svc.StopPending, WaitHint: 30000}
 		updates <- status
 		cancel(cause)
+		restart = restart || cause == ErrRestart
 		if overrun == nil {
 			overrun = time.After(stopOverrun)
 		}
@@ -85,7 +87,14 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 		case <-overrun:
 			reportStopOverrun(h.name, h.warn)
 			h.err = fmt.Errorf("service stop overran %s", stopOverrun)
-			return true, 1
+			// Both services restart on any failed exit (Install). A
+			// requested stop (an update, an uninstall, a shutdown) must stay
+			// stopped, so it ends clean; an overrun restart ends failed, so the
+			// service manager still restarts it.
+			if restart {
+				return true, 1
+			}
+			return false, 0
 		case request := <-requests:
 			switch request.Cmd {
 			case svc.Stop, svc.Shutdown:
@@ -119,12 +128,12 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 // never returned kept an update, an uninstall or a shutdown waiting forever.
 // Twice on 2026-11-27 CI's ARM64 installer test waited 90 minutes on Control,
 // whose own shutdown steps are bounded at 25 seconds. Past this bound the
-// goroutines go to the program's log and the process exits as a failed stop,
-// which Control and the engine already survive as a crash.
+// goroutines go to the program's log and the event log, and the process
+// exits, which Control and the engine already survive as a crash.
 var stopOverrun = 60 * time.Second
 
 func reportStopOverrun(name string, warn func(string, error)) {
-	message := fmt.Sprintf("service stop overran %s; exiting as a failed stop. Goroutines:\n%s", stopOverrun, goroutineDump())
+	message := fmt.Sprintf("service stop overran %s; exiting. Goroutines:\n%s", stopOverrun, goroutineDump())
 	// The program's log can be held by the very goroutine that is stuck, so it
 	// gets a few seconds and never delays the exit further.
 	if report := stopOverrunReport.Load(); report != nil {
