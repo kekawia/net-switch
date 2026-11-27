@@ -9,6 +9,9 @@ on:
     paths: ['internal/**', 'cmd/**', 'assets.go', 'package.json', 'ui/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/linux/inet/**', 'tests/linux/engine/**', 'tests/linux/harness/**', 'tests/linux/netns/**', 'tests/linux/wire/**', 'tests/windows/testisp/**', 'tests/windows/socket/**', 'packaging/versions.json', 'scripts/build-common.ps1', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
   pull_request:
     paths: ['internal/**', 'cmd/**', 'assets.go', 'package.json', 'ui/**', 'tests/lifecycle/**', 'tests/linux/topo/**', 'tests/linux/inet/**', 'tests/linux/engine/**', 'tests/linux/harness/**', 'tests/linux/netns/**', 'tests/linux/wire/**', 'tests/windows/testisp/**', 'tests/windows/socket/**', 'packaging/versions.json', 'scripts/build-common.ps1', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/lifecycle.yml']
+  # Every runner, every night.
+  schedule:
+    - cron: '41 22 * * *'
   workflow_dispatch:
 
 permissions:
@@ -26,24 +29,10 @@ jobs:
     strategy:
       fail-fast: false
       max-parallel: 4
+      # A pull request runs Windows x64, Windows ARM64 and Linux x64; main and
+      # the nightly run add Linux ARM64 and Ubuntu 26.04.
       matrix:
-        include:
-          - runner: windows-latest
-            os: Windows
-            arch: x64
-          - runner: windows-11-arm
-            os: Windows
-            arch: ARM64
-          - runner: ubuntu-24.04
-            os: Linux
-            arch: x64
-          - runner: ubuntu-24.04-arm
-            os: Linux
-            arch: ARM64
-          - runner: ubuntu-26.04
-            os: Linux
-            arch: x64
-            variant: ' (Ubuntu 26.04)'
+        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"runner":"windows-latest","os":"Windows","arch":"x64"},{"runner":"windows-11-arm","os":"Windows","arch":"ARM64"},{"runner":"ubuntu-24.04","os":"Linux","arch":"x64"}]' || '[{"runner":"windows-latest","os":"Windows","arch":"x64"},{"runner":"windows-11-arm","os":"Windows","arch":"ARM64"},{"runner":"ubuntu-24.04","os":"Linux","arch":"x64"},{"runner":"ubuntu-24.04-arm","os":"Linux","arch":"ARM64"},{"runner":"ubuntu-26.04","os":"Linux","arch":"x64","variant":" (Ubuntu 26.04)"}]') }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'

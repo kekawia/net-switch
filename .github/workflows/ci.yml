@@ -8,6 +8,10 @@ on:
   # The ci:full label is read on the PR's next push. Label changes don't start
   # a run: they would share the PR's concurrency group and cancel its run.
   pull_request:
+  # Every job at full strength every night (pull requests repeat less and use
+  # fewer runners), after the Wintun nightly's queue has drained.
+  schedule:
+    - cron: '41 22 * * *'
   # A manual run starts only the investigation below unless regular_jobs is set.
   workflow_dispatch:
     inputs:
@@ -445,9 +449,10 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || inputs.regular_jobs) && (github.event_name != 'pull_request' || needs.changes.result != 'success' || needs.changes.outputs.go_windows != 'false') }}
     name: Go 1.0 / ${{ matrix.name }}
     runs-on: ${{ matrix.runner }}
-    # Normal runs take 40-42 minutes, most of it the 1000x repeat steps. At 45
-    # minutes a runner a few minutes slower than usual cancelled a green run
-    # mid-test, which reads as a hang in whichever test was running.
+    # Runs on main and at night take 40-42 minutes, most of it the 1000x
+    # repeat steps (a pull request repeats 100x). At 45 minutes a runner a few
+    # minutes slower than usual cancelled a green run mid-test, which reads as a
+    # hang in whichever test was running.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -603,10 +608,12 @@ jobs:
           path: internal/engine/stack/timewait.pprof
           if-no-files-found: error
           retention-days: 14
-      - name: Repeat clock and reopen boundaries 1000 times
-        run: node scripts/repeat-close-tests.mjs ${{ matrix.name != 'Windows ARM64' && '--race' || '' }}
-      - name: Check 1000 close repeats in one process without race instrumentation
-        run: node scripts/repeat-close-tests.mjs --batches=1 --count=1000
+      # A pull request repeats 100 times; main and the nightly run repeat 1000.
+      # The 1000x race repeat took 18-29 minutes, half a pull request's wait.
+      - name: Repeat clock and reopen boundaries (100 times on a pull request, 1000 otherwise)
+        run: node scripts/repeat-close-tests.mjs ${{ matrix.name != 'Windows ARM64' && '--race' || '' }} ${{ github.event_name == 'pull_request' && '--batches=1' || '' }}
+      - name: Check close repeats in one process without race instrumentation
+        run: node scripts/repeat-close-tests.mjs --batches=1 --count=${{ github.event_name == 'pull_request' && '100' || '1000' }}
       - name: Repeat endpoint setup deduplication and cancellation 1000 times
         run: go test ${{ matrix.name != 'Windows ARM64' && '-race' || '' }} -v -count=1000 -timeout=2m -run '^Test(ReopenHookDuringEndpointSetupDeduplicates|CancelDuringEndpointSetup)$' ./internal/engine/tcp
       - name: Fuzz unprivileged packet and protocol paths

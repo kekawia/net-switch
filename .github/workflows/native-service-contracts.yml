@@ -6,6 +6,9 @@ on:
   push:
     branches: [main]
     paths: ['internal/**', 'cmd/**', 'tests/lifecycle/**', 'tests/linux/**', 'tests/windows/**', 'scripts/build-common.ps1', 'scripts/run-native-proof.mjs', 'packaging/versions.json', 'go.mod', 'go.sum', 'vendor/**', '.github/workflows/native-service-contracts.yml', '.github/ci/registrar-breakaway.mjs']
+  # Every runner, every night.
+  schedule:
+    - cron: '41 22 * * *'
   workflow_dispatch:
     inputs:
       owner_bridge:
@@ -13,7 +16,7 @@ on:
         type: boolean
         default: false
       runner:
-        description: 'One runner for focused diagnostics; ordinary PRs use the full matrix'
+        description: 'One runner for focused diagnostics; PRs use Windows x64, Windows ARM64 and Ubuntu 24.04, main and the nightly run all five'
         type: choice
         options: [all, windows-latest, windows-11-arm, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04]
         default: all
@@ -40,9 +43,11 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
-      max-parallel: 2
+      # Three at once: a pull request's three runners in one wave instead of
+      # two, where the fifth waited 34 minutes on #161.
+      max-parallel: 3
       matrix:
-        runner: ${{ fromJSON(inputs.runner && inputs.runner != 'all' && format('["{0}"]', inputs.runner) || '["windows-latest","windows-11-arm","ubuntu-24.04","ubuntu-24.04-arm","ubuntu-26.04"]') }}
+        runner: ${{ fromJSON(inputs.runner && inputs.runner != 'all' && format('["{0}"]', inputs.runner) || github.event_name == 'pull_request' && '["windows-latest","windows-11-arm","ubuntu-24.04"]' || '["windows-latest","windows-11-arm","ubuntu-24.04","ubuntu-24.04-arm","ubuntu-26.04"]') }}
     env:
       GOTOOLCHAIN: local
       GOMAXPROCS: '2'
