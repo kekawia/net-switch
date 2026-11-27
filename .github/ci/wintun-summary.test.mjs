@@ -100,6 +100,61 @@ test('payload/integrity evidence in every replay path is fatal, even with comple
  const s=fixture({scenario:'full'});emit(s,{test:'parallel_udp',invalid_delivered:1});assert.equal(s.result(0).verdict,'integrity_failure');
  const nested=fixture({scenario:'full'});emit(nested,{test:'performance_sample',sample:{status:'invalid',metric:'udp_8_MBps',error:'UDP client: exit status 1\n--- FAIL: TestWintunUDPClient\n payload integrity failure: UDP echo corruption'}});assert.equal(nested.result(1).verdict,'integrity_failure');
 });
+// Night 11-25 (run 45539997258): ARM64/full/6 and X64/full/7 failed as our own
+// wrong bytes, though every mismatch came from the signed DLL's samples.
+test('a DLL fault quoted with its UDP client output, or gathered in performance_samples, stays the DLL\'s',()=>{
+ const s=fixture({scenario:'full'});
+ const dllPath='TestWintunPerformance/pair4/udp_8_MBps/dll';
+ const cause='UDP client: payload integrity failure\nexit status 1\n=== RUN   TestWintunUDPClient\n    performance_windows_test.go:419: payload integrity failure: UDP echo corruption\n--- FAIL: TestWintunUDPClient (2.27s)\nFAIL';
+ const sample=(mode,error)=>error?{status:'invalid',value:null,error,pair:4,mode,metric:'udp_8_MBps'}:{status:'valid',value:190,pair:4,mode,metric:'udp_8_MBps'};
+ s.line('INTEGRITY_PHASE_START scenario=full repeat=2 phase=performance-dll diagnostic=1');
+ s.line(`=== RUN   ${dllPath}`);
+ s.line(`    performance_windows_test.go:668: WINTUN_RESULT ${JSON.stringify({test:'performance',mode:'dll',metric:'udp_8_MBps',sample:sample('dll',cause),error:cause})}`);
+ // The old unquoted log pasted the client's lines into ours, indented.
+ s.line('    performance_windows_test.go:673: reference fault, reported and left out of the comparison: UDP client: payload integrity failure');
+ for(const pasted of ['        === RUN   TestWintunUDPClient','            performance_windows_test.go:419: payload integrity failure: UDP echo corruption','        --- FAIL: TestWintunUDPClient (2.27s)'])s.line(pasted);
+ s.line(`    performance_windows_test.go:618: WINTUN_RESULT ${JSON.stringify({test:'performance_sample',diagnostic:true,phase:'performance-dll',repeat:'2',sample:sample('dll',cause),verdict:'integrity_failure'})}`);
+ s.line(`    performance_windows_test.go:685: WINTUN_RESULT ${JSON.stringify({test:'performance_samples',diagnostic:true,metric:'udp_8_MBps',ours:[sample('ours')],dll:[sample('dll',cause)]})}`);
+ const nested=s.result(1);
+ assert.deepEqual(nested.failed_tests_and_phases,['--- FAIL: TestWintunUDPClient (2.27s)'],'only the pasted line remains, which the one-line log no longer prints');
+ assert.equal(nested.payload_mismatch_incidents,nested.reference_evidence.payload_mismatch_incidents,'no incident is ours');
+ assert.ok(nested.evidence_events.every(e=>e.mode==='dll'));
+ assert.equal(nested.mode_results.dll.verdict,'reference_fault');
+ // The log now shows the cause's first line only, and the job passes.
+ const quoted=fixture({scenario:'full'});
+ quoted.line(`=== RUN   ${dllPath}`);
+ quoted.line(`    performance_windows_test.go:673: reference fault, reported and left out of the comparison: ${cause.split('\n')[0]}`);
+ quoted.line(`    performance_windows_test.go:685: WINTUN_RESULT ${JSON.stringify({test:'performance_samples',diagnostic:true,metric:'udp_8_MBps',ours:[sample('ours')],dll:[sample('dll',cause)]})}`);
+ const r=quoted.result(0);
+ assert.equal(r.verdict,'no_corruption_observed');assert.equal(r.gate.passed,true);
+ assert.equal(nightRecord(r,{arch:'ARM64',scenario:'full',shard:'6'}).own_payload_mismatches,0);
+ // The same gathered record charges our own failed sample to us, and failure
+ // text outside any sample stays ours.
+ for(const record of [{test:'performance_samples',metric:'udp_8_MBps',ours:[sample('ours',cause)],dll:[sample('dll')]},
+  {test:'performance_samples',metric:'udp_8_MBps',error:'payload integrity failure',ours:[sample('ours')],dll:[sample('dll',cause)]}]) {
+  const own=fixture({scenario:'full'});own.line('=== RUN   TestWintunPerformance');emit(own,record);
+  assert.equal(own.result(0).verdict,'integrity_failure',JSON.stringify(record));
+ }
+});
+test('a DLL TCP transfer that delivered wrong bytes is the DLL\'s shortfall, never our incomplete job',()=>{
+ const s=fixture({scenario:'full',short:{dll:1}});
+ const transfer='repeat1/TestWintunPerformance/pair11/tcp_8_MBps/dll/measured/transfer141/streams8';
+ emit(s,{test:'tcp_integrity',verdict:'integrity_failure',phase:'performance-dll',repeat:'1',connection:{transfer,payload_id:36104,host_expected_sha256:'a'.repeat(64),host_actual_sha256:'b'.repeat(64),coverage:{host_receive:{bytes:67108864}}}});
+ emit(s,{test:'performance_sample',diagnostic:true,phase:'performance-dll',repeat:'1',sample:{status:'invalid',value:null,error:'payload integrity failure: TCP payload hash mismatch',pair:11,mode:'dll',metric:'tcp_8_MBps'},verdict:'integrity_failure'});
+ const r=s.result(0);
+ assert.equal(r.verdict,'no_corruption_observed');assert.equal(r.incomplete_records,0);
+ assert.equal(r.reference_evidence.missing_transfers,1);
+ assert.equal(r.mode_results.dll.verdict,'reference_fault');
+ // Ours, or the in-process mode, held to the same records, is incomplete.
+ for(const mode of ['ours','inprocess']) {
+  const own=fixture({scenario:'full'});
+  emit(own,{test:'performance_sample',diagnostic:true,sample:{status:'invalid',value:null,error:'transfer timeout',pair:1,mode,metric:'tcp_8_MBps'}});
+  assert.equal(own.result(0).verdict,'diagnostic_incomplete',mode);
+  const short=fixture({scenario:'full'});
+  emit(short,{test:'tcp_integrity',verdict:'diagnostic_incomplete',phase:'performance-dll',repeat:'1',connection:{transfer:transfer.replace('/dll/',`/${mode}/`),payload_id:1,host_expected_sha256:'a'.repeat(64),host_actual_sha256:'a'.repeat(64),coverage:{host_receive:{bytes:1}}}});
+  assert.equal(short.result(0).verdict,'diagnostic_incomplete',mode);
+ }
+});
 test('natural ring corruption is evidence; injected recovery damage and ordinary errors are not',()=>{
  const natural=fixture({scenario:'full'});natural.line('INTEGRITY_PHASE_START scenario=full phase=performance-dll');natural.line('Wintun ring corruption: Send invalid entry (head=4)');
  assert.equal(natural.result(0).verdict,'recovered_rejections');assert.equal(natural.result(0).exit,0);assert.deepEqual(natural.result(0).gate,{passed:true,own_rejections:1,recovery_failures:0});

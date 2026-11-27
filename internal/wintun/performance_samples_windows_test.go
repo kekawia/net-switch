@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 )
 
 type performanceSample struct {
@@ -43,8 +44,26 @@ func newPerformanceSamples(pairs int, mode, metric string) []performanceSample {
 // so they are reported and never fail a comparison (the release gate approved
 // on 2026-11-10). The in-process reference is our own reader and writer and
 // is never excused.
-func referenceFault(s performanceSample) bool {
-	return s.Mode == "dll" && (errors.Is(s.cause, ErrCorrupt) || errors.Is(s.cause, errPayloadIntegrity))
+func referenceFault(s performanceSample) bool { return referenceCause(s.Mode, s.cause) }
+
+func referenceCause(mode string, err error) bool {
+	return mode == "dll" && (errors.Is(err, ErrCorrupt) || errors.Is(err, errPayloadIntegrity))
+}
+
+// referenceOracleFault reports whether the TCP oracle's verdict on a fixture
+// is only the signed DLL's wrong bytes, which its sample already reports. An
+// oracle that could not see every byte is never excused, in any mode.
+func referenceOracleFault(mode string, err error) bool {
+	return referenceCause(mode, err) && !errors.Is(err, errDiagnosticIncomplete)
+}
+
+// firstLine is what a reference fault's log line shows of its error. A UDP
+// client's error carries the client's whole output, whose test and result
+// lines the integrity summary would read as this run's own; the full error is
+// in the sample's JSON report.
+func firstLine(err error) string {
+	line, _, _ := strings.Cut(err.Error(), "\n")
+	return line
 }
 
 // validPairs is how many of the matched pairs a ratio needs: nine of twelve.

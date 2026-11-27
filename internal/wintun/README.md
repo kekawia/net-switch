@@ -103,6 +103,11 @@ How the nightly applies it:
   (`ERROR_INVALID_DATA`) and what it then leaves unfinished are listed as
   driver evidence under `reference_evidence` and never change a verdict. The
   reference may fall short of its share of transfers; it may not exceed it.
+  Evidence is charged to the mode its record names (its own, its sample's, or
+  its connection's transfer) before the test it was logged in, and a DLL
+  fixture's TCP oracle logs the DLL's wrong bytes at teardown instead of
+  failing the test. Night 11-25 failed two jobs as ours on DLL mismatches
+  logged in gathered samples and at teardown.
 - `TestWintunPerformance` leaves a pair out of its ratio when the DLL sample
   failed that way, and needs nine valid pairs of twelve for a ratio. The
   instrumented nightly run has no ratio to defend and only asks that every
