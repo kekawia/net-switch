@@ -568,6 +568,26 @@ func TestPerformanceReferenceFaults(t *testing.T) {
 	if r, err := pairedSampleRatios(ours, inprocess, "inprocess"); r != nil || !errors.Is(err, errPayloadIntegrity) || referenceFault(inprocess[4]) {
 		t.Fatalf("the in-process reference was excused: %v %v", r, err)
 	}
+	// The TCP oracle's teardown verdict follows the same rule (night 11-25: a
+	// DLL hash mismatch failed X64/full/7), except that blind spots never pass.
+	incomplete := fmt.Errorf("%w: capture lost", errDiagnosticIncomplete)
+	for _, c := range []struct {
+		mode    string
+		err     error
+		excused bool
+	}{
+		{"dll", mismatch, true},
+		{"dll", errors.Join(mismatch, mismatch), true},
+		{"dll", errors.Join(mismatch, incomplete), false},
+		{"dll", incomplete, false},
+		{"dll", nil, false},
+		{"ours", mismatch, false},
+		{"inprocess", mismatch, false},
+	} {
+		if got := referenceOracleFault(c.mode, c.err); got != c.excused {
+			t.Errorf("oracle %s %v: excused=%v, want %v", c.mode, c.err, got, c.excused)
+		}
+	}
 }
 
 func BenchmarkIntegrityPayloadCheck(b *testing.B) {

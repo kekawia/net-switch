@@ -16,6 +16,10 @@ const naturalPhases = new Set(['proof','capture-proof','calibration','performanc
 // library. They are reported as driver evidence and never change the verdict.
 // The in-process mode is our own reader and writer and is judged like ours.
 const reference = mode => mode==='dll';
+// Samples nested in a record (performance_samples gathers every mode's) carry
+// their own mode, which the record itself does not.
+const nestedSamples = r => [r.sample, ...Object.values(r).filter(Array.isArray).flat()]
+  .filter(s => s && typeof s==='object' && typeof s.mode==='string');
 // The lowest median instrumented/clean throughput ratio that qualifies a mode.
 export const minimumOverheadRatio = .80;
 export function ratioSpread(values) {
@@ -62,7 +66,10 @@ export class IntegritySummary {
   }
   attribution(record={}) {
     const testPath=record.test_path ?? this.currentTestPath ?? null;
-    const mode=record.mode ?? (testPath ? /\/(ours|dll|inprocess)(?:\/|$)/.exec(testPath)?.[1] : undefined);
+    // What a record says of itself (its mode, its sample's, its connection's
+    // transfer) outranks the test the stream is in.
+    const modeIn=path=>path ? /\/(ours|dll|inprocess)(?:\/|$)/.exec(path)?.[1] : undefined;
+    const mode=record.mode ?? record.sample?.mode ?? modeIn(record.connection?.transfer) ?? modeIn(testPath);
     return {mode,testPath,phase:record.phase ?? this.phase ?? null,repeat:record.repeat ?? this.repeat ?? null,
       process_id:record.process_id??null,session:record.stats?.SessionID||record.session||null};
   }
@@ -110,7 +117,9 @@ export class IntegritySummary {
     const phaseRepeat=/INTEGRITY_PHASE_START .*?\brepeat=(\d+)/.exec(line);
     if (phaseRepeat) this.repeat=phaseRepeat[1];
     if (/INTEGRITY_CALIBRATION_START/.test(line)) this.phase='calibration';
-    const running=/^\s*=== (?:RUN|NAME|CONT)\s+(\S+)/.exec(line);
+    // go test -v starts a test at column 0. An indented one is a child
+    // process's output inside a log message and never moves attribution.
+    const running=/^=== (?:RUN|NAME|CONT)\s+(\S+)/.exec(line);
     if (running) { this.currentTestPath=running[1]; this.currentTest=running[1].split('/')[0]; }
     const pos=line.indexOf('WINTUN_RESULT ');
     let r;
@@ -121,7 +130,15 @@ export class IntegritySummary {
     // Structured records carry their own test identity, even after another
     // subtest starts. DLL framing wins over the old erroneous payload wrapper.
     if (dllFraming.test(line)) this.ring({...context,mode:'dll'},1,line.trim());
-    else if (payloadFailure.test(line)) this.payload(context,line.trim());
+    else if (payloadFailure.test(line)) {
+      // A record without a mode of its own charges each failed nested sample
+      // to that sample's mode. Failure text left once those are set aside
+      // stays unattributed, which the gate treats as our own.
+      const failed=r && !this.attribution(r).mode ? nestedSamples(r).filter(s=>payloadFailure.test(String(s.error??''))) : [];
+      for (const s of failed) this.payload({...context,mode:s.mode},line.trim());
+      const rest=failed.length ? line.slice(0,pos)+JSON.stringify(r,function(key,value){ return key==='error' && failed.includes(this) ? undefined : value; }) : line;
+      if (payloadFailure.test(rest)) this.payload(context,line.trim());
+    }
     // Recovery/lifetime tests intentionally damage rings. Only natural traffic
     // paths use the raw ring error as evidence; actual payload failures above
     // remain fatal in EVERY test, including tests which inject delays/faults.
@@ -131,7 +148,9 @@ export class IntegritySummary {
     if (/INTEGRITY_JOB_COMPLETE/.test(line)) this.complete=true;
     if (/INTEGRITY_PHASE_TIMEOUT/.test(line)) { this.timeouts++; this.notes.add(line.trim()); this.timeoutEvents.push({kind:'timeout',...this.attribution(context),detail:line.trim()}); }
     if (/INTEGRITY_RUN_FAILED.*diagnostic_incomplete/.test(line)) this.incomplete++;
-    if (/--- FAIL:|INTEGRITY_PHASE_FAILED/.test(line) && this.failures.length<40) this.failures.push(line.trim());
+    // go test starts a result line with it; one inside a message or result
+    // record is quoted output, not this run's test.
+    if (/^\s*--- FAIL:|INTEGRITY_PHASE_FAILED/.test(line) && this.failures.length<40) this.failures.push(line.trim());
     if (/body did not recover:|alignment did not recover:|throughput regression tcp_8_MBps:/.test(line)) this.notes.add(line.trim());
     const start=/INTEGRITY_RUN_START scenario=(\w+) boundary=(\w+) repeat=(\d+)/.exec(line);
     if (start) {
@@ -167,7 +186,8 @@ export class IntegritySummary {
         this.capture.set(r.mode,ratioSpread(paired(r.clean,r.capture,8)));
       }
       if (r.test==='integrity_proof_sample' && r.sample?.status!=='valid') throw Error('incomplete proof transfer');
-      if (r.test==='performance_sample' && r.diagnostic && r.sample?.metric?.startsWith('tcp_') && r.sample.status!=='valid') throw Error('incomplete exposure transfer');
+      // An unfinished reference transfer is counted as its shortfall below.
+      if (r.test==='performance_sample' && r.diagnostic && r.sample?.metric?.startsWith('tcp_') && r.sample.status!=='valid' && !reference(r.sample.mode)) throw Error('incomplete exposure transfer');
       if (r.test==='integrity_pairs_complete' && r.metric?.startsWith('tcp_')) {
         const set=this.expectedPhases.get(`${r.repeat}/${r.phase}`);
         if (!set || set.has(r.metric) || r.pairs!==12) throw Error('invalid exposure pairs');
@@ -180,7 +200,12 @@ export class IntegritySummary {
         const mode=/\/(ours|dll|inprocess)\//.exec(c.transfer)?.[1];
         if (!mode) throw Error('missing connection mode');
         if (c.host_expected_sha256!==c.host_actual_sha256) this.payload({mode,test_path:c.transfer,phase:r.phase,repeat:r.repeat}, 'host hash mismatch');
-        if (c.coverage?.host_receive?.bytes!==67108864 || r.verdict!=='ok') throw Error('incomplete host coverage');
+        if (c.coverage?.host_receive?.bytes!==67108864 || r.verdict!=='ok') {
+          // A reference transfer that went wrong earns no credit and shows as
+          // its mode's shortfall; it never makes our own job incomplete.
+          if (reference(mode)) return;
+          throw Error('incomplete host coverage');
+        }
         const key=`${r.phase}/${r.repeat}/${c.transfer}/${c.payload_id}`;
         if (this.connectionIDs.has(key)) throw Error('duplicate connection record');
         this.connectionIDs.add(key);
@@ -263,21 +288,17 @@ export class IntegritySummary {
       : ownInvalid.length ? 'diagnostic_invalid' : verdictWithoutOverhead;
     // In isolated and full jobs a mode's median comes from one boundary's three
     // pairs, which a shared hosted runner's speed swings move by 10-20% on
-    // their own. Our modes' raw ratios go to the night verdict per boundary,
-    // which judges a job whose only shortfall is that median by the night's
-    // pooled pairs for the same boundary (scripts/wintun-night.mjs). Boundaries
-    // cost differently (ARM64 ingress about 0.86, others 0.93-1.0), so they are
-    // never pooled together there. A capture shortfall is never pooled.
+    // their own. Our modes' raw ratios go to the night per boundary, which
+    // reports them pooled (scripts/wintun-night.mjs); an invalid job earns no
+    // clean transfers and is only a warning there.
     const ownOverheadRatios=Object.fromEntries(chosen.flatMap(b=>modes.filter(m=>!reference(m)).map(m=>[`${b}/${m}`,this.configurations.get(`${b}/${m}`)])).filter(([,ratios])=>ratios));
-    const overheadPending=verdict==='diagnostic_invalid' && ownInvalid.every(m=>(this.capture.get(m)?.median??1)>=.95)
-      ? {invalid_modes:ownInvalid, verdict:verdictWithoutOverhead} : null;
     const guard=[...this.guards.values()].reduce((sum,g)=>({ignored_heads:sum.ignored_heads+g.ignored_heads,shifted_entries:sum.shifted_entries+g.shifted_entries,head_probes:sum.head_probes+g.head_probes}),{ignored_heads:0,shifted_entries:0,head_probes:0});
     const referenceEvidence={payload_mismatch_incidents:[...this.payloadIncidents.values()].filter(i=>reference(i.mode)).length,
       ring_rejection_incidents:this.rejections(false), missing_transfers:Object.values(referenceShortfall).reduce((n,x)=>n+x,0)};
     return {verdict, exit:['integrity_failure','recovery_failure','diagnostic_incomplete'].includes(verdict)?1:0, original_exit:code,
       gate:{passed:passing.includes(verdict), own_rejections:ownRejections, recovery_failures:recoveryFailures}, guard, reference_evidence:referenceEvidence,
       overhead:spread, qualification_scope:'per_mode', mode_results:modeResults, invalid_modes:invalidModes, minimum_ratio:minimumOverheadRatio, capture_overhead:Object.fromEntries(this.capture), capture_invalid:captureInvalid,
-      own_overhead_ratios:ownOverheadRatios, overhead_pending:overheadPending,
+      own_overhead_ratios:ownOverheadRatios,
       diagnostic_connections:this.connections, calibration_connections:this.calibrationConnections, observed_exposure_connections:observedExposure,
       clean_exposure_connections:Object.values(modeResults).reduce((n,r)=>n+r.clean_exposure_connections,0),
       integrity_evidence_kinds:evidenceKinds, payload_mismatch_incidents:this.payloadIncidents.size, ring_rejection_incidents:totalCorruptions,
@@ -295,7 +316,7 @@ export function nightRecord(result, job) {
   return {...job, verdict:result.verdict, passed:result.gate.passed, own_rejections:result.gate.own_rejections, recovery_failures:result.gate.recovery_failures,
     own_payload_mismatches:result.payload_mismatch_incidents-result.reference_evidence.payload_mismatch_incidents,
     guard:result.guard, reference_evidence:result.reference_evidence, clean_exposure_connections:result.clean_exposure_connections,
-    overhead_ratios:result.own_overhead_ratios, ...(result.overhead_pending?{overhead_pending:result.overhead_pending}:{}),
+    overhead_ratios:result.own_overhead_ratios,
     ...(detail.length?{detail}:{})};
 }
 

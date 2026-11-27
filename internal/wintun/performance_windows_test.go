@@ -171,7 +171,9 @@ func tcpEcho(t *testing.T, f *fixture) func() {
 		detach()
 		if f.integrity != nil {
 			f.integrity.report(t)
-			if err := f.integrity.err(); err != nil {
+			if err := f.integrity.err(); referenceOracleFault(f.mode, err) {
+				t.Logf("reference fault, reported and left out of the comparison: %s", firstLine(err))
+			} else if err != nil {
 				t.Error(err)
 			}
 		}
@@ -670,7 +672,7 @@ func TestWintunPerformance(t *testing.T) {
 						// denominator into a favorable throughput ratio: a fault of the
 						// signed DLL's own is logged and its pair is left out below.
 						if referenceFault(*sample) {
-							t.Logf("reference fault, reported and left out of the comparison: %v", sample.cause)
+							t.Logf("reference fault, reported and left out of the comparison: %s", firstLine(sample.cause))
 							return
 						}
 						must(t, sample.cause)

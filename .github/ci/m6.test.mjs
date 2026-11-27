@@ -77,12 +77,19 @@ test('M6 compares measured rates in the right direction and requires matched cov
     assert.throws(()=>compare(old,broken));
   }
 });
-test('a nightly release record must match the scheduled run and show complete exposure',()=>{
-  const run={id:1,head_sha:'abc',head_branch:'main',status:'completed',conclusion:'success',event:'schedule'};
-  const good={sha:'abc',run:'1',event:'schedule',passed:true,jobs:72,expected_jobs:72,reasons:[],failed_jobs:[],
-    totals:{own_payload_mismatches:0,recovery_failures:0,clean_exposure_connections:40}};
-  validateNight(run,good,72);
-  for(const patch of [{sha:'old'},{event:'workflow_dispatch'},{jobs:71},{passed:false},{totals:{...good.totals,recovery_failures:1}}]){
-    assert.throws(()=>validateNight(run,{...good,...patch},72));
+test('a nightly release record must match the scheduled run and find nothing in our own engine',()=>{
+  const run={id:1,head_sha:'abc',head_branch:'main',status:'completed',conclusion:'failure',event:'schedule'};
+  const good={sha:'abc',run:'1',event:'schedule',passed:true,jobs:72,expected_jobs:72,findings:[],failed_jobs:[],
+    totals:{own_rejections:3,own_payload_mismatches:0,recovery_failures:0,clean_exposure_connections:40},regression:{nights:14,median:2,limit:20}};
+  validateNight(run,good);
+  // Warnings never block: a failed or missing job, an overhead shortfall, or a
+  // red run whose only problems were the tests' own.
+  validateNight(run,{...good,jobs:71,warnings:['71 of 72 jobs reported a verdict','1 job: diagnostic_invalid (ARM64/isolated/14)']});
+  // Records written before 2026-11-27 are read by their totals, not their old pass flag.
+  validateNight(run,{...good,passed:false,reasons:['1 job: test_failed (X64/full/9)'],findings:undefined});
+  for(const patch of [{sha:'old'},{event:'workflow_dispatch'},{missing:true},{totals:undefined},
+    {totals:{...good.totals,recovery_failures:1}},{totals:{...good.totals,own_payload_mismatches:3}},
+    {totals:{...good.totals,own_rejections:21}},{totals:{...good.totals,clean_exposure_connections:0}}]){
+    assert.throws(()=>validateNight(run,{...good,...patch}),JSON.stringify(patch));
   }
 });
