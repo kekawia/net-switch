@@ -100,6 +100,7 @@ function Start-SignedBase([bool] $RoutingOn) {
   Invoke-SilentInstaller -ExePath $signedSetup -LogName "signed-$signedPassed-base.log" -ExtraArgs @("/OWNER=$ownerSid") | Out-Null
   Stop-Service -Name 'NetSwitch'
   Wait-Until 'base Control stops before fixture writes' 20 { (Get-Service NetSwitch).Status -eq 'Stopped' } | Out-Null
+  Assert-NoStopOverrun 'before the fixture writes'
   Write-UpdateFixtureFile 'update-fixture.json' ($script:updateConnection|ConvertTo-Json -Compress)
   # Real owner tokens and IPC are used. Hosted runners have no interactive WTS
   # desktop; this existing test-build hook supplies only session presence.

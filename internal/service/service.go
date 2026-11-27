@@ -4,11 +4,20 @@ package service
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
 const Control = "NetSwitch"
 const Engine = "NetSwitchEngine"
+
+// stopOverrunReport receives the goroutine dump of a service whose stop ran
+// past its bound, just before the process exits (service_windows.go).
+var stopOverrunReport atomic.Pointer[func(string)]
+
+// SetStopOverrunReport names where a stop overrun's goroutine dump goes. The
+// program sets it once its own log is open.
+func SetStopOverrunReport(report func(string)) { stopOverrunReport.Store(&report) }
 
 type Program func(context.Context, func()) error
 type Config struct {

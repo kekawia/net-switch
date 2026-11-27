@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 	"unsafe"
@@ -66,22 +67,31 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 	go func() { result <- h.run(ctx, func() { once.Do(func() { close(ready) }) }) }()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
+	var overrun <-chan time.Time
+	stopping := func(cause error) {
+		status = svc.Status{State: svc.StopPending, WaitHint: 30000}
+		updates <- status
+		cancel(cause)
+		if overrun == nil {
+			overrun = time.After(stopOverrun)
+		}
+	}
 	for {
 		select {
 		case <-ready:
 			ready = nil
 			status = svc.Status{State: svc.Running, Accepts: svc.AcceptStop | svc.AcceptShutdown | svc.AcceptPowerEvent | svc.AcceptSessionChange}
 			updates <- status
+		case <-overrun:
+			reportStopOverrun(h.name, h.warn)
+			h.err = fmt.Errorf("service stop overran %s", stopOverrun)
+			return true, 1
 		case request := <-requests:
 			switch request.Cmd {
 			case svc.Stop, svc.Shutdown:
-				status = svc.Status{State: svc.StopPending, WaitHint: 30000}
-				updates <- status
-				cancel(nil)
+				stopping(nil)
 			case svc.Cmd(128):
-				status = svc.Status{State: svc.StopPending, WaitHint: 30000}
-				updates <- status
-				cancel(ErrRestart)
+				stopping(ErrRestart)
 			case svc.PowerEvent:
 				publishPowerEvent(events, request.EventType)
 			case svc.SessionChange:
@@ -103,6 +113,44 @@ func (h *handler) Execute(_ []string, requests <-chan svc.ChangeRequest, updates
 		}
 	}
 }
+
+// stopOverrun bounds a stop. While stopping, Execute reports progress every
+// second, so the service manager never gives up on its own: a program that
+// never returned kept an update, an uninstall or a shutdown waiting forever.
+// Twice on 2026-11-27 CI's ARM64 installer test waited 90 minutes on Control,
+// whose own shutdown steps are bounded at 25 seconds. Past this bound the
+// goroutines go to the program's log and the process exits as a failed stop,
+// which Control and the engine already survive as a crash.
+var stopOverrun = 60 * time.Second
+
+func reportStopOverrun(name string, warn func(string, error)) {
+	message := fmt.Sprintf("service stop overran %s; exiting as a failed stop. Goroutines:\n%s", stopOverrun, goroutineDump())
+	// The program's log can be held by the very goroutine that is stuck, so it
+	// gets a few seconds and never delays the exit further.
+	if report := stopOverrunReport.Load(); report != nil {
+		written := make(chan struct{})
+		go func() { (*report)(message); close(written) }()
+		select {
+		case <-written:
+		case <-time.After(5 * time.Second):
+		}
+	}
+	if warn != nil {
+		// The event log keeps a bounded message; the program's log has it all.
+		warn(name, errors.New(message[:min(len(message), 16<<10)]))
+	}
+}
+
+// goroutineDump is every goroutine's stack, at most 8 MiB of it.
+func goroutineDump() string {
+	for size := 1 << 20; ; size *= 2 {
+		buf := make([]byte, size)
+		if n := runtime.Stack(buf, true); n < size || size >= 8<<20 {
+			return string(buf[:n])
+		}
+	}
+}
+
 func RequestRestart(ctx context.Context, name string) error {
 	s, err := open(name, windows.SERVICE_USER_DEFINED_CONTROL)
 	if err != nil {

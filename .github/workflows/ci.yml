@@ -1155,8 +1155,9 @@ jobs:
           artifact: inno
       - name: Run Windows x64 installer, 0.3.x migration, rollback, and uninstall suite
         run: ./scripts/test-windows-installer.ps1 -Arch x64
-      - name: Upload installer diagnostic logs on failure
-        if: failure()
+      # A job that hits its time limit is cancelled, not failed: keep its logs too.
+      - name: Upload installer diagnostic logs on failure or timeout
+        if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installer-logs-x64
@@ -1194,8 +1195,9 @@ jobs:
           artifact: inno
       - name: Run Windows ARM64 installer, 0.3.x migration, rollback, and uninstall suite
         run: ./scripts/test-windows-installer.ps1 -Arch arm64
-      - name: Upload installer diagnostic logs on failure
-        if: failure()
+      # A job that hits its time limit is cancelled, not failed: keep its logs too.
+      - name: Upload installer diagnostic logs on failure or timeout
+        if: failure() || cancelled()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installer-logs-arm64
