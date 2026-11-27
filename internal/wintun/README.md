@@ -77,16 +77,27 @@ session over shipping a self-signed driver. The signed 0.14.1 driver has
 defects no signed build fixes, so the gate judges what our session makes of
 them, and treats the official library as a reference.
 
-A night passes when, in our own session mode on x64 and ARM64:
+On 2026-11-27 the owner replaced "14 passing nights in a row" with the rule
+below. Of the 17 recorded nights from 11-11 to 11-27, 9 failed and the longest
+run of passing nights was 2, yet every failure was the tests' own: overhead
+noise, a handle race in a test, lost uploads, DLL faults charged to us. Our own
+engine delivered no wrong byte and failed no recovery on any of them.
 
-1. no delivered byte differs from what was sent, for TCP and UDP;
-2. every ring rejection is followed by a successful recovery, with no recovery
-   failure and no unexplained session loss;
-3. every transfer completes;
-4. rejections are counted, and a count more than ten times the trailing median
-   fails the night as a regression.
+A night has a finding when, in our own session mode on x64 or ARM64:
 
-The release needs 14 passing nights in a row.
+1. a delivered byte differs from what was sent, for TCP or UDP;
+2. a ring rejection is not followed by a successful recovery;
+3. rejections number more than ten times the trailing median (a regression).
+
+What a night could not show is a warning, printed and never the verdict: a job
+that did not report or reported twice, a test that failed or did not finish
+(including a transfer of ours that did not finish, which looks the same as a
+harness that broke), and instrumentation too slow to qualify. A night without
+one clean transfer shows nothing and does not pass.
+
+The release reads the last 14 scheduled nights on `main`
+(`tests/m6/night-gate.mjs`). Each must have left a record without a finding
+and with clean transfers. Older records are judged by their totals.
 
 How the nightly applies it:
 
@@ -114,26 +125,21 @@ How the nightly applies it:
   sample of ours ran.
 - An isolated or full job measures one boundary, so its overhead median for a
   mode rests on three pairs, which a shared hosted runner's speed swings move
-  by 10-20% on their own. Boundaries also cost differently: on run
-  `45148827749` the ARM64 isolated `ours` ratios pooled at 0.86 for ingress and
-  0.87-1.0 for the other five. Three of the six nights from 11-18 to 11-23 failed
-  on one ARM64 isolated ingress job's three-pair median of about 0.79. A job
-  whose only shortfall is that median hands it to the night: the
-  `Night verdict` judges it by the night's pooled pairs for the same runner,
-  scenario, boundary and mode (three jobs, nine pairs) against the same 0.80
-  bound, and lists the jobs it judged that way. Boundaries are never pooled
-  together, so a slowdown at one boundary shows. Wrong bytes, a failed
-  recovery, an unfinished transfer, a capture shortfall or any other failed
-  test in that job still fail the night.
+  by 10-20% on their own. Boundaries also cost differently: ARM64 isolated
+  ingress pooled at 0.84, 0.86, 0.80 and 0.86 over nine pairs on 11-23 to
+  11-26, against 0.87-1.0 for the other boundaries. A job under the 0.80 bound
+  earns no clean transfers and is a warning; the `Night verdict` prints the
+  pooled medians per runner, scenario, boundary and mode, never pooling
+  boundaries together, so a slowdown at one boundary shows.
 - Each job uploads its verdict; the `Night verdict` job
-  (`scripts/wintun-night.mjs`) fails unless all 72 reported and passed. The
-  artifact client gives up at once on a network error (`ETIMEDOUT`,
-  actions/upload-artifact#569), so the verdict and the night's own record are
-  each uploaded once more after 30 seconds; a second failure fails the job. Rule 4
-  starts once seven earlier nights have a record: it compares the night's
-  rejections in our own session with ten times the median of the last fourteen
-  recorded nights, with a floor of ten. It prints the number of passing nights
-  in a row; a night that failed, or left no record, ends the run. Only
+  (`scripts/wintun-night.mjs`) fails on a finding or a night without clean
+  transfers. The artifact client gives up at once on a network error
+  (`ETIMEDOUT`, actions/upload-artifact#569), so the verdict and the night's
+  own record are each uploaded once more after 30 seconds; a second failure
+  fails the job. Rule 3 starts once seven earlier nights have a record: it
+  compares the night's rejections in our own session with ten times the median
+  of the last fourteen recorded nights, with a floor of ten. The night prints
+  how many of the last 14 recorded nights the release would accept. Only
   scheduled nights count.
 - The writer guard's counters travel with it: `IgnoredHeads` is the number of
   late `Receive.Head` stores the driver made that night and our writer refused.

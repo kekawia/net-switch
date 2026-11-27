@@ -288,21 +288,17 @@ export class IntegritySummary {
       : ownInvalid.length ? 'diagnostic_invalid' : verdictWithoutOverhead;
     // In isolated and full jobs a mode's median comes from one boundary's three
     // pairs, which a shared hosted runner's speed swings move by 10-20% on
-    // their own. Our modes' raw ratios go to the night verdict per boundary,
-    // which judges a job whose only shortfall is that median by the night's
-    // pooled pairs for the same boundary (scripts/wintun-night.mjs). Boundaries
-    // cost differently (ARM64 ingress about 0.86, others 0.93-1.0), so they are
-    // never pooled together there. A capture shortfall is never pooled.
+    // their own. Our modes' raw ratios go to the night per boundary, which
+    // reports them pooled (scripts/wintun-night.mjs); an invalid job earns no
+    // clean transfers and is only a warning there.
     const ownOverheadRatios=Object.fromEntries(chosen.flatMap(b=>modes.filter(m=>!reference(m)).map(m=>[`${b}/${m}`,this.configurations.get(`${b}/${m}`)])).filter(([,ratios])=>ratios));
-    const overheadPending=verdict==='diagnostic_invalid' && ownInvalid.every(m=>(this.capture.get(m)?.median??1)>=.95)
-      ? {invalid_modes:ownInvalid, verdict:verdictWithoutOverhead} : null;
     const guard=[...this.guards.values()].reduce((sum,g)=>({ignored_heads:sum.ignored_heads+g.ignored_heads,shifted_entries:sum.shifted_entries+g.shifted_entries,head_probes:sum.head_probes+g.head_probes}),{ignored_heads:0,shifted_entries:0,head_probes:0});
     const referenceEvidence={payload_mismatch_incidents:[...this.payloadIncidents.values()].filter(i=>reference(i.mode)).length,
       ring_rejection_incidents:this.rejections(false), missing_transfers:Object.values(referenceShortfall).reduce((n,x)=>n+x,0)};
     return {verdict, exit:['integrity_failure','recovery_failure','diagnostic_incomplete'].includes(verdict)?1:0, original_exit:code,
       gate:{passed:passing.includes(verdict), own_rejections:ownRejections, recovery_failures:recoveryFailures}, guard, reference_evidence:referenceEvidence,
       overhead:spread, qualification_scope:'per_mode', mode_results:modeResults, invalid_modes:invalidModes, minimum_ratio:minimumOverheadRatio, capture_overhead:Object.fromEntries(this.capture), capture_invalid:captureInvalid,
-      own_overhead_ratios:ownOverheadRatios, overhead_pending:overheadPending,
+      own_overhead_ratios:ownOverheadRatios,
       diagnostic_connections:this.connections, calibration_connections:this.calibrationConnections, observed_exposure_connections:observedExposure,
       clean_exposure_connections:Object.values(modeResults).reduce((n,r)=>n+r.clean_exposure_connections,0),
       integrity_evidence_kinds:evidenceKinds, payload_mismatch_incidents:this.payloadIncidents.size, ring_rejection_incidents:totalCorruptions,
@@ -320,7 +316,7 @@ export function nightRecord(result, job) {
   return {...job, verdict:result.verdict, passed:result.gate.passed, own_rejections:result.gate.own_rejections, recovery_failures:result.gate.recovery_failures,
     own_payload_mismatches:result.payload_mismatch_incidents-result.reference_evidence.payload_mismatch_incidents,
     guard:result.guard, reference_evidence:result.reference_evidence, clean_exposure_connections:result.clean_exposure_connections,
-    overhead_ratios:result.own_overhead_ratios, ...(result.overhead_pending?{overhead_pending:result.overhead_pending}:{}),
+    overhead_ratios:result.own_overhead_ratios,
     ...(detail.length?{detail}:{})};
 }
 

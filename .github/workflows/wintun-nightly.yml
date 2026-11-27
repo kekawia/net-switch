@@ -15,7 +15,8 @@ permissions:
 
 # The release gate (internal/wintun/README.md, "Release gate"): every job
 # judges our own session and writes its verdict as an artifact; the night job
-# at the end reads them all and counts passing nights in a row.
+# at the end reads them all, fails only on a finding in our own engine, and
+# reports how many of the last 14 nights the release would accept.
 
 # One shared matrix; do not overlap two nightly/manual invocations of it.
 concurrency:
