@@ -26,6 +26,8 @@ const notes = remainder.slice(0, nextHeading === -1 ? undefined : nextHeading).t
 if (!notes) throw new Error(`CHANGELOG.md section ${version} is empty.`);
 const dist = path.join(root, 'dist');
 mkdirSync(dist, { recursive: true });
-writeFileSync(path.join(dist, 'release-notes.md'), `${notes}\n`);
+// SignPath Foundation asks for the code signing policy on every release page.
+const policy = '[Code signing policy](https://github.com/kekawia/net-switch#code-signing-policy)';
+writeFileSync(path.join(dist, 'release-notes.md'), `${notes}\n\n${policy}\n`);
 if (process.env.GITHUB_OUTPUT) appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);
 console.log(`Validated ${tag}; extracted its CHANGELOG.md notes.`);
