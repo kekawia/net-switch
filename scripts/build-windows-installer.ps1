@@ -133,6 +133,18 @@ foreach ($directory in @($goHome, $goEnv.GOPATH, $goEnv.GOTMPDIR, $goEnv.APPDATA
   else { New-Item -ItemType Directory -Path $directory | Out-Null }
 }
 
+$programs = @('netswitch.exe', 'netswitch-engine.exe', 'netswitch-worker.exe', 'netswitchctl.exe', 'netswitch-desktop.exe')
+
+# Deletes versionstamp's objects, from this build or an interrupted earlier one.
+function Remove-VersionStamps([string] $Root) {
+  foreach ($program in @(Get-ChildItem -LiteralPath (Join-Path $Root 'cmd') -Directory)) {
+    foreach ($stamp in @(Get-ChildItem -LiteralPath $program.FullName -Filter 'zz_version_windows_*.syso' -File -Force)) {
+      Assert-NoLink $stamp.FullName
+      Remove-Item -LiteralPath $stamp.FullName -Force
+    }
+  }
+}
+
 $savedEnv = @{}
 foreach ($name in $goEnv.Keys) {
   $savedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -144,6 +156,20 @@ try {
     throw "Expected Go $($goPin.version), got '$reported'."
   }
   Write-Host $reported
+
+  # Each program's name and version, for Explorer, Task Manager and code
+  # signing. The stamp tool runs on this PC, so it's built for the pinned
+  # toolchain's own amd64 (ARM64 Windows runs it emulated, like go.exe).
+  Remove-VersionStamps $repoRoot
+  $stampTool = Join-Path $goHome 'versionstamp.exe'
+  [Environment]::SetEnvironmentVariable('GOARCH', 'amd64', 'Process')
+  & $go build -C $repoRoot -trimpath -buildvcs=false -o $stampTool ./internal/winres/cmd/versionstamp
+  $stampBuild = $LASTEXITCODE
+  [Environment]::SetEnvironmentVariable('GOARCH', $goArch, 'Process')
+  if ($stampBuild -ne 0) { throw "Building the version stamp tool failed (exit $stampBuild)." }
+  $stamps = @(& $stampTool -root $repoRoot -arch $goArch -version $Version)
+  if ($LASTEXITCODE -ne 0) { throw "Writing the programs' version stamps failed (exit $LASTEXITCODE)." }
+  Write-Host "Version stamps for Net Switch $Version written to $($stamps.Count) program folders"
 
   $baseLdflags = "-s -w -buildid= -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
   $guiLdflags = "-s -w -buildid= -H=windowsgui -X github.com/kekawia/net-switch/internal/buildinfo.Version=v$Version"
@@ -164,13 +190,14 @@ try {
 
   & $go build -C $repoRoot @buildTags -trimpath -buildvcs=false -ldflags $guiLdflags -o (Join-Path $stage 'netswitch-desktop.exe') ./cmd/netswitch-desktop
   if ($LASTEXITCODE -ne 0) { throw "Building netswitch-desktop.exe failed (exit $LASTEXITCODE)." }
-  foreach ($file in @('netswitch.exe','netswitch-engine.exe','netswitch-worker.exe','netswitchctl.exe','netswitch-desktop.exe')) {
+  foreach ($file in $programs) {
     $metadata = & $go version -m (Join-Path $stage $file)
     if ($LASTEXITCODE -ne 0) { throw "Cannot inspect $file build metadata." }
     $hasFaults = ($metadata -join "`n") -match 'lifecycle_test'
     if ($hasFaults -ne [bool]$UpdateTestFixture) { throw "Unexpected update fault instrumentation in $file." }
   }
 } finally {
+  Remove-VersionStamps $repoRoot
   foreach ($name in $savedEnv.Keys) {
     [Environment]::SetEnvironmentVariable($name, $savedEnv[$name], 'Process')
   }
@@ -213,6 +240,18 @@ foreach ($binary in @(Get-SafeFiles $stage | Where-Object { $_.Extension -in @('
   Assert-PeArchitecture $binary.FullName $Arch
 }
 Assert-PeWindowless (Join-Path $stage 'netswitch-desktop.exe')
+
+# Windows reads these the way Explorer and Task Manager do, for either
+# architecture. SignPath refuses to sign a program without them.
+foreach ($file in $programs) {
+  $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $stage $file))
+  $numbers = '{0}.{1}.{2}.{3}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart
+  if ($info.ProductName -ne 'Net Switch' -or $info.ProductVersion -ne $Version -or $info.FileVersion -ne $Version -or
+      $numbers -ne "$Version.0" -or $info.OriginalFilename -ne $file -or -not $info.FileDescription) {
+    throw "$file lacks its version stamp: product '$($info.ProductName)', version '$($info.ProductVersion)', file version '$($info.FileVersion)' ($numbers), file '$($info.OriginalFilename)', description '$($info.FileDescription)'."
+  }
+  Write-Host "Verified version stamp: $file is '$($info.FileDescription)' $($info.ProductVersion)"
+}
 
 if ($Arch -eq $hostArch) {
   $ctlVer = (& (Join-Path $stage 'netswitchctl.exe') version).Trim()

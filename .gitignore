@@ -18,6 +18,8 @@ dist/
 # Net Switch 1.0 Go builds.
 /bin/
 /tests/differential/runner.exe
+# Version stamps the installer build writes and deletes (internal/winres/cmd/versionstamp).
+/cmd/*/zz_version_windows_*.syso
 
 node_modules/
 *.log
