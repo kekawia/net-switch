@@ -358,8 +358,10 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 		workers.Go(func() {
 			for r := range jobs {
 				// The race detector can slow proc scanning; the real 8 ms
-				// production deadline is measured by the acceptance gate.
-				one, done := context.WithTimeout(ctx, 100*time.Millisecond)
+				// production deadline is measured by the acceptance gate. Eight
+				// workers share GOMAXPROCS=2 in CI, so a lookup can queue behind
+				// three others: allow four lookup budgets in race builds.
+				one, done := context.WithTimeout(ctx, max(100*time.Millisecond, 4*lookupBudget))
 				owner, err := o.holders(one, r)
 				done()
 				if err != nil || owner.PID != uint32(os.Getpid()) || owner.Generation != r.generation() {
@@ -412,32 +414,11 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	beforeFDs, beforeBatches := o.batches.fds.Load(), o.batches.started.Load()
 	startedReuse := time.Now()
 	tuple := platform.Tuple{Source: source, Destination: netip.MustParseAddrPort("192.0.2.1:443")}
-	var newOwner platform.Owner
-	if raceInstrumented {
-		// Match the initial cold-scanning phase's 100 ms correctness budget
-		// under race instrumentation. Real UDPFor and every acceptance probe
-		// retain the production 8 ms budget; the normal test below uses it.
-		one, done := context.WithTimeout(ctx, 100*time.Millisecond)
-		defer done()
-		fresh, queryErr := o.query(one, unix.AF_INET, unix.IPPROTO_UDP, tuple.Source, tuple.Destination)
-		if queryErr != nil {
-			t.Fatal(queryErr)
-		}
-		row, matchErr := matchUDP(fresh, source)
-		if matchErr != nil || row.generation() == "" || row.generation() == oldCookie {
-			t.Fatalf("replacement socket query did not prove a new generation: %+v %v", row, matchErr)
-		}
-		newOwner, err = o.resolveUDP(one, row, false)
-		if err == nil && newOwner.Generation != row.generation() {
-			t.Fatalf("replacement holder generation %q differs from fresh socket %q", newOwner.Generation, row.generation())
-		}
-	} else {
-		newOwner, err = o.UDPFor(ctx, tuple)
-	}
+	newOwner, err := o.UDPFor(ctx, tuple)
 	elapsedReuse := time.Since(startedReuse)
-	// Identity keeps the production 8 ms deadline. Report the lookup time even
-	// when it expired, but don't gate on it here: the acceptance suite's
-	// lookup.p95-measured owns the latency gate.
+	// Identity keeps the lookup budget (8 ms; wider in race builds). Report the
+	// lookup time even when it expired, but don't gate on it here: the
+	// acceptance suite's lookup.p95-measured owns the latency gate.
 	unknownIdentity := newOwner.PID == 0 && newOwner.StartTime == 0 && newOwner.Path == "" && newOwner.AppID == ""
 	t.Logf("reused descriptor lookup: %s, %d scanned FDs in %d batches; race-instrumented=%t original-8ms-verdict=%t unknown-identity=%t", elapsedReuse, o.batches.fds.Load()-beforeFDs, o.batches.started.Load()-beforeBatches, raceInstrumented, err == nil && elapsedReuse <= 8*time.Millisecond, unknownIdentity)
 	// A reused descriptor must never answer with the previous holder's
@@ -448,10 +429,12 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	// Identity can miss its production deadline on a loaded runner. The engine
 	// then admits the socket's generation with an unknown identity, which is the
 	// designed outcome, not a stale identity. Only in that exact case, confirm
-	// the replacement owner once with this test's 100 ms correctness budget and
-	// log both durations, so real slowness stays visible.
+	// the replacement owner once with this test's correctness budget (100 ms, or
+	// one lookup budget in race builds) and log both durations, so real slowness
+	// stays visible.
+	confirmBudget := max(100*time.Millisecond, lookupBudget)
 	if unknownIdentity && newOwner.Generation != "" && errors.Is(err, context.DeadlineExceeded) {
-		confirmCtx, confirmDone := context.WithTimeout(ctx, 100*time.Millisecond)
+		confirmCtx, confirmDone := context.WithTimeout(ctx, confirmBudget)
 		defer confirmDone()
 		liveRows, dumpErr := diagDump(confirmCtx, unix.AF_INET, unix.IPPROTO_UDP, source)
 		if dumpErr != nil {
@@ -466,7 +449,7 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 		}
 		retryStarted := time.Now()
 		newOwner, err = o.resolveUDP(confirmCtx, live, false)
-		t.Logf("reused descriptor identity retry: %s after the production lookup took %s and left generation %s unknown; re-resolved with 100ms", time.Since(retryStarted), elapsedReuse, live.generation())
+		t.Logf("reused descriptor identity retry: %s after the lookup took %s and left generation %s unknown; re-resolved with %s", time.Since(retryStarted), elapsedReuse, live.generation(), confirmBudget)
 	}
 	if err != nil || newOwner.PID != uint32(os.Getpid()) || newOwner.Generation == oldCookie {
 		t.Fatalf("reused descriptor inherited stale identity or wasn't found: %+v %v", newOwner, err)

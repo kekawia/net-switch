@@ -399,10 +399,15 @@ func (o *Owners) query(ctx context.Context, family, protocol int, local, remote 
 	return diagQuery(ctx, family, protocol, local, remote, false, &o.queries, nil)
 }
 
-// Work stops short of 10 ms to leave room for returning, timing and policy
-// admission. The caller's earlier cancellation always wins.
+// lookupBudget is one owner lookup's budget. Work stops short of 10 ms to
+// leave room for returning, timing and policy admission; the acceptance
+// suite's lookup.p95-measured gate holds production to it. Race-instrumented
+// test builds widen it (race_linux_test.go).
+var lookupBudget = 8 * time.Millisecond
+
+// The caller's earlier cancellation always wins.
 func lookupContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, 8*time.Millisecond)
+	return context.WithTimeout(ctx, lookupBudget)
 }
 func (o *Owners) TCP(ctx context.Context, t platform.Tuple) (owner platform.Owner, err error) {
 	defer func() { o.recordError(err) }()
