@@ -429,10 +429,10 @@ func TestConcurrentColdHoldersShareDescriptorScans(t *testing.T) {
 	// Identity can miss its production deadline on a loaded runner. The engine
 	// then admits the socket's generation with an unknown identity, which is the
 	// designed outcome, not a stale identity. Only in that exact case, confirm
-	// the replacement owner once with this test's correctness budget (100 ms, or
-	// one lookup budget in race builds) and log both durations, so real slowness
-	// stays visible.
-	confirmBudget := max(100*time.Millisecond, lookupBudget)
+	// the replacement owner once with this test's correctness budget (the cold
+	// scans' 100 ms, or four lookup budgets in race builds) and log both
+	// durations, so real slowness stays visible.
+	confirmBudget := max(100*time.Millisecond, 4*lookupBudget)
 	if unknownIdentity && newOwner.Generation != "" && errors.Is(err, context.DeadlineExceeded) {
 		confirmCtx, confirmDone := context.WithTimeout(ctx, confirmBudget)
 		defer confirmDone()
