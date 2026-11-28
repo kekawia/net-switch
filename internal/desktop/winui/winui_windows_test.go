@@ -143,6 +143,54 @@ func TestTrayAndFlyoutLoopTaskbarCreated(t *testing.T) {
 	}
 }
 
+// One left click on a version 4 icon arrives as Windows 11 delivered it on
+// 2026-11-28: button down, button up, then NIN_SELECT. The flyout must toggle
+// once; toggling on both opened it and closed it again 4 ms later.
+func TestTrayClickTogglesTheFlyoutOnce(t *testing.T) {
+	loop, err := StartLoop("Net Switch test tray click")
+	if err != nil {
+		t.Fatalf("StartLoop: %v", err)
+	}
+	defer loop.Close()
+
+	var toggles atomic.Int32
+	tray, err := NewTrayIcon(loop, TrayCallbacks{
+		OnToggleFlyout: func(_, _ int32) { toggles.Add(1) },
+	})
+	if err != nil {
+		t.Fatalf("NewTrayIcon: %v", err)
+	}
+	defer tray.Close()
+
+	send := func(version4 bool, events ...uintptr) int32 {
+		t.Helper()
+		toggles.Store(0)
+		if err := loop.Do(func() error {
+			tray.version4 = version4
+			for _, ev := range events {
+				_, _ = loop.handleMessage(loop.trayHwnd, wmTrayCallback, 0, ev)
+			}
+			return nil
+		}); err != nil {
+			t.Fatalf("loop.Do: %v", err)
+		}
+		return toggles.Load()
+	}
+	for _, c := range []struct {
+		name     string
+		version4 bool
+		events   []uintptr
+	}{
+		{"mouse click, version 4", true, []uintptr{wmLButtonDown, wmLButtonUp, ninSelect}},
+		{"Enter or Space on the icon, version 4", true, []uintptr{ninKeySelect}},
+		{"mouse click without version 4", false, []uintptr{wmLButtonDown, wmLButtonUp}},
+	} {
+		if got := send(c.version4, c.events...); got != 1 {
+			t.Errorf("%s: flyout toggled %d times, want once", c.name, got)
+		}
+	}
+}
+
 func TestWebView2EndToEndAndFallback(t *testing.T) {
 	// 1. Disabled/fallback path via environment override.
 	t.Run("FallbackWhenDisabled", func(t *testing.T) {

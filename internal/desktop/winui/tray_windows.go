@@ -96,6 +96,9 @@ type TrayIcon struct {
 	added     bool
 	closed    bool
 	lastOffer *[2]string
+	// version4 is true while Explorer handles the icon as NOTIFYICON_VERSION_4,
+	// which adds NIN_SELECT and NIN_KEYSELECT to the plain mouse messages.
+	version4 bool
 }
 
 // NewTrayIcon registers the notification icon on loop's UI thread.
@@ -242,12 +245,7 @@ func (t *TrayIcon) installOrRefresh(forceAdd bool) error {
 			return nil
 		}
 		t.added = true
-		var ver notifyIconDataW
-		ver.cbSize = uint32(unsafe.Sizeof(ver))
-		ver.hWnd = t.loop.trayHwnd
-		ver.uID = trayIconID
-		ver.uVersion = notifyIconVersion4
-		_, _, _ = procShellNotifyIconW.Call(nimSetVersion, uintptr(unsafe.Pointer(&ver)))
+		t.setVersion4()
 		return nil
 	}
 	ok, _, _ := procShellNotifyIconW.Call(nimModify, uintptr(unsafe.Pointer(&nid)))
@@ -256,17 +254,24 @@ func (t *TrayIcon) installOrRefresh(forceAdd bool) error {
 		ok, _, _ = procShellNotifyIconW.Call(nimAdd, uintptr(unsafe.Pointer(&nid)))
 		if ok != 0 {
 			t.added = true
-			var ver notifyIconDataW
-			ver.cbSize = uint32(unsafe.Sizeof(ver))
-			ver.hWnd = t.loop.trayHwnd
-			ver.uID = trayIconID
-			ver.uVersion = notifyIconVersion4
-			_, _, _ = procShellNotifyIconW.Call(nimSetVersion, uintptr(unsafe.Pointer(&ver)))
+			t.setVersion4()
 		} else {
 			t.added = false
 		}
 	}
 	return nil
+}
+
+// setVersion4 asks Explorer for NOTIFYICON_VERSION_4 after every NIM_ADD, as
+// Shell_NotifyIcon requires, and records whether it took.
+func (t *TrayIcon) setVersion4() {
+	var ver notifyIconDataW
+	ver.cbSize = uint32(unsafe.Sizeof(ver))
+	ver.hWnd = t.loop.trayHwnd
+	ver.uID = trayIconID
+	ver.uVersion = notifyIconVersion4
+	ok, _, _ := procShellNotifyIconW.Call(nimSetVersion, uintptr(unsafe.Pointer(&ver)))
+	t.version4 = ok != 0
 }
 
 func (t *TrayIcon) handleTrayMsg(wParam, lParam uintptr) {
@@ -283,6 +288,14 @@ func (t *TrayIcon) handleTrayMsg(wParam, lParam uintptr) {
 	}
 	switch ev {
 	case wmLButtonUp, ninSelect, ninKeySelect:
+		// With version 4, one left click arrives as WM_LBUTTONUP and then
+		// NIN_SELECT (recorded on Windows 11, 2026-11-28). Answering both
+		// opened the flyout and closed it again 4 ms later, so version 4
+		// answers only the select notifications, as Windows Terminal does.
+		// Without version 4, Explorer sends only the mouse messages.
+		if ev == wmLButtonUp && t.version4 {
+			return
+		}
 		if t.recentlyDismissedAt(anchor) {
 			return
 		}
