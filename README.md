@@ -53,8 +53,9 @@ Get the installer for your PC from the
 Run it to install Net Switch and its bundled runtime and routing engine.
 The ARM64 tray uses .NET Framework 4.8.1, included in Windows 11 22H2 and newer.
 
-The installer isn't code-signed yet, so Windows SmartScreen may warn you about
-it. Choose **More info**, then **Run anyway**. If you'd like to check the file
+The installer isn't code-signed yet (see the
+[code signing policy](#code-signing-policy)), so Windows SmartScreen may warn
+you about it. Choose **More info**, then **Run anyway**. If you'd like to check the file
 first, each release lists its SHA-256 hashes in `SHA256SUMS.txt`, and you can
 verify it was built from this repository by GitHub Actions:
 
@@ -159,6 +160,34 @@ only network requests it makes on its own.
 See [CONTRIBUTING.md](CONTRIBUTING.md). There are no npm dependencies, and
 `node dev/demo-server.mjs` shows the window with sample data, without
 administrator rights or a second connection.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io),
+certificate by [SignPath Foundation](https://signpath.org). We've applied;
+until it's approved, the installers are unsigned.
+
+- **What's signed:** the Windows installers on the
+  [releases page](https://github.com/kekawia/net-switch/releases) and Net
+  Switch's own programs inside them. GitHub Actions builds them from this
+  repository ([release workflow](.github/workflows/release.yml)); nothing built
+  on a personal computer is signed.
+- **Team:** one maintainer, [kekawia](https://github.com/kekawia), who is the
+  committer, reviewer and approver. Pull requests from anyone else are reviewed
+  before they're merged, and every release is approved by hand before it's
+  signed.
+- **Not ours:** the installer also carries components we don't build, each
+  unmodified and listed with its license in
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), such as the Wintun driver,
+  which WireGuard LLC signs.
+- **Privacy:** no telemetry, and nothing about you or your apps is sent
+  anywhere. On its own, Net Switch only checks each line's internet with small
+  requests to Cloudflare (1.1.1.1) or Google (8.8.8.8) and asks GitHub about new
+  versions; [SECURITY.md](SECURITY.md#what-it-sends-over-the-network) says
+  exactly when and what. Those services' own policies:
+  [Cloudflare](https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/),
+  [Google](https://developers.google.com/speed/public-dns/privacy) and
+  [GitHub](https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement).
 
 ## License
 

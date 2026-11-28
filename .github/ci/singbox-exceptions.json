@@ -17,7 +17,7 @@
     },
     {
       "path": "README.md",
-      "sha256": "4df8c092caa2ea404dc16da47e833aa27f3c1398e349601a009d966913c9aac5",
+      "sha256": "386638a35e72d20a26cae05d481ae2b9e6ce62063d11eeea540956995bc6180d",
       "matches": 5,
       "category": "historical-doc",
       "reason": "Historical architecture and retirement documentation"
